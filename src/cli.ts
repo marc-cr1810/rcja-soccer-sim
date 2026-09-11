@@ -22,7 +22,11 @@ interface Args {
 }
 
 function parse(argv: string[]): Args {
-  const [command = 'serve', ...rest] = argv;
+  let command = 'serve';
+  const rest = [...argv];
+  if (rest.length > 0 && !rest[0]!.startsWith('--')) {
+    command = rest.shift()!;
+  }
   const flags = new Map<string, string>();
   for (let i = 0; i < rest.length; i++) {
     const token = rest[i]!;

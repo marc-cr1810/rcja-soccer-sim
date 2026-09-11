@@ -67,7 +67,7 @@ Teams write Python. See [python/README.md](python/README.md).
 
 ```bash
 npm run serve -- --agents          # waits for four programs
-cd python && PYTHONPATH=. python examples/play.py
+cd python && PYTHONPATH=. python3 examples/play.py
 ```
 
 The library has **no dependencies**, including its WebSocket client, because

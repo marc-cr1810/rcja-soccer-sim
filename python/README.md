@@ -34,7 +34,7 @@ Start four robots in another, and open <http://localhost:8080> to watch:
 
 ```bash
 cd python
-PYTHONPATH=. python examples/play.py
+PYTHONPATH=. python3 examples/play.py
 ```
 
 Both sides run the same two programs, so whatever happens is the robots rather
