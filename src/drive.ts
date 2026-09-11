@@ -57,7 +57,7 @@ export interface DriveSpec {
  * Rule 4.1.2 caps the robot at a 220 mm cylinder, so the wheels sit inside
  * that. 90 mm puts them just inboard of the shell.
  */
-const MOUNT_RADIUS = 90;
+export const MOUNT_RADIUS = 90;
 
 /**
  * Sizing, for a 2.5 kg Open robot (rule 4.1.1) on four omni wheels.

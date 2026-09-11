@@ -132,31 +132,28 @@ describe('a misbehaving program only hurts itself', () => {
     expect(r.slots['yellow-2']!.errors).toBe(0);
   });
 
-  /*
-   * KNOWN LIMITATION, recorded rather than asserted away.
-   *
-   * Against a team that does not move at all, the reference agent sometimes
-   * scores repeatedly into its own net - on seed 5 it managed nineteen in four
-   * minutes, while seeds 6 and 7 behave. Two causes have been found and fixed
-   * (a keeper that charged the ball from the wrong side, then one that
-   * retreated straight through it, and a striker that trusted a position
-   * estimate which silently falls back to the centre of the field). Something
-   * in this configuration still repeats.
-   *
-   * It is a fault in the reference opponent, not in the boundary or the match
-   * loop: the world, the referee and the agent host all behave correctly
-   * throughout, and it does not appear when both sides play. It is exactly
-   * what the ladder harness is for, and it is the first thing to chase next.
-   */
-  it('does not yet handle a motionless opponent gracefully', () => {
-    const agents = { ...teams() } as unknown as Record<string, Agent>;
-    agents['cyan-1'] = crasher;
-    agents['cyan-2'] = crasher;
-    const own = play(5, agents as unknown as MatchAgents, 120).score.cyan;
-    // Documenting the bug at its current size, so a fix shows up as a failure
-    // here and nobody has to remember this was ever a problem.
-    expect(own).toBeGreaterThan(5);
-  });
+  it('no longer own-goals its way through a motionless opponent', () => {
+    /*
+     * This was the worst behaviour in the agent: against a team that did not
+     * move, it put the ball in its own net nineteen times in four minutes.
+     * Three causes were found and fixed - a keeper charging the ball from the
+     * wrong side, the fix for that retreating straight through it, and a
+     * striker trusting a position estimate that silently falls back to the
+     * centre of the field - and the rolling-friction change did the rest.
+     *
+     * It is bounded now rather than solved: across five seeds the tally runs
+     * zero to five. A robot that shoves a loose ball about will sometimes shove
+     * it the wrong way, and that is football. This holds the line so it cannot
+     * quietly return to nineteen.
+     */
+    const worst = [5, 6, 7, 8, 9].map((seed) => {
+      const agents = { ...teams() } as unknown as Record<string, Agent>;
+      agents['cyan-1'] = crasher;
+      agents['cyan-2'] = crasher;
+      return play(seed, agents as unknown as MatchAgents, 120).score.cyan;
+    });
+    expect(Math.max(...worst)).toBeLessThanOrEqual(8);
+  }, 30000);
 
   it('survives a program that returns nonsense', () => {
     const junk: Agent = {
@@ -245,28 +242,36 @@ describe('the reference agent', () => {
 
   it('stands still before the whistle', () => {
     const a = new ReferenceAgent({ team: 'cyan', number: 1 });
-    const out = a.tick({ playing: false, clock: 0, lines: [] } as unknown as SensorFrame);
+    // encoders included because the yaw filter runs before the whistle check:
+    // the filters have to keep tracking while the game is stopped, or they
+    // restart cold at every kick-off.
+    const out = a.tick({
+      playing: false,
+      clock: 0,
+      lines: [],
+      encoders: [0, 0, 0, 0],
+      kickoff: { pending: false, ours: false },
+    } as unknown as SensorFrame);
     expect(out.motors.every((m) => m === 0)).toBe(true);
   });
 
-  /*
-   * KNOWN ISSUE: the skill dial does not currently make a weaker robot.
-   *
-   * `skill` slows the drive and runs the decision loop at a fraction of the
-   * rate. It used to give the full-strength robot a mild edge - +13 goals over
-   * sixteen matches. After the kick-off and localisation fixes it reversed, and
-   * the 0.35 version now wins outright: in a nine-entry ladder it finished
-   * first, ahead of the full-strength one.
-   *
-   * The reason is worth more than the dial. This agent's control law is
-   * under-damped - it reacts to a noisy 16-sector bearing every cycle and
-   * overshoots - so thinking less often is a fix rather than a handicap.
-   *
-   * The work is therefore to damp the controller, not to re-tune the dial.
-   * Until that lands, a ladder of practice opponents cannot be built by turning
-   * skill down, and this records the inversion so a fix shows up here.
-   */
-  it('is currently no better than a slowed-down version of itself', () => {
+  it('outscores a slowed-down version of itself', () => {
+    /*
+     * The skill dial was inverted for a while: the 0.35 version beat the
+     * full-strength one and topped a nine-entry ladder. The cause was not the
+     * dial but the control law - it reacted to a noisy 16-sector bearing every
+     * cycle and overshot, so thinking less often was a fix rather than a
+     * handicap.
+     *
+     * Damping the controller settled it: a derivative term on heading from the
+     * wheel encoders, a low-pass on the ball bearing, and easing off as the
+     * approach point comes up. Aggregate goal difference went from -2 to +7.
+     *
+     * Measured on aggregate over sixteen matches, not matches won. If two
+     * deliberately mismatched robots need that many meetings to separate, a
+     * league ranking cannot rest on one either - an argument for the double
+     * round robin that has nothing to do with swapping colours.
+     */
     let goalDifference = 0;
     for (let seed = 31; seed <= 46; seed++) {
       const agents = {
@@ -276,8 +281,6 @@ describe('the reference agent', () => {
       const r = new Match({ agents, halfSeconds: HALF, seed }).run();
       goalDifference += r.score.cyan - r.score.yellow;
     }
-    // Documenting the inversion, not endorsing it. Damping the controller
-    // should turn this positive and make this test fail.
-    expect(goalDifference).toBeLessThanOrEqual(0);
+    expect(goalDifference).toBeGreaterThan(0);
   }, 30000);
 });

@@ -14,7 +14,8 @@
  * to be read, argued with and beaten.
  */
 
-import { mixOmni, openDrive, wrapAngle, type DriveSpec } from './drive';
+import { MOUNT_RADIUS, mixOmni, openDrive, wrapAngle, type DriveSpec } from './drive';
+import { WHEEL_RADIUS } from './sensors';
 import { HALF_LENGTH, HALF_WIDTH, WALL_X, WALL_Z } from './field';
 import type { ActuatorFrame, SensorFrame } from './protocol';
 import type { Agent } from './agent';
@@ -129,11 +130,35 @@ class BallMemory {
   private fieldBearing = 0;
   private range = 500;
   private age = Infinity;
+  private started = false;
 
   update(frame: SensorFrame, dt: number): void {
     if (frame.ball) {
-      this.fieldBearing = wrapAngle(frame.compass.heading + frame.ball.bearing);
-      this.range = IR_REFERENCE_RANGE / Math.sqrt(Math.max(frame.ball.strength, 1e-4));
+      const measured = wrapAngle(frame.compass.heading + frame.ball.bearing);
+      const measuredRange = IR_REFERENCE_RANGE / Math.sqrt(Math.max(frame.ball.strength, 1e-4));
+      if (!this.started) {
+        this.fieldBearing = measured;
+        this.range = measuredRange;
+        this.started = true;
+      } else {
+        /*
+         * Low-pass the bearing before anything acts on it.
+         *
+         * The ring quantises to 22.5 degrees and jitters across the boundary
+         * between two sectors, so the raw reading steps back and forth by a
+         * full sector several times a second even when the ball is still. A
+         * robot that drives at it directly weaves the whole way down the field.
+         *
+         * Filtered in the FIELD frame, so turning does not smear the estimate.
+         * The time constant is short enough to track a moving ball and long
+         * enough to swallow the stepping.
+         */
+        const k = 1 - Math.exp(-dt / BEARING_TAU);
+        this.fieldBearing = wrapAngle(
+          this.fieldBearing + wrapAngle(measured - this.fieldBearing) * k,
+        );
+        this.range += (measuredRange - this.range) * (1 - Math.exp(-dt / RANGE_TAU));
+      }
       this.age = 0;
     } else {
       this.age += dt;
@@ -155,8 +180,67 @@ class BallMemory {
 
   reset(): void {
     this.age = Infinity;
+    this.started = false;
   }
 }
+
+/** Filter time constants, seconds. */
+const BEARING_TAU = 0.12;
+const RANGE_TAU = 0.2;
+
+/**
+ * Yaw rate from the wheel encoders.
+ *
+ * Differencing the compass would work and would be much noisier - 0.012 rad of
+ * noise over a 20 ms cycle is 0.6 rad/s of rubbish. The encoders are better:
+ * on a tangential four-omni drive the mean wheel speed is the robot's own
+ * rotation, and it is the only clean rate signal on the robot.
+ */
+class YawRate {
+  private last: number[] | null = null;
+  private rate = 0;
+
+  update(encoders: number[], dt: number): number {
+    if (this.last && this.last.length === encoders.length && dt > 0) {
+      let sum = 0;
+      for (let i = 0; i < encoders.length; i++) {
+        sum += (encoders[i]! - this.last[i]!) / dt;
+      }
+      const meanWheel = sum / encoders.length;
+      const omega = (meanWheel * WHEEL_RADIUS) / MOUNT_RADIUS;
+      this.rate += (omega - this.rate) * Math.min(1, dt * 20);
+    }
+    this.last = [...encoders];
+    return this.rate;
+  }
+
+  reset(): void {
+    this.last = null;
+    this.rate = 0;
+  }
+}
+
+/** Heading control: proportional, with a derivative term to stop the overshoot. */
+const SPIN_KP = 0.9;
+const SPIN_KD = 0.22;
+
+/**
+ * How close to the edge of the playing area the ball has to be before the
+ * push is steered back inwards.
+ *
+ * Taken from the lab's AI, which had the same constant for the same reason and
+ * which this agent should have copied from the start. Without it the striker
+ * aims at the goal and pushes, a shot that misses runs straight off the field,
+ * and under 5.9.1 that is a restart: 176 of them in a ten-minute match, one
+ * every three and a half seconds, which is not a game anyone would watch.
+ *
+ * Real robots do this too - a ball against a wall gets taken off it before it
+ * gets taken forward, because a push with no component away from the wall just
+ * scrapes the ball along it.
+ */
+const EDGE_MARGIN = 260;
+/** How hard a close wall bends the aim. Tuned on out-of-play counts. */
+const WALL_REPULSION = 1.4;
 
 function clamp(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, v));
@@ -208,6 +292,8 @@ export class ReferenceAgent implements Agent {
   readonly name: string;
   private readonly drive: DriveSpec;
   private readonly ball = new BallMemory();
+  private readonly yaw = new YawRate();
+  private yawRate = 0;
   private readonly role: Role;
   private readonly skill: number;
   private lastClock = 0;
@@ -223,9 +309,23 @@ export class ReferenceAgent implements Agent {
 
   reset(): void {
     this.ball.reset();
+    this.yaw.reset();
+    this.yawRate = 0;
     this.lastClock = 0;
     this.thinkHold = 0;
     this.lastCommand = { motors: [0, 0, 0, 0] };
+  }
+
+  /**
+   * Turn a heading error into a spin command.
+   *
+   * Proportional alone overshoots and rings: the chassis has real rotational
+   * inertia, so by the time the error reaches zero the robot is still turning.
+   * The derivative term is what stops it, and it is why the encoders are worth
+   * reading.
+   */
+  private spinTo(error: number): number {
+    return clamp(error * SPIN_KP - this.yawRate * SPIN_KD, -1, 1);
   }
 
   /** Which way is the opponent's goal, in field radians. */
@@ -241,6 +341,7 @@ export class ReferenceAgent implements Agent {
     const dt = Math.max(1e-3, frame.clock - this.lastClock);
     this.lastClock = frame.clock;
     this.ball.update(frame, dt);
+    this.yawRate = this.yaw.update(frame.encoders, dt);
 
     /*
      * A weaker opponent thinks less often, as well as moving more slowly.
@@ -357,7 +458,7 @@ export class ReferenceAgent implements Agent {
 
     // Everything from here is in the robot's own frame: where the ball is,
     // and the point behind it on the line towards their goal.
-    const toGoalLocal = wrapAngle(toGoal - heading);
+    const toGoalLocal = this.offTheWall(frame, wrapAngle(toGoal - heading));
     const ballX = Math.cos(seen.bearing) * seen.range;
     const ballZ = Math.sin(seen.bearing) * seen.range;
     const standoff = clamp(seen.range * 0.8, 120, 260);
@@ -369,9 +470,17 @@ export class ReferenceAgent implements Agent {
 
     // Face the goal while doing it, so the dribbler and kicker point the right
     // way when the ball arrives.
-    const spin = clamp(toGoalLocal * 0.9, -1, 1);
+    const spin = this.spinTo(toGoalLocal);
     const bearing = behind ? seen.bearing : approach;
-    const speed = (behind ? 1 : 0.85) * this.skill;
+    /*
+     * Ease off as the standoff point comes up.
+     *
+     * Full power right up to the target overshoots it, and an overshoot near
+     * the ball is how a robot ends up shoving it over the touchline. The ramp
+     * starts about a robot's length out.
+     */
+    const closing = clamp(Math.hypot(targetX, targetZ) / 300, 0.35, 1);
+    const speed = (behind ? 1 : 0.85 * closing) * this.skill;
 
     const goal = frame.camera.goals[this.opts.team === 'cyan' ? 'yellow' : 'cyan'];
     const lined = goal !== null && Math.abs(goal.bearing) < 0.2;
@@ -382,6 +491,38 @@ export class ReferenceAgent implements Agent {
       kicker: frame.ballGate.held && lined,
       say: { role: 'striker' as const, sure: me.confidence >= 1 },
     };
+  }
+
+  /**
+   * Bend a push away from any wall that is close.
+   *
+   * The first attempt at this worked off the estimated position and made the
+   * problem worse, because position is only trustworthy 42% of the time - so
+   * the steering was off for most of the match, and on for a scattered minority
+   * of cycles, which is worse than either.
+   *
+   * The robot does not need to know where it is to know a wall is 200 mm to its
+   * left. The sonars say so directly, they are in the robot's own frame already,
+   * and they are there whether or not the position solved. Each close wall
+   * pushes the aim away from itself, in proportion to how close it is.
+   */
+  private offTheWall(frame: SensorFrame, desired: number): number {
+    const beams: [number, number | null][] = [
+      [0, frame.range.front],
+      [Math.PI / 2, frame.range.left],
+      [Math.PI, frame.range.back],
+      [-Math.PI / 2, frame.range.right],
+    ];
+    let rx = Math.cos(desired);
+    let rz = Math.sin(desired);
+    for (const [angle, range] of beams) {
+      if (range === null || range > EDGE_MARGIN) continue;
+      const urgency = 1 - range / EDGE_MARGIN;
+      rx -= Math.cos(angle) * urgency * WALL_REPULSION;
+      rz -= Math.sin(angle) * urgency * WALL_REPULSION;
+    }
+    if (Math.hypot(rx, rz) < 1e-6) return desired;
+    return wrapAngle(Math.atan2(rz, rx));
   }
 
   /**
@@ -452,7 +593,7 @@ export class ReferenceAgent implements Agent {
     const distance = Math.hypot(holdX - me.x, holdZ - me.z);
     const speed = clamp(distance / 300, 0, 1) * this.skill;
     // Face up the field so a save deflects forwards rather than inwards.
-    const spin = clamp(wrapAngle(Math.atan2(0, this.attackX - me.x) - heading) * 0.9, -1, 1);
+    const spin = this.spinTo(wrapAngle(Math.atan2(0, this.attackX - me.x) - heading));
 
     return {
       motors: mixOmni(this.drive, toHold, speed, spin),

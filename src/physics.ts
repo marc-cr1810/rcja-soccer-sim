@@ -32,14 +32,27 @@ export interface Body {
 }
 
 /**
- * Velocity decay rates, per second, as v(t) = v0 * e^(-rate * t).
+ * Rolling resistance on the ball: a constant deceleration, not a decay rate.
  *
- * A ball decaying at 1.2/s coasts about v0/1.2 before stopping, so a 2400 mm/s
- * kick runs roughly the 1830 mm length of the playing area - which is about
- * what a Lightweight kicker does on carpet, and what rule 4.7.1's kicker test
- * assumes when it asks for a goal-to-goal kick that rebounds.
+ * The lab damps the ball exponentially at 1.2/s, sized so a 2400 mm/s kick
+ * crosses the field as rule 4.7.1's kicker test requires. That is right for the
+ * kick and wrong for everything else, because exponential decay makes every
+ * speed travel proportionally the same distance: a gentle 700 mm/s knock still
+ * rolls 574 mm, and it is only 610 mm from the centre of the field to the
+ * touchline. So almost every touch sent the ball out. A ten-minute match
+ * between two competent robots contained 176 restarts, one every three and a
+ * half seconds.
+ *
+ * A ball rolling on carpet does not do that. Rolling resistance is very nearly
+ * a constant force, so speed falls linearly and distance goes with v squared:
+ * hard kicks carry, gentle knocks die quickly. That is the difference between a
+ * game and a series of restarts.
+ *
+ * At 1200 mm/s^2 a full 2400 mm/s kick still runs 2400 mm, comfortably the
+ * 1930 mm goal-to-goal that 4.7.1 asks for, while that same 700 mm/s knock now
+ * travels 204 mm instead of 574 mm and stays on the field.
  */
-const BALL_DAMPING = 1.2;
+const BALL_ROLL_DECEL = 1200;
 /** Gravity in mm/s^2 for vertical ball motion (Rule 4.7 chip kicks). */
 const GRAVITY = 9810;
 /** Vertical restitution when an airborne ball lands on carpet. */
@@ -64,6 +77,31 @@ const BODY_BOUNCE = 0.35;
 /** Below this speed (mm/s) the ball is treated as stationary. */
 const REST_SPEED = 12;
 
+/**
+ * Move a body under a constant deceleration opposing its motion.
+ *
+ * Friction can only bring a body to rest, never push it backwards, so the step
+ * is clamped: a body slower than the deceleration times dt simply stops.
+ */
+export function rollingIntegrate(b: Body, dt: number, decel: number): void {
+  b.x += b.vx * dt;
+  b.z += b.vz * dt;
+  const speed = Math.hypot(b.vx, b.vz);
+  if (speed <= REST_SPEED) {
+    b.vx = 0;
+    b.vz = 0;
+    return;
+  }
+  const loss = Math.min(speed, decel * dt);
+  const scale = (speed - loss) / speed;
+  b.vx *= scale;
+  b.vz *= scale;
+  if (Math.hypot(b.vx, b.vz) < REST_SPEED) {
+    b.vx = 0;
+    b.vz = 0;
+  }
+}
+
 export function integrate(b: Body, dt: number, ratePerSecond: number): void {
   b.x += b.vx * dt;
   b.z += b.vz * dt;
@@ -77,7 +115,7 @@ export function integrate(b: Body, dt: number, ratePerSecond: number): void {
 }
 
 export function stepBall(ball: Body, dt: number): void {
-  integrate(ball, dt, BALL_DAMPING);
+  rollingIntegrate(ball, dt, BALL_ROLL_DECEL);
   if (ball.y !== undefined || ball.vy !== undefined) {
     const restY = ball.radius;
     ball.y = ball.y ?? restY;

@@ -404,7 +404,7 @@ export class CameraState {
  * under a shove, or an omni roller taking a sideways push, turns a different
  * amount from the distance the robot travelled.
  */
-const WHEEL_RADIUS = 25;
+export const WHEEL_RADIUS = 25;
 /** A 360-count encoder resolves about a hundredth of a radian. */
 const ENCODER_STEP = (2 * Math.PI) / 360;
 

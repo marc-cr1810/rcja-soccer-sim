@@ -124,22 +124,21 @@ describe('the bots push on the rules they were written for', () => {
 
 describe('balance, as currently measured', () => {
   /*
-   * These are not pass/fail criteria for the software, they are the numbers
-   * that decide whether the game is worth entering, pinned so a change to
-   * sensor noise or a referee threshold cannot move them without someone
-   * noticing.
+   * Not pass/fail criteria for the software - these are the numbers that decide
+   * whether the game is worth entering, pinned so a change to sensor noise, a
+   * referee threshold or the ball's friction cannot move them unnoticed.
    *
-   * At the time of writing the reference agent plays out around 4 goals and
-   * 12 restarts per two-minute half against itself. Both are high for RCJA
-   * Open, and bringing them down is tuning work the ladder exists to guide -
-   * so the bounds here are deliberately wide, and meant to be tightened as
-   * that work lands rather than left alone.
+   * They were deliberately wide when first written, because the game was not
+   * playable: around 17 goals and 180 restarts per ten-minute match. Replacing
+   * the ball's exponential damping with constant rolling resistance brought
+   * that to about 5 goals and 89 restarts, which is a believable RCJA Open
+   * scoreline, so they are tightened here to match.
    */
   it('measures goals and restarts per match', () => {
     const s = runLadder([reference(), reference(0.6)], { halfSeconds: 120, seed: 5 });
     expect(s.goalsPerMatch).toBeGreaterThan(0);
-    expect(s.goalsPerMatch).toBeLessThan(40);
-    expect(s.callsPerMatch['ball-out-of-play'] ?? 0).toBeLessThan(150);
+    expect(s.goalsPerMatch).toBeLessThan(12);
+    expect(s.callsPerMatch['ball-out-of-play'] ?? 0).toBeLessThan(70);
   });
 
   it('no longer spends the match taking kick-offs', () => {
