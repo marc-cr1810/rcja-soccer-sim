@@ -73,6 +73,7 @@ export interface MatchOptions {
   /** Fixes every noise stream in the match, so a result can be reproduced. */
   seed?: number;
   inclined?: boolean;
+  idealSensors?: boolean;
 }
 
 export interface MatchResult {
@@ -145,9 +146,11 @@ export class Match {
       }
       this.slots.set(robot.id, {
         id: robot.id,
-        // Mix the robot into the seed, or both robots on a team would get
-        // identical noise and look better coordinated than they are.
-        senses: new Senses(seed * 2654435761 + hash(robot.id), robot.motors.length),
+        senses: new Senses(
+          seed * 2654435761 + hash(robot.id),
+          robot.motors.length,
+          opts.idealSensors ?? false,
+        ),
         agent: new AgentSlot(
           opts.transports?.[robot.id] ?? new LocalTransport(agent!, robot.motors.length),
         ),

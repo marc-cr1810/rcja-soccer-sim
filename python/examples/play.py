@@ -29,6 +29,7 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--url", default="ws://localhost:8080/agent")
 parser.add_argument("--cyan", default="ACT-01", help="name for the cyan team")
 parser.add_argument("--yellow", default="QLD-04", help="name for the yellow team")
+parser.add_argument("--debug", action="store_true", help="stream live robot decision telemetry")
 args = parser.parse_args()
 
 #: Both sides, same two programs. Robot 1 attacks, robot 2 keeps goal - which
@@ -53,6 +54,12 @@ def stop(*_):
 signal.signal(signal.SIGINT, stop)
 signal.signal(signal.SIGTERM, stop)
 
+import os
+
+env = dict(os.environ)
+parent_str = str(HERE.parent)
+env["PYTHONPATH"] = parent_str + (os.pathsep + env["PYTHONPATH"] if "PYTHONPATH" in env else "")
+
 for script, team, number, name in LINE_UP:
     command = [
         sys.executable,
@@ -62,7 +69,9 @@ for script, team, number, name in LINE_UP:
         "--name", name,
         "--url", args.url,
     ]
-    processes.append(subprocess.Popen(command))
+    if args.debug:
+        command.append("--debug")
+    processes.append(subprocess.Popen(command, env=env))
     print(f"started {script} as {team}-{number} ({name})", file=sys.stderr)
     # A moment apart, so four connections do not race for the same seat and so
     # the log is readable when one of them fails.

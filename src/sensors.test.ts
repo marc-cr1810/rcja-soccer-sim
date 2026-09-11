@@ -31,7 +31,7 @@ describe('infrared ball seeker', () => {
 
   it('quantises the bearing to the ring, not to the truth', () => {
     // Sweep the ball around and count how many distinct bearings come back.
-    // A perfect sensor would give a different answer every time.
+    // A 24-sector sensor resolves 15-degree buckets.
     const seen = new Set<string>();
     const n = seed();
     for (let i = 0; i < 200; i++) {
@@ -39,8 +39,8 @@ describe('infrared ball seeker', () => {
       const r = readIr(at(0, 0), { x: Math.cos(a) * 400, z: Math.sin(a) * 400 }, { blockers: [] }, n);
       if (r) seen.add(r.bearing.toFixed(4));
     }
-    expect(seen.size).toBeLessThanOrEqual(16);
-    expect(seen.size).toBeGreaterThan(8);
+    expect(seen.size).toBeLessThanOrEqual(24);
+    expect(seen.size).toBeGreaterThan(12);
   });
 
   it('reads weaker the further away the ball is', () => {
@@ -169,6 +169,25 @@ describe('ultrasonics', () => {
     const near = readRange(at(600, 0, 0), seed()).front!;
     expect(near).toBeLessThan(far - 500);
   });
+
+  it('detects another robot blocking the beam', () => {
+    const clear = readRange(at(0, 0, 0), seed()).front!;
+    // Place an obstacle robot at (500, 0) directly in front of the front beam
+    const blocked = readRange(at(0, 0, 0), seed(), [{ x: 500, z: 0 }]).front!;
+    // Wall is ~1105 mm away; bumper of obstacle at 500 mm is ~280 mm away
+    expect(blocked).toBeLessThan(350);
+    expect(blocked).toBeGreaterThan(200);
+    expect(blocked).toBeLessThan(clear - 500);
+  });
+
+  it('ignores obstacles that are outside the beam or behind the robot', () => {
+    const clear = readRange(at(0, 0, 0), seed()).front!;
+    // Obstacle far off to the side (500, 400) or behind (-500, 0)
+    const withSide = readRange(at(0, 0, 0), seed(), [{ x: 500, z: 400 }]).front!;
+    const withBehind = readRange(at(0, 0, 0), seed(), [{ x: -500, z: 0 }]).front!;
+    expect(Math.abs(withSide - clear)).toBeLessThan(25);
+    expect(Math.abs(withBehind - clear)).toBeLessThan(25);
+  });
 });
 
 describe('camera', () => {
@@ -193,12 +212,22 @@ describe('camera', () => {
     expect(second.goals.yellow?.bearing).toBe(first.goals.yellow?.bearing);
   });
 
-  it('cannot see a goal behind the robot', () => {
+  it('sees goals in all directions with 360-degree FOV', () => {
     const cam = new CameraState();
     const facingCyan = at(0, 0, Math.PI);
     const r = cam.read(facingCyan, { x: 0, z: 0 }, [], seed(), true);
-    expect(r.goals.yellow).toBeNull();
+    expect(r.goals.yellow).not.toBeNull();
     expect(r.goals.cyan).not.toBeNull();
+  });
+
+  it('resolves a goal opening when the near post is inside FOV even if center is outside', () => {
+    const cam = new CameraState();
+    // Robot at (0, 0) angled at ~35 degrees (0.61 rad) off-axis from yellow goal
+    // Center point (915, 0) has bearing ~ -35 deg (outside 31 deg half-FOV)
+    // But post at (915, +225) has bearing ~ -21 deg (well inside 31 deg FOV!)
+    const pose = at(0, 0, 0.61);
+    const r = cam.read(pose, { x: 0, z: 0 }, [], seed(), true);
+    expect(r.goals.yellow).not.toBeNull();
   });
 
   it('estimates range badly enough to be worth distrusting', () => {
@@ -249,5 +278,56 @@ describe('occlusion geometry', () => {
     expect(blocks(a, b, { x: 500, z: 300 }, 110)).toBe(false);
     expect(blocks(a, b, { x: 1500, z: 0 }, 110)).toBe(false);
     expect(blocks(a, b, { x: -500, z: 0 }, 110)).toBe(false);
+  });
+});
+
+describe('ideal sensors mode', () => {
+  it('eliminates compass drift and noise', () => {
+    const c = new CompassState();
+    const n = seed();
+    for (let t = 0; t < 300; t += 1 / 50) c.step(1 / 50, n, true);
+    expect(c.drift).toBe(0);
+    expect(c.read(1.234, n, true)).toBeCloseTo(1.234, 5);
+  });
+
+  it('reports exact reflectance without line noise', () => {
+    const readings = readLines(at(0, 0), seed(), true);
+    for (const r of readings) {
+      expect(r.value).toBe(0.22); // carpet reflectance exactly
+    }
+  });
+
+  it('measures sonar distances at grazing angles without drop-out or noise', () => {
+    // 75 degrees off wall normal
+    const grazing = readRange(at(WALL_X - 200, 0, (75 * Math.PI) / 180), seed(), [], true);
+    expect(grazing.front).not.toBeNull();
+    expect(grazing.front!).toBeGreaterThan(0);
+  });
+
+  it('updates camera every tick and gives exact sightings', () => {
+    const cam = new CameraState();
+    expect(cam.step(1 / 50, true)).toBe(true);
+    const pose = at(0, 0, 0);
+    const n = seed();
+    const r = cam.read(pose, { x: 500, z: 0 }, [], n, true, true);
+    expect(r.goals.yellow?.bearing).toBeCloseTo(0, 5);
+    expect(r.goals.yellow?.range).toBeCloseTo(915, 2);
+    expect(r.goals.cyan?.bearing).toBeCloseTo(Math.PI, 4);
+    expect(r.goals.cyan?.range).toBeCloseTo(915, 2);
+    expect(r.ball?.bearing).toBeCloseTo(0, 5);
+    expect(r.ball?.range).toBeCloseTo(500, 2);
+  });
+
+  it('reports exact wheel encoder counts without quantization', () => {
+    const e = new EncoderState(1);
+    e.step([1], 1 / 50); // tiny speed: 1 / 25 / 50 = 0.0008 rad
+    expect(e.read(true)[0]).toBeGreaterThan(0);
+  });
+
+  it('reports unjittered 24-sector bearing and exact inverse-square strength', () => {
+    const r = readIr(at(0, 0), { x: 400, z: 0 }, { blockers: [], ideal: true }, seed());
+    expect(r).not.toBeNull();
+    expect(r!.bearing).toBe(0);
+    expect(r!.strength).toBeCloseTo(0.25, 4); // (200 / 400)^2 = 0.25
   });
 });

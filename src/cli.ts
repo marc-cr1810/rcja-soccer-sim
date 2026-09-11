@@ -88,14 +88,18 @@ function viewerRoot(): string | undefined {
 
 async function serve(flags: Map<string, string>): Promise<void> {
   const root = viewerRoot();
+  const idealSensors = flags.get('noisy-sensors') !== 'true';
   const server = new MatchServer({
     port: num(flags, 'port', 8080),
     viewerRoot: root,
     realtime: flags.get('fast') !== 'true',
+    viewHz: num(flags, 'view-hz', 60),
+    idealSensors,
   });
   const port = await server.listen();
 
   console.log(`\n  RCJA Soccer Simulation — match server`);
+  console.log(`  sensors:   ${idealSensors ? 'ideal (noise-free, 24 IR, 360° camera)' : 'noisy (legacy)'}`);
   console.log(`  watch at  http://localhost:${port}`);
   if (!root) {
     console.log(`  (no viewer built yet — run: npm run build:viewer)`);
@@ -130,6 +134,7 @@ async function serve(flags: Map<string, string>): Promise<void> {
       teams,
       halfSeconds,
       seed,
+      idealSensors,
     });
     console.log(
       `  full time: ${teams.cyan} ${result.score.cyan} — ${result.score.yellow} ${teams.yellow}` +
@@ -144,12 +149,14 @@ function once(flags: Map<string, string>): void {
     cyan: flags.get('home') ?? 'Cyan',
     yellow: flags.get('away') ?? flags.get('opponent') ?? 'Yellow',
   };
+  const idealSensors = flags.get('noisy-sensors') !== 'true';
   const started = Date.now();
   const match = new Match({
     agents: agentsFor(flags.get('opponent')),
     teams,
     halfSeconds: num(flags, 'half', 300),
     seed: num(flags, 'seed', 1),
+    idealSensors,
   });
   const result = match.run();
   const wall = (Date.now() - started) / 1000;

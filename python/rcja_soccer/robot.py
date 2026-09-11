@@ -116,6 +116,9 @@ class Memory:
         """What was remembered, or a default if this is the first time."""
         return self.__dict__["_store"].get(name, default)
 
+    def __contains__(self, name: str) -> bool:
+        return name in self.__dict__["_store"]
+
     def clear(self) -> None:
         self.__dict__["_store"].clear()
 

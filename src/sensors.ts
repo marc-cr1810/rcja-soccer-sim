@@ -14,6 +14,7 @@
  */
 
 import {
+  GOAL_WIDTH,
   HALF_LENGTH,
   HALF_WIDTH,
   LINE_THICKNESS,
@@ -124,7 +125,7 @@ export function blocks(
  * bearing than this have to get it by moving and comparing, which is a real
  * technique and worth having to discover.
  */
-const IR_SECTORS = 16;
+export const IR_SECTORS = 24;
 
 /**
  * Ranges beyond which the ball is lost in the noise floor. The Elekit RCJ-05
@@ -137,6 +138,7 @@ const IR_REFERENCE_RANGE = 200;
 export interface IrOptions {
   /** Other robots that might be in the way. */
   blockers: readonly { x: number; z: number }[];
+  ideal?: boolean;
 }
 
 /**
@@ -163,17 +165,24 @@ export function readIr(
 
   const exact = bearingTo(pose, ball.x, ball.z);
   const sector = (2 * Math.PI) / IR_SECTORS;
-  // Quantise, after a little jitter, so a ball sitting exactly on a sector
-  // boundary flickers between the two the way a real ring does.
-  const jittered = exact + noise.gaussian(sector * 0.12);
-  // Fold the index into 0..15 before converting back, or the sector directly
-  // behind the robot reports as both +pi and -pi and the ring appears to have
-  // one more sector than it has.
-  const index = ((Math.round(jittered / sector) % IR_SECTORS) + IR_SECTORS) % IR_SECTORS;
-  const bearing = wrapAngle(index * sector);
+  let bearing: number;
+  let strength: number;
+  const idealStrength = (IR_REFERENCE_RANGE / Math.max(range, 1)) ** 2;
 
-  const ideal = (IR_REFERENCE_RANGE / Math.max(range, 1)) ** 2;
-  const strength = clamp01(ideal * (1 + noise.gaussian(0.06)));
+  if (opts.ideal) {
+    // Clean 24-sector resolution with zero angular jitter
+    const index = ((Math.round(exact / sector) % IR_SECTORS) + IR_SECTORS) % IR_SECTORS;
+    bearing = wrapAngle(index * sector);
+    strength = clamp01(idealStrength);
+  } else {
+    // Quantise, after a little jitter, so a ball sitting exactly on a sector
+    // boundary flickers between the two the way a real ring does.
+    const jittered = exact + noise.gaussian(sector * 0.12);
+    // Fold the index into 0..IR_SECTORS-1 before converting back
+    const index = ((Math.round(jittered / sector) % IR_SECTORS) + IR_SECTORS) % IR_SECTORS;
+    bearing = wrapAngle(index * sector);
+    strength = clamp01(idealStrength * (1 + noise.gaussian(0.06)));
+  }
 
   return { bearing, strength };
 }
@@ -202,13 +211,21 @@ export class CompassState {
   drift = 0;
   private target = 0;
 
-  step(dt: number, noise: Noise): void {
+  step(dt: number, noise: Noise, ideal = false): void {
+    if (ideal) {
+      this.drift = 0;
+      this.target = 0;
+      return;
+    }
     // A slowly wandering target, so drift meanders rather than marching.
     this.target += noise.gaussian(DRIFT_RATE * 8) * dt;
     this.drift += (this.target - this.drift) * Math.min(1, dt * 0.5);
   }
 
-  read(heading: number, noise: Noise): number {
+  read(heading: number, noise: Noise, ideal = false): number {
+    if (ideal) {
+      return wrapAngle(heading);
+    }
     return wrapAngle(heading + this.drift + noise.gaussian(COMPASS_NOISE));
   }
 }
@@ -253,7 +270,7 @@ export function surfaceAt(x: number, z: number): Surface {
   return 'carpet';
 }
 
-export function readLines(pose: Pose, noise: Noise): LineReading[] {
+export function readLines(pose: Pose, noise: Noise, ideal = false): LineReading[] {
   const out: LineReading[] = [];
   for (let i = 0; i < LINE_SENSOR_COUNT; i++) {
     const bearing = wrapAngle((i * 2 * Math.PI) / LINE_SENSOR_COUNT);
@@ -264,7 +281,7 @@ export function readLines(pose: Pose, noise: Noise): LineReading[] {
     out.push({
       bearing,
       surface,
-      value: clamp01(REFLECTANCE[surface] + noise.gaussian(LINE_NOISE)),
+      value: ideal ? REFLECTANCE[surface] : clamp01(REFLECTANCE[surface] + noise.gaussian(LINE_NOISE)),
     });
   }
   return out;
@@ -307,14 +324,58 @@ function wallDistance(pose: Pose, worldAngle: number): { dist: number; incidence
   return best;
 }
 
-export function readRange(pose: Pose, noise: Noise): RangeReading {
+/** Distance from a pose to another robot cylinder along a field-frame direction. */
+function obstacleDistance(
+  pose: Pose,
+  worldAngle: number,
+  blockers: readonly { x: number; z: number }[],
+): { dist: number; incidence: number } | null {
+  const dx = Math.cos(worldAngle);
+  const dz = Math.sin(worldAngle);
+  let best: { dist: number; incidence: number } | null = null;
+  const r2 = ROBOT_RADIUS * ROBOT_RADIUS;
+
+  for (const b of blockers) {
+    const vx = b.x - pose.x;
+    const vz = b.z - pose.z;
+    const proj = vx * dx + vz * dz;
+    if (proj <= 0) continue;
+    const perp2 = vx * vx + vz * vz - proj * proj;
+    if (perp2 >= r2) continue;
+
+    const d = Math.sqrt(r2 - perp2);
+    const t = proj - d;
+    if (t <= 0) continue;
+    if (best && t >= best.dist) continue;
+
+    // Angle of incidence on the cylinder surface
+    const sinInc = Math.sqrt(perp2) / ROBOT_RADIUS;
+    const incidence = Math.asin(Math.max(-1, Math.min(1, sinInc)));
+    best = { dist: t, incidence };
+  }
+  return best;
+}
+
+export function readRange(
+  pose: Pose,
+  noise: Noise,
+  blockers: readonly { x: number; z: number }[] = [],
+  ideal = false,
+): RangeReading {
   const one = (offset: number): number | null => {
-    const hit = wallDistance(pose, wrapAngle(pose.heading + offset));
+    const angle = wrapAngle(pose.heading + offset);
+    const hitWall = wallDistance(pose, angle);
+    const hitObs = obstacleDistance(pose, angle, blockers);
+
+    let hit = hitWall;
+    if (hitObs && (!hit || hitObs.dist < hit.dist)) {
+      hit = hitObs;
+    }
     if (!hit) return null;
     const dist = hit.dist - ROBOT_RADIUS;
     if (dist > SONAR_MAX_RANGE || dist < 0) return null;
-    if (hit.incidence > SONAR_GRAZING) return null;
-    return Math.max(0, dist + noise.gaussian(SONAR_NOISE));
+    if (!ideal && hit.incidence > SONAR_GRAZING) return null;
+    return ideal ? Math.max(0, dist) : Math.max(0, dist + noise.gaussian(SONAR_NOISE));
   };
   return {
     front: one(0),
@@ -334,11 +395,11 @@ export function readRange(pose: Pose, noise: Noise): RangeReading {
  * information builds a controller that oscillates. `fresh` is there so they can
  * tell, and getting them to look at it is most of the point.
  */
-const CAMERA_FPS = 30;
-const CAMERA_FOV = (62 * Math.PI) / 180;
-const CAMERA_BEARING_NOISE = 0.02;
+export const CAMERA_FPS = 30;
+export const CAMERA_FOV = 2 * Math.PI;
+export const CAMERA_BEARING_NOISE = 0.02;
 /** Range from a monocular camera is an estimate off apparent size, and poor. */
-const CAMERA_RANGE_ERROR = 0.09;
+export const CAMERA_RANGE_ERROR = 0.09;
 
 export class CameraState {
   private sinceFrame = Infinity;
@@ -348,7 +409,11 @@ export class CameraState {
     fresh: false,
   };
 
-  step(dt: number): boolean {
+  step(dt: number, ideal = false): boolean {
+    if (ideal) {
+      this.sinceFrame = 0;
+      return true;
+    }
     this.sinceFrame += dt;
     if (this.sinceFrame >= 1 / CAMERA_FPS) {
       this.sinceFrame = 0;
@@ -363,12 +428,13 @@ export class CameraState {
     blockers: readonly { x: number; z: number }[],
     noise: Noise,
     fresh: boolean,
+    ideal = false,
   ): CameraReading {
     if (!fresh) return { ...this.last, fresh: false };
 
     const see = (tx: number, tz: number, occludable: boolean): Sighting | null => {
       const bearing = bearingTo(pose, tx, tz);
-      if (Math.abs(bearing) > CAMERA_FOV / 2) return null;
+      if (CAMERA_FOV < 2 * Math.PI && Math.abs(bearing) > CAMERA_FOV / 2) return null;
       if (occludable) {
         for (const b of blockers) {
           if (blocks(pose, { x: tx, z: tz }, b, ROBOT_RADIUS * 0.85)) return null;
@@ -376,16 +442,63 @@ export class CameraState {
       }
       const range = rangeTo(pose, tx, tz);
       return {
-        bearing: wrapAngle(bearing + noise.gaussian(CAMERA_BEARING_NOISE)),
+        bearing: wrapAngle(bearing + (ideal ? 0 : noise.gaussian(CAMERA_BEARING_NOISE))),
+        range: Math.max(0, range * (1 + (ideal ? 0 : noise.gaussian(CAMERA_RANGE_ERROR)))),
+      };
+    };
+
+    const seeGoal = (side: 'cyan' | 'yellow'): Sighting | null => {
+      const mouth = goalMouth(side);
+      const bCenter = bearingTo(pose, mouth.x, mouth.z);
+      const trueRange = rangeTo(pose, mouth.x, mouth.z);
+
+      if (ideal) {
+        return {
+          bearing: wrapAngle(bCenter),
+          range: Math.max(0, trueRange),
+        };
+      }
+
+      if (CAMERA_FOV >= 2 * Math.PI) {
+        return {
+          bearing: wrapAngle(bCenter + noise.gaussian(CAMERA_BEARING_NOISE)),
+          range: Math.max(0, trueRange * (1 + noise.gaussian(CAMERA_RANGE_ERROR))),
+        };
+      }
+
+      const halfW = GOAL_WIDTH / 2;
+      // Check whether the goal is roughly in the forward hemisphere
+      const headingToGoal = Math.atan2(mouth.z - pose.z, mouth.x - pose.x);
+      const diff = wrapAngle(headingToGoal - pose.heading);
+      if (Math.abs(diff) > Math.PI / 2 + CAMERA_FOV / 2) return null;
+
+      const bLeft = bCenter + wrapAngle(bearingTo(pose, mouth.x, mouth.z - halfW) - bCenter);
+      const bRight = bCenter + wrapAngle(bearingTo(pose, mouth.x, mouth.z + halfW) - bCenter);
+      const spanMin = Math.min(bLeft, bRight);
+      const spanMax = Math.max(bLeft, bRight);
+
+      const fovHalf = CAMERA_FOV / 2;
+      const visMin = Math.max(spanMin, -fovHalf);
+      const visMax = Math.min(spanMax, fovHalf);
+
+      if (visMin > visMax) return null;
+
+      const visBearing = (visMin + visMax) / 2;
+      // Estimate range to the visible portion of the goal opening
+      const dx = mouth.x - pose.x;
+      const beamFieldAngle = wrapAngle(pose.heading + visBearing);
+      const cosA = Math.cos(beamFieldAngle);
+      const range = Math.abs(cosA) > 1e-3 ? Math.abs(dx / cosA) : trueRange;
+
+      return {
+        bearing: wrapAngle(visBearing + noise.gaussian(CAMERA_BEARING_NOISE)),
         range: Math.max(0, range * (1 + noise.gaussian(CAMERA_RANGE_ERROR))),
       };
     };
 
-    const cyan = goalMouth('cyan');
-    const yellow = goalMouth('yellow');
     this.last = {
       // A goal is a wide target high on the wall; a robot does not hide it.
-      goals: { cyan: see(cyan.x, cyan.z, false), yellow: see(yellow.x, yellow.z, false) },
+      goals: { cyan: seeGoal('cyan'), yellow: seeGoal('yellow') },
       ball: see(ball.x, ball.z, true),
       fresh: true,
     };
@@ -421,7 +534,10 @@ export class EncoderState {
     }
   }
 
-  read(): number[] {
+  read(ideal = false): number[] {
+    if (ideal) {
+      return [...this.counts];
+    }
     return this.counts.map((c) => Math.round(c / ENCODER_STEP) * ENCODER_STEP);
   }
 }

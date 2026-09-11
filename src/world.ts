@@ -155,7 +155,7 @@ const STALL_SECONDS = 4;
  * long while robots are on it, it is not progressing. "A reasonable amount of
  * time" is the referee's, per 5.6.1.1.
  */
-const PROGRESS_WINDOW = 6;
+const PROGRESS_WINDOW = 5;
 const PROGRESS_DISTANCE = 320;
 
 /**
@@ -605,50 +605,45 @@ export class World {
     const hasYellow = contesting.some((r) => r.team === 'yellow');
     const isOpposingContest = hasCyan && hasYellow;
 
-    // Rule 5.6.1.2: Ball stuck between MULTIPLE opposing robots.
-    // If only one team is near the ball, they are in legal possession, not a scrum.
-    if (isOpposingContest) {
-      if (ballSpd < 40) {
-        this.stalledFor += dt;
-        if (this.stalledFor > STALL_SECONDS) {
-          this.stalledFor = 0;
-          if (this.autoResolve) {
-            this.callLackOfProgress();
-          } else {
-            this.emit({
-              kind: 'lack-of-progress',
-              rule: '5.6.1.2',
-              message:
-                'Ball has been stuck between opposing robots. Lack of Progress is available to the referee.',
-            });
-          }
-          return;
+    // Rule 5.6.1.2: Ball stuck between MULTIPLE opposing robots in a scrum.
+    if (isOpposingContest && ballSpd < 40) {
+      this.stalledFor += dt;
+      if (this.stalledFor > STALL_SECONDS) {
+        this.stalledFor = 0;
+        if (this.autoResolve) {
+          this.callLackOfProgress();
+        } else {
+          this.emit({
+            kind: 'lack-of-progress',
+            rule: '5.6.1.2',
+            message:
+              'Ball has been stuck between opposing robots. Lack of Progress is available to the referee.',
+          });
         }
-      } else {
-        this.stalledFor = Math.max(0, this.stalledFor - dt * 2);
-      }
-
-      // Progress window: opposing robots shoved together jiggling the ball in place
-      this.sinceProgressMark += dt;
-      if (this.sinceProgressMark >= PROGRESS_WINDOW) {
-        const moved = distance(this.ball, this.progressMark);
-        this.progressMark = { x: this.ball.x, z: this.ball.z };
-        this.sinceProgressMark = 0;
-        if (moved < PROGRESS_DISTANCE) {
-          if (this.autoResolve) this.callLackOfProgress();
-          else
-            this.emit({
-              kind: 'lack-of-progress',
-              rule: '5.6.1.2',
-              message: `Ball has not progressed in ${PROGRESS_WINDOW} seconds between opposing robots. Lack of Progress is available to the referee.`,
-            });
-          return;
-        }
+        return;
       }
     } else {
       this.stalledFor = Math.max(0, this.stalledFor - dt * 2);
-      this.sinceProgressMark = 0;
+    }
+
+    // Rule 5.6.1.1: Ball has not progressed in PROGRESS_WINDOW seconds (whether contested, pinned, or stranded)
+    this.sinceProgressMark += dt;
+    if (this.sinceProgressMark >= PROGRESS_WINDOW) {
+      const moved = distance(this.ball, this.progressMark);
       this.progressMark = { x: this.ball.x, z: this.ball.z };
+      this.sinceProgressMark = 0;
+      if (moved < PROGRESS_DISTANCE) {
+        if (this.autoResolve) {
+          this.callLackOfProgress();
+        } else {
+          this.emit({
+            kind: 'lack-of-progress',
+            rule: '5.6.1.1',
+            message: `Ball has not progressed in ${PROGRESS_WINDOW} seconds. Lack of Progress is available to the referee.`,
+          });
+        }
+        return;
+      }
     }
   }
 

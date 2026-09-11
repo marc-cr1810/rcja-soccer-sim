@@ -156,7 +156,9 @@ function updateBoard(frame: ViewFrame): void {
     ? frame.half === 1
       ? '1st half'
       : '2nd half'
-    : 'stopped';
+    : frame.clock === 0
+      ? 'pre-match'
+      : 'stopped';
 
   const last = frame.events[frame.events.length - 1];
   if (last) {

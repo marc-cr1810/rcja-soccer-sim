@@ -80,27 +80,30 @@ export class Senses {
   private readonly compass = new CompassState();
   private readonly camera = new CameraState();
   private readonly encoders: EncoderState;
+  readonly idealSensors: boolean;
 
   /**
    * @param seed  Match seed mixed with the robot's identity, so the two robots
    *              on a team do not receive identical noise and accidentally look
    *              better coordinated than they are.
    */
-  constructor(seed: number, motorCount: number) {
+  constructor(seed: number, motorCount: number, idealSensors = false) {
     this.ir = new Noise(seed ^ Stream.Ir);
     this.compassNoise = new Noise(seed ^ Stream.Compass);
     this.lineNoise = new Noise(seed ^ Stream.Lines);
     this.rangeNoise = new Noise(seed ^ Stream.Range);
     this.cameraNoise = new Noise(seed ^ Stream.Camera);
     this.encoders = new EncoderState(motorCount);
+    this.idealSensors = idealSensors;
   }
 
   read(input: SenseInput): SensorFrame {
     const { view, self, wheelSpeeds, held, messages, dt } = input;
+    const ideal = this.idealSensors;
 
-    this.compass.step(dt, this.compassNoise);
+    this.compass.step(dt, this.compassNoise, ideal);
     this.encoders.step(wheelSpeeds, dt);
-    const fresh = this.camera.step(dt);
+    const fresh = this.camera.step(dt, ideal);
 
     // Every robot but this one can get in the way of the infrared, including
     // the robot's own team mate — which is the coordination problem in a
@@ -116,12 +119,12 @@ export class Senses {
         pending: view.kickoff.pending,
         ours: view.kickoff.pending && view.kickoff.team === self.team,
       } satisfies KickoffReading,
-      ball: readIr(self, view.ball, { blockers }, this.ir),
-      compass: { heading: this.compass.read(self.heading, this.compassNoise) },
-      lines: readLines(self, this.lineNoise),
-      range: readRange(self, this.rangeNoise),
-      encoders: this.encoders.read(),
-      camera: this.camera.read(self, view.ball, blockers, this.cameraNoise, fresh),
+      ball: readIr(self, view.ball, { blockers, ideal }, this.ir),
+      compass: { heading: this.compass.read(self.heading, this.compassNoise, ideal) },
+      lines: readLines(self, this.lineNoise, ideal),
+      range: readRange(self, this.rangeNoise, blockers, ideal),
+      encoders: this.encoders.read(ideal),
+      camera: this.camera.read(self, view.ball, blockers, this.cameraNoise, fresh, ideal),
       ballGate: { held },
       messages,
     };

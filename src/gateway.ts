@@ -79,6 +79,9 @@ export class RemoteTransport implements Transport {
     private readonly socket: WebSocket,
     private readonly motorCount: number,
   ) {
+    socket.on('error', () => {
+      this.closed = true;
+    });
     socket.on('message', (data) => this.receive(String(data)));
     socket.on('close', () => {
       this.closed = true;
@@ -109,7 +112,11 @@ export class RemoteTransport implements Transport {
 
   send(frame: SensorFrame): void {
     if (this.closed || this.socket.readyState !== this.socket.OPEN) return;
-    this.socket.send(JSON.stringify({ type: 'sensors', frame } satisfies SensorMessage));
+    try {
+      this.socket.send(JSON.stringify({ type: 'sensors', frame } satisfies SensorMessage));
+    } catch {
+      this.closed = true;
+    }
   }
 
   take(): ActuatorFrame | null {
@@ -124,7 +131,11 @@ export class RemoteTransport implements Transport {
 
   close(): void {
     this.closed = true;
-    this.socket.close();
+    try {
+      this.socket.close();
+    } catch {
+      // Socket already closed
+    }
   }
 }
 

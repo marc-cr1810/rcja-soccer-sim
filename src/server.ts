@@ -27,6 +27,10 @@ export interface ServerOptions {
   viewerRoot?: string;
   /** Play at wall-clock speed, as a spectator needs. Off for a headless run. */
   realtime?: boolean;
+  /** Frame rate for broadcasting snapshots to spectators. Defaults to VIEW_HZ. */
+  viewHz?: number;
+  /** Whether sensors operate without noise/drift/latency. Defaults to true. */
+  idealSensors?: boolean;
 }
 
 const MIME: Record<string, string> = {
@@ -95,6 +99,7 @@ export class MatchServer {
 
   private join(ws: WebSocket): void {
     this.viewers.add(ws);
+    ws.on('error', () => this.viewers.delete(ws));
     ws.on('close', () => this.viewers.delete(ws));
     // A viewer that joins at half time should see the field immediately rather
     // than a blank screen until the next frame, so bring it up to date at once.
@@ -110,13 +115,25 @@ export class MatchServer {
   }
 
   private send(ws: WebSocket, message: ViewMessage): void {
-    if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(message));
+    if (ws.readyState === ws.OPEN) {
+      try {
+        ws.send(JSON.stringify(message));
+      } catch {
+        this.viewers.delete(ws);
+      }
+    }
   }
 
   private broadcast(message: ViewMessage): void {
     const text = JSON.stringify(message);
     for (const ws of this.viewers) {
-      if (ws.readyState === ws.OPEN) ws.send(text);
+      if (ws.readyState === ws.OPEN) {
+        try {
+          ws.send(text);
+        } catch {
+          this.viewers.delete(ws);
+        }
+      }
     }
   }
 
@@ -129,7 +146,10 @@ export class MatchServer {
    * cheap — a 100 Hz setInterval is not something to rely on.
    */
   async play(options: MatchOptions): Promise<MatchResult> {
-    const match = new Match(options);
+    const match = new Match({
+      idealSensors: this.opts.idealSensors ?? true,
+      ...options,
+    });
     this.current = match;
     this.broadcast({
       type: 'hello',
@@ -145,7 +165,8 @@ export class MatchServer {
     }
 
     const dt = 1 / PHYSICS_HZ;
-    const framePeriod = 1000 / VIEW_HZ;
+    const viewHz = Math.max(10, Math.min(100, this.opts.viewHz ?? VIEW_HZ));
+    const framePeriod = 1000 / viewHz;
 
     for (const half of [1, 2] as const) {
       match.world.half = half;
