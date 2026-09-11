@@ -1,0 +1,97 @@
+/* A tournament screen: high contrast, large type, nothing that needs reading twice. */
+:root {
+  --ink: #f2f5f0;
+  --dim: #8a978f;
+  --cyan: #00a6c4;
+  --yellow: #f2c500;
+  --ground: #0b120e;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--ground);
+  color: var(--ink);
+  font-family: "Archivo", "Helvetica Neue", Arial, sans-serif;
+  overflow: hidden;
+}
+
+#field { display: block; width: 100vw; height: 100vh; }
+
+.board {
+  position: fixed;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  background: rgba(8, 14, 10, 0.82);
+  border: 1px solid rgba(242, 245, 240, 0.14);
+  border-top: none;
+  border-radius: 0 0 10px 10px;
+  padding: 0.5rem 0.9rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.side { display: flex; align-items: center; gap: 0.9rem; padding: 0 1rem; }
+.side .name { font-size: 1.5rem; font-weight: 600; letter-spacing: -0.01em; }
+.side .goals { font-size: 2.9rem; font-weight: 700; line-height: 1; }
+.side.cyan .name, .side.cyan .goals { color: var(--cyan); }
+.side.yellow .name, .side.yellow .goals { color: var(--yellow); }
+
+.middle {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 0 1.4rem;
+  border-left: 1px solid rgba(242, 245, 240, 0.14);
+  border-right: 1px solid rgba(242, 245, 240, 0.14);
+}
+.middle .clock { font-size: 2.1rem; font-weight: 600; line-height: 1.05; }
+.middle .half {
+  font-size: 0.72rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+
+/* The referee's last call, big enough to read from the back. */
+.call {
+  position: fixed;
+  bottom: 2.2rem;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: min(60rem, 92vw);
+  padding: 0.7rem 1.3rem;
+  background: rgba(8, 14, 10, 0.9);
+  border: 1px solid rgba(242, 245, 240, 0.18);
+  border-left: 4px solid var(--cyan);
+  border-radius: 6px;
+  font-size: 1.15rem;
+  line-height: 1.35;
+  text-align: center;
+}
+.call .rule {
+  display: block;
+  font-size: 0.7rem;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  color: var(--dim);
+  margin-bottom: 0.2rem;
+}
+.call[data-team="yellow"] { border-left-color: var(--yellow); }
+.call[hidden] { display: none; }
+
+.status {
+  position: fixed;
+  bottom: 0.6rem;
+  right: 0.9rem;
+  font-size: 0.72rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--dim);
+}

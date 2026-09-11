@@ -17,6 +17,7 @@ import { AgentSlot, LocalTransport, type Agent } from './agent';
 import { Senses, TeamRadio, type MatchView, type SensedRobot } from './perception';
 import type { ActuatorFrame } from './protocol';
 import { wrapAngle } from './drive';
+import type { ViewEvent, ViewFrame } from './view';
 
 export const PHYSICS_HZ = 100;
 export const CONTROL_HZ = 50;
@@ -54,6 +55,8 @@ function numberOf(id: string): number {
 
 export interface MatchOptions {
   agents: MatchAgents;
+  /** Names for the scoreboard. Defaults to the colours. */
+  teams?: { cyan: string; yellow: string };
   league?: LeagueId;
   /** Seconds per half. Rule 5.2.1 says five minutes. */
   halfSeconds?: number;
@@ -104,6 +107,7 @@ export class Match {
     yellow: new TeamRadio(),
   };
   private readonly halfSeconds: number;
+  readonly teams: { cyan: string; yellow: string };
   private sinceControl = 0;
   private readonly goals: { team: TeamId; at: number }[] = [];
   private lastScore = { cyan: 0, yellow: 0 };
@@ -113,6 +117,7 @@ export class Match {
   constructor(opts: MatchOptions) {
     const league = getLeague(opts.league ?? 'open');
     this.halfSeconds = opts.halfSeconds ?? 300;
+    this.teams = opts.teams ?? { cyan: 'Cyan', yellow: 'Yellow' };
     this.world = new World({
       league,
       halfLengthSeconds: this.halfSeconds,
@@ -268,6 +273,73 @@ export class Match {
     }
   }
 
+  /**
+   * Start every program fresh, and empty the radio.
+   *
+   * Called at each kick-off so a half does not begin with the other half's
+   * state still in memory - a robot that still believes it is chasing a ball
+   * which is now on the other side of the field, or a message from before the
+   * break arriving after it.
+   */
+  resetAgents(): void {
+    for (const slot of this.slots.values()) slot.agent.reset();
+    for (const radio of Object.values(this.radios)) radio.clear();
+  }
+
+  /**
+   * The match as a spectator sees it.
+   *
+   * Built fresh each time rather than kept live, because it crosses a socket
+   * and anything shared by reference stops being true the moment the world
+   * steps again. Only the last few referee calls are included: a viewer needs
+   * a banner, not a log, and the whole event list would be most of the frame.
+   */
+  snapshot(): ViewFrame {
+    const events: ViewEvent[] = this.world.events.slice(-4).map((e) => ({
+      kind: e.kind,
+      rule: e.rule,
+      message: e.message,
+      at: e.at,
+      team: e.team,
+    }));
+    return {
+      clock: this.world.clock,
+      half: this.world.half,
+      running: this.world.running,
+      score: { ...this.world.score },
+      ball: {
+        x: this.world.ball.x,
+        z: this.world.ball.z,
+        y: this.world.ball.y,
+        radius: this.world.ball.radius,
+      },
+      robots: this.world.robots.map((r) => ({
+        id: r.id,
+        team: r.team,
+        x: r.x,
+        z: r.z,
+        heading: r.heading,
+        radius: r.radius,
+        removed: r.removed,
+        isGoalie: r.isGoalie,
+      })),
+      commsEnabled: this.world.commsEnabled,
+      commsActivity: { ...this.world.commsActivity },
+      events,
+      teams: this.teams,
+    };
+  }
+
+  /** The league in play, sent once when a viewer joins. */
+  get league() {
+    return this.world.config.league;
+  }
+
+  /** Seconds in a half, for the clock on the scoreboard. */
+  get halfLength(): number {
+    return this.halfSeconds;
+  }
+
   /** Play both halves and hand back the result. */
   run(): MatchResult {
     const dt = 1 / PHYSICS_HZ;
@@ -277,8 +349,7 @@ export class Match {
       // second, and sides swap. Swapping sides is the reason every pairing is
       // played twice in a tournament rather than trusting one match.
       this.world.kickOff(half === 1 ? 'cyan' : 'yellow');
-      for (const slot of this.slots.values()) slot.agent.reset();
-      for (const radio of Object.values(this.radios)) radio.clear();
+      this.resetAgents();
 
       this.world.running = true;
       const until = this.world.clock + this.halfSeconds;

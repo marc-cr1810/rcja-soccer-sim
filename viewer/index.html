@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RCJA Soccer Simulation</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <canvas id="field"></canvas>
+
+    <!-- Sized for the back of a hall, not for a desk. -->
+    <div id="board" class="board">
+      <div class="side cyan">
+        <span class="name" id="cyan-name">Cyan</span>
+        <span class="goals" id="cyan-score">0</span>
+      </div>
+      <div class="middle">
+        <span class="clock" id="clock">0:00</span>
+        <span class="half" id="half">1st half</span>
+      </div>
+      <div class="side yellow">
+        <span class="goals" id="yellow-score">0</span>
+        <span class="name" id="yellow-name">Yellow</span>
+      </div>
+    </div>
+
+    <div id="call" class="call" hidden></div>
+    <div id="status" class="status">connecting…</div>
+
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
