@@ -158,6 +158,26 @@ const STALL_SECONDS = 4;
 const PROGRESS_WINDOW = 6;
 const PROGRESS_DISTANCE = 320;
 
+/**
+ * Rule 5.6.1.1: no robot has any chance of locating the ball.
+ *
+ * The case that forced this was a ball that rolled into the goal and stopped
+ * short of the back wall. Not a goal - 5.5.1 wants the back wall struck - and
+ * not out of play either, because the out-of-play test exempts the goal mouth
+ * so that a ball on its way in is not called out before it can score. Nothing
+ * resolved it and nothing could: 5.5.2 notes that robots are built so the
+ * crossbar keeps them out of the goal, so no robot can ever reach it. The
+ * match simply stopped being a match.
+ *
+ * Three seconds is enough to be sure a ball that entered the goal has finished
+ * rolling. In open field the ball has to be beyond anyone's reach and staying
+ * that way for longer, because there a robot might still be on its way.
+ */
+const UNREACHABLE_IN_GOAL_SECONDS = 3;
+const UNREACHABLE_SECONDS = 8;
+/** Edge-to-edge gap beyond which nobody is about to arrive. */
+const UNREACHABLE_DISTANCE = 400;
+
 /** Robot mass in grams, by league weight cap (rule 4.1.1). */
 function robotMass(league: League): number {
   return league.maxWeightKg * 1000;
@@ -194,6 +214,8 @@ export class World {
 
   /** Seconds the ball has been effectively stationary and contested (5.6.1.2). */
   private stalledFor = 0;
+  /** Seconds the ball has been at rest with nobody able to get to it (5.6.1.1). */
+  private unreachableFor = 0;
   /** Where the ball was PROGRESS_WINDOW ago, for the lack-of-progress test. */
   private progressMark: Point = { x: 0, z: 0 };
   private sinceProgressMark = 0;
@@ -402,6 +424,7 @@ export class World {
     const hit = collideWithPerimeter(this.ball, goalBound);
 
     this.detectGoal(hit);
+    this.detectUnreachable(dt);
     this.detectBallOutOfPlay();
     this.detectIllegalKickOff();
     this.detectStall(dt);
@@ -503,6 +526,56 @@ export class World {
       rule: '5.9.2',
       message: 'Ball out of play. Moved to the nearest neutral point.',
     });
+  }
+
+  /**
+   * Rule 5.6.1.1: the ball is somewhere no robot is going to get to.
+   *
+   * Deliberately separate from the scrum test in `detectStall`, which is
+   * 5.6.1.2 and is about a ball surrounded by robots. This is the opposite
+   * shape: a ball nobody is near, and nobody is coming for.
+   */
+  private detectUnreachable(dt: number): void {
+    if (!this.running || this.kickOffPending || speed(this.ball) > 40) {
+      this.unreachableFor = 0;
+      return;
+    }
+
+    // Inside the goal mouth and past the goal line. The crossbar keeps robots
+    // out, so this is not a matter of waiting longer - it will never be
+    // reached, and the only question is how long to be sure it has stopped.
+    const inGoal =
+      Math.abs(this.ball.x) > HALF_LENGTH && withinGoalMouth(this.ball.z, this.ball.radius);
+
+    let nearest = Infinity;
+    for (const robot of this.active()) {
+      nearest = Math.min(nearest, distance(robot, this.ball) - robot.radius - this.ball.radius);
+    }
+
+    if (!inGoal && nearest < UNREACHABLE_DISTANCE) {
+      this.unreachableFor = 0;
+      return;
+    }
+
+    this.unreachableFor += dt;
+    const limit = inGoal ? UNREACHABLE_IN_GOAL_SECONDS : UNREACHABLE_SECONDS;
+    if (this.unreachableFor < limit) return;
+    this.unreachableFor = 0;
+
+    const reason = inGoal
+      ? 'Ball is in the goal without striking the back wall, and no robot can reach it past the crossbar.'
+      : 'No robot has any chance of locating the ball.';
+
+    if (this.autoResolve) {
+      // 5.6.2: nearest neutral point, and the centre if it happens again.
+      this.callLackOfProgress({ rule: '5.6.1.1', reason });
+    } else {
+      this.emit({
+        kind: 'lack-of-progress',
+        rule: '5.6.1.1',
+        message: `${reason} Lack of Progress is available to the referee.`,
+      });
+    }
   }
 
   /**
@@ -941,20 +1014,26 @@ export class World {
   }
 
   /** Rule 5.6.2: first call to the nearest neutral point, thereafter the centre. */
-  callLackOfProgress(): void {
+  /**
+   * @param because  Why it was called, as the rule that was actually broken
+   *   and a sentence a spectator can read. 5.6.2 is only the remedy, and a
+   *   screen that says "Lack of Progress. Ball moved." tells the hall nothing
+   *   about what it just watched.
+   */
+  callLackOfProgress(because?: { rule: string; reason: string }): void {
     this.lackOfProgressCount += 1;
-    const target =
-      this.lackOfProgressCount > 1
-        ? { x: 0, z: 0 }
-        : nearestNeutralPoint({ x: this.ball.x, z: this.ball.z }, this.occupiedNeutralPoints());
+    const again = this.lackOfProgressCount > 1;
+    const target = again
+      ? { x: 0, z: 0 }
+      : nearestNeutralPoint({ x: this.ball.x, z: this.ball.z }, this.occupiedNeutralPoints());
     this.placeBall(target);
+    const moved = again
+      ? 'Ball moved to the centre of the field.'
+      : 'Ball moved to the nearest neutral point.';
     this.emit({
       kind: 'lack-of-progress',
-      rule: '5.6.2',
-      message:
-        this.lackOfProgressCount > 1
-          ? 'Lack of Progress again. Ball moved to the centre of the field.'
-          : 'Lack of Progress. Ball moved to the nearest neutral point.',
+      rule: because?.rule ?? '5.6.2',
+      message: because ? `${because.reason} ${moved}` : `Lack of Progress. ${moved}`,
     });
   }
 

@@ -255,32 +255,35 @@ describe('the reference agent', () => {
     expect(out.motors.every((m) => m === 0)).toBe(true);
   });
 
-  it('outscores a slowed-down version of itself', () => {
+  it('beats a slowed-down copy of itself, by more the slower it is', () => {
     /*
-     * The skill dial was inverted for a while: the 0.35 version beat the
-     * full-strength one and topped a nine-entry ladder. The cause was not the
-     * dial but the control law - it reacted to a noisy 16-sector bearing every
-     * cycle and overshot, so thinking less often was a fix rather than a
-     * handicap.
+     * This is the damping check, and only incidentally a check on the dial.
      *
-     * Damping the controller settled it: a derivative term on heading from the
-     * wheel encoders, a low-pass on the ball bearing, and easing off as the
-     * approach point comes up. Aggregate goal difference went from -2 to +7.
+     * If thinking less often makes the robot better, its controller is
+     * over-reacting - and for a while it did: a 0.6-rate copy beat the
+     * full-rate one by 17 goals over 24 matches, which is what sent me back to
+     * the filter and the derivative term. With those raised it reads
+     * +14 / +27 / +54 as the copy is slowed to 0.6, 0.35 and 0.2, which is
+     * what a working skill axis looks like.
      *
-     * Measured on aggregate over sixteen matches, not matches won. If two
-     * deliberately mismatched robots need that many meetings to separate, a
-     * league ranking cannot rest on one either - an argument for the double
-     * round robin that has nothing to do with swapping colours.
+     * Monotonic matters more than any single number. A dial that is better in
+     * the middle is not a dial, and a ladder of practice opponents cannot be
+     * built by turning it down.
      */
-    let goalDifference = 0;
-    for (let seed = 31; seed <= 46; seed++) {
-      const agents = {
-        ...referenceTeam('cyan', 1),
-        ...referenceTeam('yellow', 0.35),
-      } as unknown as MatchAgents;
-      const r = new Match({ agents, halfSeconds: HALF, seed }).run();
-      goalDifference += r.score.cyan - r.score.yellow;
-    }
-    expect(goalDifference).toBeGreaterThan(0);
-  }, 30000);
+    const differences = [0.6, 0.35, 0.2].map((skill) => {
+      let goalDifference = 0;
+      for (let seed = 31; seed < 55; seed++) {
+        const agents = {
+          ...referenceTeam('cyan', 1),
+          ...referenceTeam('yellow', skill),
+        } as unknown as MatchAgents;
+        const r = new Match({ agents, halfSeconds: HALF, seed }).run();
+        goalDifference += r.score.cyan - r.score.yellow;
+      }
+      return goalDifference;
+    });
+
+    for (const difference of differences) expect(difference).toBeGreaterThan(0);
+    expect(differences[2]!).toBeGreaterThan(differences[0]!);
+  }, 120000);
 });

@@ -19,6 +19,7 @@ import { WebSocketServer, type WebSocket } from 'ws';
 
 import { Match, PHYSICS_HZ, type MatchOptions, type MatchResult } from './match';
 import { VIEW_HZ, type ViewMessage } from './view';
+import { AGENT_PATH, AgentGateway } from './gateway';
 
 export interface ServerOptions {
   port?: number;
@@ -41,6 +42,8 @@ export class MatchServer {
   private readonly http = createServer((req, res) => this.serve(req, res));
   private readonly wss = new WebSocketServer({ noServer: true });
   private readonly viewers = new Set<WebSocket>();
+  /** Where robot programs connect, on the same port as the viewers. */
+  readonly agents = new AgentGateway();
   private current: Match | null = null;
   private readonly viewerRoot: string | null;
   private readonly realtime: boolean;
@@ -50,7 +53,13 @@ export class MatchServer {
     this.realtime = opts.realtime ?? true;
 
     this.http.on('upgrade', (req, socket, head) => {
-      this.wss.handleUpgrade(req, socket, head, (ws) => this.join(ws));
+      // One port for both, split by path: a venue has enough to configure
+      // without a second hole in a firewall for the robots.
+      const agent = (req.url ?? '/').split('?')[0] === AGENT_PATH;
+      this.wss.handleUpgrade(req, socket, head, (ws) => {
+        if (agent) this.agents.accept(ws);
+        else this.join(ws);
+      });
     });
   }
 
@@ -72,6 +81,7 @@ export class MatchServer {
   }
 
   async close(): Promise<void> {
+    this.agents.closeAll();
     for (const ws of this.viewers) ws.close();
     this.viewers.clear();
     await new Promise<void>((ok) => this.wss.close(() => ok()));

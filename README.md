@@ -55,9 +55,24 @@ npm run serve            # then open http://localhost:8080
 | `src/bots.ts` | **New.** Deliberately poor robots, for testing the referee. |
 | `src/ladder.ts` | **New.** Every entry against every other, both ways round. |
 | `src/server.ts` | **New.** The match server: runs matches, streams them. |
+| `src/gateway.ts` | **New.** Where robot programs connect, on the same port. |
 | `viewer/` | **New.** The spectator client, using the lab's renderer. |
+| `python/` | **New.** The client library teams write against, and examples. |
 
-`npm test` runs 167 tests.
+`npm test` runs 177 tests.
+
+### Python robots
+
+Teams write Python. See [python/README.md](python/README.md).
+
+```bash
+npm run serve -- --agents          # waits for four programs
+cd python && PYTHONPATH=. python examples/play.py
+```
+
+The library has **no dependencies**, including its WebSocket client, because
+the schools this league exists to reach are the ones where pip is behind a
+proxy or offline, and a dependency is a reason a team cannot enter.
 
 ### Watching a match
 
@@ -142,13 +157,11 @@ match this took goals from 17.5 to 4.8 and ball-out-of-play from 183 to 89.
 
 ## Next
 
-1. Load submitted programs, so a match is between two teams rather than two
-   copies of the reference agent.
-2. The Python client library, and Pyodide in the browser for teams who cannot
-   install it.
-3. A referee console: start, pause, resume, and the calls `World` already has
+1. Pyodide in the browser, for teams who cannot install Python at all.
+2. A referee console: start, pause, resume, and the calls `World` already has
    methods for.
-4. Tournament running — a draw, a table, and results that persist.
+3. Tournament running — a draw, a table, and results that persist.
+4. Submission: a team folder, pushed to a venue server and validated on arrival.
 
 Known and recorded as tests rather than hidden: the reference agent still scores
 the occasional own goal against a motionless opponent (0–5 a match, down from

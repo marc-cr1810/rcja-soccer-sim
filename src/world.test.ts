@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { World } from './world';
 import { getLeague } from './leagues';
-import { GOAL_BACK_X, HALF_LENGTH, HALF_WIDTH, PENALTY_DEPTH } from './field';
+import {
+  GOAL_BACK_X,
+  GOAL_MOUTH_X,
+  HALF_LENGTH,
+  HALF_WIDTH,
+  PENALTY_DEPTH,
+} from './field';
 import { distance } from './physics';
 
 const world = (leagueId: Parameters<typeof getLeague>[0], inclined = false) =>
@@ -740,5 +746,95 @@ describe('robots stay on the table', () => {
       expect(Math.abs(r.z)).toBeLessThan(1000);
       expect(Number.isFinite(r.x)).toBe(true);
     }
+  });
+});
+
+describe('lack of progress 5.6.1.1: nobody can get to the ball', () => {
+  /*
+   * The case that prompted this: a ball rolled into the goal and stopped short
+   * of the back wall.
+   *
+   * Not a goal, because 5.5.1 wants the back wall struck. Not out of play
+   * either, because detectBallOutOfPlay exempts the goal mouth so a ball on its
+   * way in is not called out before it can score. And unreachable forever:
+   * 5.5.2 notes robots are built so the crossbar keeps them out of the goal.
+   * Nothing resolved it and nothing could, so the match stopped being a match.
+   *
+   * 5.6.1.1 is the rule that names it - "no robot has any chance of locating
+   * the ball" - and it had not been implemented at all. Only 5.6.1.2, the
+   * scrum, had.
+   */
+  it('frees a ball parked inside the goal', () => {
+    const w = world('open');
+    w.running = true;
+    w.placeBall({ x: GOAL_BACK_X - 30, z: 0 });
+    w.ball.vx = 0;
+    w.ball.vz = 0;
+
+    for (let t = 0; t < 6; t += 1 / 100) w.step(1 / 100);
+
+    const call = w.events.find((e) => e.rule === '5.6.1.1');
+    expect(call).toBeDefined();
+    expect(call!.message).toContain('crossbar');
+    // And it is actually back on the field, not just complained about.
+    expect(Math.abs(w.ball.x)).toBeLessThan(HALF_LENGTH);
+  });
+
+  it('does not award a goal for a ball that stopped short of the back wall', () => {
+    const w = world('open');
+    w.running = true;
+    w.placeBall({ x: GOAL_MOUTH_X + 20, z: 0 });
+    for (let t = 0; t < 6; t += 1 / 100) w.step(1 / 100);
+    expect(w.score.cyan + w.score.yellow).toBe(0);
+  });
+
+  it('still scores when the ball does reach the back wall', () => {
+    const w = world('open');
+    w.running = true;
+    w.placeBall({ x: HALF_LENGTH - 50, z: 0 });
+    w.ball.vx = 2000;
+    for (let t = 0; t < 3; t += 1 / 100) w.step(1 / 100);
+    expect(w.events.some((e) => e.kind === 'goal' && e.rule === '5.5.1')).toBe(true);
+  });
+
+  it('frees a ball nobody is anywhere near', () => {
+    const w = world('open');
+    w.running = true;
+    w.placeBall({ x: 300, z: 400 });
+    const [c1, c2, y1, y2] = w.robots;
+    c1!.x = -800; c1!.z = -500;
+    c2!.x = -800; c2!.z = 500;
+    y1!.x = 800; y1!.z = -500;
+    y2!.x = 850; y2!.z = 500;
+
+    for (let t = 0; t < 12; t += 1 / 100) w.step(1 / 100);
+    expect(w.events.some((e) => e.rule === '5.6.1.1')).toBe(true);
+  });
+
+  it('leaves a ball alone while a robot has it', () => {
+    // One robot on the ball is possession, not a stall, and calling it would
+    // take the ball off a team that had earned it.
+    const w = world('open');
+    w.running = true;
+    w.placeBall({ x: 0, z: 0 });
+    const [c1] = w.robots;
+    c1!.x = -135;
+    c1!.z = 0;
+    for (let t = 0; t < 12; t += 1 / 100) w.step(1 / 100);
+    expect(w.events.some((e) => e.rule === '5.6.1.1')).toBe(false);
+  });
+
+  it('leaves a moving ball alone', () => {
+    // A ball rolling across an empty field is in play, however alone it is.
+    const w = world('open');
+    w.running = true;
+    w.placeBall({ x: -700, z: 0 });
+    const [c1, c2, y1, y2] = w.robots;
+    for (const r of [c1, c2, y1, y2]) { r!.x = 850; r!.z = 550; }
+    for (let t = 0; t < 4; t += 1 / 100) {
+      w.ball.vx = 300;
+      w.step(1 / 100);
+    }
+    expect(w.events.some((e) => e.rule === '5.6.1.1')).toBe(false);
   });
 });

@@ -99,18 +99,30 @@ async function serve(flags: Map<string, string>): Promise<void> {
   console.log(`  ctrl-c to stop\n`);
 
   const halfSeconds = num(flags, 'half', 300);
+  const waitForAgents = flags.get('agents') === 'true';
   const teams = {
     cyan: flags.get('home') ?? 'Cyan',
     yellow: flags.get('away') ?? flags.get('opponent') ?? 'Yellow',
   };
 
+  if (waitForAgents) {
+    console.log(`  robots connect to  ws://localhost:${port}/agent`);
+    console.log(`  waiting for all four…\n`);
+  }
+
   // Keep playing. A screen in a hall should never be showing nothing, and an
   // organiser should not have to restart anything between matches.
   let seed = num(flags, 'seed', 1);
   for (;;) {
+    if (waitForAgents) {
+      await server.agents.whenReady();
+      // Whoever connected gets to say who they are; the scoreboard is theirs.
+      Object.assign(teams, server.agents.teamNames());
+    }
     console.log(`  kick-off: ${teams.cyan} v ${teams.yellow}  (seed ${seed})`);
     const result = await server.play({
       agents: agentsFor(flags.get('opponent')),
+      transports: waitForAgents ? server.agents.transports() : undefined,
       teams,
       halfSeconds,
       seed,
@@ -183,12 +195,15 @@ function usage(): void {
   console.log(`
   rcja-soccer-sim
 
-    serve     run the match server and keep playing matches   [--port --half --home --away --seed --opponent --fast]
+    serve     run the match server and keep playing matches   [--port --half --home --away --seed --opponent --agents --fast]
     match     play one match headless and print the result    [--half --home --away --seed --opponent]
     ladder    play every bot against every other              [--half --rounds --seed]
 
   --opponent puts a test robot on the yellow side instead of the reference
   agent: naive-chaser, shover, chaser+camper, spinner, waller, wanderer, statue
+
+  --agents waits for four robot programs to connect on /agent before kicking
+  off, instead of playing the built-in reference team. See python/README.md.
 
   Watch a match:   npm run build:viewer && npm run serve
 `);

@@ -13,7 +13,7 @@
 
 import { World, type Robot, type TeamId } from './world';
 import { getLeague, type LeagueId } from './leagues';
-import { AgentSlot, LocalTransport, type Agent } from './agent';
+import { AgentSlot, LocalTransport, type Agent, type Transport } from './agent';
 import { Senses, TeamRadio, type MatchView, type SensedRobot } from './perception';
 import type { ActuatorFrame } from './protocol';
 import { wrapAngle } from './drive';
@@ -55,6 +55,16 @@ function numberOf(id: string): number {
 
 export interface MatchOptions {
   agents: MatchAgents;
+  /**
+   * Programs reached over a socket rather than called in this process.
+   *
+   * Keyed by robot id, and takes precedence over `agents` for that robot. The
+   * match does not care which it has: a transport is sent a sensor frame and
+   * polled for a command, and whether that crosses a function call or a network
+   * is the transport's business. That is the whole reason the boundary is a
+   * transport rather than a function.
+   */
+  transports?: Partial<Record<string, Transport>>;
   /** Names for the scoreboard. Defaults to the colours. */
   teams?: { cyan: string; yellow: string };
   league?: LeagueId;
@@ -130,13 +140,17 @@ export class Match {
     const byId = opts.agents as unknown as Record<string, Agent>;
     for (const robot of this.world.robots) {
       const agent = byId[robot.id];
-      if (!agent) throw new Error(`no program for robot ${robot.id}`);
+      if (!agent && !opts.transports?.[robot.id]) {
+        throw new Error(`no program for robot ${robot.id}`);
+      }
       this.slots.set(robot.id, {
         id: robot.id,
         // Mix the robot into the seed, or both robots on a team would get
         // identical noise and look better coordinated than they are.
         senses: new Senses(seed * 2654435761 + hash(robot.id), robot.motors.length),
-        agent: new AgentSlot(new LocalTransport(agent, robot.motors.length)),
+        agent: new AgentSlot(
+          opts.transports?.[robot.id] ?? new LocalTransport(agent!, robot.motors.length),
+        ),
         kickCooldown: 0,
         command: { motors: [0, 0, 0, 0] },
       });
