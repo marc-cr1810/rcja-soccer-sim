@@ -92,36 +92,93 @@ def think(s, me):
     bx = est_x + math.cos(heading + ball_bearing) * ball_dist
     bz = est_z + math.sin(heading + ball_bearing) * ball_dist
 
-    # Convex crease arc guarding (from rcja-soccer-lab reference AI)
     upfield_dir = 1.0 if args.team == "cyan" else -1.0
+
+    # 1. Decisive Ball Clearing when ball is held on dribbler
+    # When the goalkeeper captures the ball, NEVER back into the goal!
+    # Turn OFF the dribbler so the kick isn't recaptured, fire the kicker,
+    # and drive forward to launch the ball out of the danger zone.
+    holding_ball = s.ball_gate.held
+    if holding_ball:
+        log(me, "CLEAR_HELD_BALL", ball_dist)
+        to_center_upfield = wrap_angle(math.atan2(-bz * 0.1, ATTACK_X - bx) - heading)
+        clear_spin = spin_to(to_center_upfield, me)
+        return robot.motors(
+            drive(bearing=0.0, speed=1.0, spin=clear_spin),
+            dribbler=0.0,  # OFF: allows the kick impulse to release cleanly!
+            kicker=True,
+            say={"role": "goalie", "ball_field": me.get("field_bearing"), "clearing": True, "has_ball": True},
+        )
+
+    # 2. Check if ball is inside our penalty crease or threatening in front of net
+    PENALTY_DEPTH = 300.0
+    PENALTY_WIDTH = 900.0
+    ball_in_crease = (
+        upfield_dir * (bx - DEFEND_X) < (PENALTY_DEPTH + 35.0)
+        and abs(bz) < (PENALTY_WIDTH / 2.0 + 35.0)
+    )
+    ball_threatening = (
+        abs(bz) < 260.0
+        and upfield_dir * (bx - DEFEND_X) > -20.0
+        and upfield_dir * (bx - DEFEND_X) < (PENALTY_DEPTH + 50.0)
+        and ball_dist < 260.0
+    )
+
+    if ball_in_crease or ball_threatening:
+        # Clear forward strictly down central corridor
+        log(me, "CLEAR_CREASE_BALL", ball_dist)
+        to_center_upfield = wrap_angle(math.atan2(-bz * 0.15, ATTACK_X - bx) - heading)
+        clear_spin = spin_to(to_center_upfield if abs(ball_bearing) < 0.4 else ball_bearing, me)
+        kick_now = ball_dist < 200.0
+        return robot.motors(
+            drive(bearing=ball_bearing, speed=1.0, spin=clear_spin),
+            dribbler=0.0 if kick_now else 0.4,
+            kicker=kick_now,
+            say={"role": "goalie", "ball_field": me.get("field_bearing"), "clearing": True, "has_ball": False},
+        )
+
+    # 3. Crease arc guarding
     target_z = guard_z(bx, bz, HOLD_X, DEFEND_X)
     arc_step = clamp((1.0 - abs(target_z) / POST_CLAMP_Z) * 60.0, 0.0, 60.0)
     target_x = HOLD_X + upfield_dir * arc_step
 
-    # Check whether the ball is threatening in front of the net -> clear forward
-    ball_is_close = ball_dist < CLEARING_RANGE
-    ball_in_front_of_net = (
-        abs(bz) < 260.0
-        and upfield_dir * (bx - DEFEND_X) > 0
-        and abs(bx - DEFEND_X) < 400.0
+    # Stall detection for goalkeeper to avoid getting shoved backwards into the goal
+    pos_hist = me.get("pos_hist", [])
+    pos_hist.append((s.clock, est_x, est_z))
+    while pos_hist and s.clock - pos_hist[0][0] > 0.35:
+        pos_hist.pop(0)
+    me.pos_hist = pos_hist
+
+    dist_moved = 0.0
+    if len(pos_hist) >= 2:
+        dist_moved = math.hypot(est_x - pos_hist[0][1], est_z - pos_hist[0][2])
+
+    is_stalled = (
+        len(pos_hist) >= 6
+        and (s.clock - pos_hist[0][0]) >= 0.25
+        and dist_moved < 14.0
+        and me.get("last_speed", 0.0) > 0.6
     )
 
-    if ball_is_close and ball_in_front_of_net:
-        # Clear strictly down central corridor (rcja-soccer-lab clearance)
-        clear_target_z = clamp(bz * 0.1, -60.0, 60.0)
-        away = wrap_angle(math.atan2(clear_target_z - bz, ATTACK_X - bx) - heading)
-        clear_spin = spin_to(away, me)
-        log(me, "CLEAR_BALL", ball_dist)
-        return robot.motors(
-            drive(bearing=ball_bearing, speed=1.0, spin=clear_spin),
-            dribbler=1.0,
-            kicker=s.ball_gate.held,
-            say={"role": "goalie", "ball_field": me.get("field_bearing"), "clearing": True},
-        )
+    stall_ticks = me.get("stall_ticks", 0)
+    if is_stalled:
+        stall_ticks += 1
+    else:
+        stall_ticks = max(0, stall_ticks - 1)
+    me.stall_ticks = stall_ticks
 
-    # Otherwise stay strictly anchored on the convex crease arc
     log(me, "CREASE_GUARD", ball_dist)
-    return hold(s, me, est_x, est_z, target_x=target_x, target_z=target_z, spin=spin, heading=heading)
+    return hold(
+        s,
+        me,
+        est_x,
+        est_z,
+        target_x=target_x,
+        target_z=target_z,
+        spin=spin,
+        heading=heading,
+        stall_ticks=stall_ticks,
+    )
 
 
 def guard_z(bx: float, bz: float, line_x: float, own_x: float) -> float:
@@ -133,83 +190,95 @@ def guard_z(bx: float, bz: float, line_x: float, own_x: float) -> float:
     return clamp(intercept, -POST_CLAMP_Z, POST_CLAMP_Z)
 
 
-def hold(s, me, est_x: float, est_z: float, target_x: float, target_z: float, spin: float, heading: float):
-    """Maintain anchor position on the crease arc with smooth linear deceleration."""
+def hold(
+    s,
+    me,
+    est_x: float,
+    est_z: float,
+    target_x: float,
+    target_z: float,
+    spin: float,
+    heading: float,
+    stall_ticks: int = 0,
+):
+    """Maintain anchor position on the crease arc with fast, decisive positioning."""
     dx = target_x - est_x
     dz = target_z - est_z
 
     dist = math.hypot(dx, dz)
-    if dist < 8.0:
+    if dist < 6.0:
+        me.last_speed = 0.0
         return robot.motors(
             drive(bearing=0.0, speed=0.0, spin=spin),
-            dribbler=1.0,
+            dribbler=0.0,
             say={"role": "goalie", "ball_field": me.get("field_bearing"), "clearing": False},
         )
 
     to_hold = wrap_angle(math.atan2(dz, dx) - heading)
-    speed = clamp(dist / 220.0, 0.0, 0.90)
-    # Turn priority: dedicate power to snapping heading into position
-    turn_priority = clamp(1.0 - abs(spin) * 0.5, 0.4, 1.0)
-    speed *= turn_priority
+    speed = clamp(dist / 110.0, 0.25, 1.0)
+
+    if stall_ticks >= 6:
+        # Pinned by an opponent at the goal: jink laterally along the goal mouth to slide free
+        scrum_id = me.get("scrum_id", 0)
+        scrum_side = 1.0 if (scrum_id % 2 == 0) else -1.0
+        to_hold = wrap_angle(to_hold + scrum_side * 1.3)
+        speed = 1.0
+        spin = scrum_side * 1.0
+        if stall_ticks > 18:
+            me.scrum_id = scrum_id + 1
+            me.stall_ticks = 0
+
+    me.last_speed = speed
 
     return robot.motors(
         drive(bearing=to_hold, speed=speed, spin=spin),
-        dribbler=1.0,
+        dribbler=0.0,
         say={"role": "goalie", "ball_field": me.get("field_bearing"), "clearing": False},
     )
 
 
 def update_heading(s, me, est_x: float, est_z: float) -> float:
-    """Continuously correct gyro drift whenever a goal is visible in camera."""
-    drift = me.get("compass_drift")
-    camera_fresh = getattr(s.camera, "fresh", True)
-    if camera_fresh:
-        for goal_name, gx, gz in [("yellow", 915.0, 0.0), ("cyan", -915.0, 0.0)]:
-            goal_cam = getattr(s.camera.goals, goal_name, None)
-            if goal_cam is not None and abs(goal_cam.bearing) < 0.38:
-                expected_field_angle = math.atan2(gz - est_z, gx - est_x)
-                derived_heading = wrap_angle(expected_field_angle - goal_cam.bearing)
-                measured_drift = wrap_angle(s.compass.heading - derived_heading)
-                if drift is None:
-                    drift = measured_drift
-                else:
-                    drift = wrap_angle(drift + wrap_angle(measured_drift - drift) * 0.03)
-                me.compass_drift = drift
-                break
-    if drift is None:
-        drift = 0.0
-    return wrap_angle(s.compass.heading - drift)
+    """Return ground-truth compass heading."""
+    return s.compass.heading
 
 
 def spin_to(error: float, me) -> float:
-    """High-torque agile PD heading controller with encoder damping."""
-    SPIN_KP = 3.0
-    SPIN_KD = 0.30
+    """High-torque agile PD heading controller with gyro damping."""
+    SPIN_KP = 3.5
+    SPIN_KD = 0.15
     yaw_rate = me.get("yaw_rate", 0.0)
     return clamp(error * SPIN_KP - yaw_rate * SPIN_KD, -1.0, 1.0)
 
 
 def update_yaw_rate(s, me) -> None:
-    """Compute yaw rate from wheel encoders."""
+    """Compute yaw rate from clean compass heading."""
     dt = max(1e-3, s.clock - me.get("last_clock", s.clock))
     me.last_clock = s.clock
-    yaw_rate = me.get("yaw_rate", 0.0)
-
-    encoders = getattr(s, "encoders", None)
-    if encoders:
-        last_enc = me.get("last_encoders")
-        if last_enc and len(last_enc) == len(encoders) and dt > 0:
-            diffs = [e - l for e, l in zip(encoders, last_enc)]
-            mean_wheel = sum(diffs) / len(diffs) / dt
-            omega = (mean_wheel * WHEEL_RADIUS) / MOUNT_RADIUS
-            yaw_rate += (omega - yaw_rate) * min(1.0, dt * 20.0)
-        me.last_encoders = list(encoders)
-
+    last_h = me.get("last_heading", s.compass.heading)
+    yaw_rate = wrap_angle(s.compass.heading - last_h) / dt
+    me.last_heading = s.compass.heading
     me.yaw_rate = yaw_rate
 
 
 def locate_goalie(s, me, heading: float) -> tuple[float, float]:
-    """Estimate field coordinates (x, z) robustly for goalkeeper."""
+    """Estimate field coordinates (x, z) robustly for goalkeeper using 360 camera and sonars."""
+    cam_estimates = []
+    if getattr(s, "camera", None):
+        yellow_cam = getattr(s.camera.goals, "yellow", None)
+        if yellow_cam is not None:
+            angle = wrap_angle(heading + yellow_cam.bearing)
+            cam_estimates.append((
+                915.0 - math.cos(angle) * yellow_cam.range,
+                0.0 - math.sin(angle) * yellow_cam.range,
+            ))
+        cyan_cam = getattr(s.camera.goals, "cyan", None)
+        if cyan_cam is not None:
+            angle = wrap_angle(heading + cyan_cam.bearing)
+            cam_estimates.append((
+                -915.0 - math.cos(angle) * cyan_cam.range,
+                0.0 - math.sin(angle) * cyan_cam.range,
+            ))
+
     last_x = me.get("est_x", HOLD_X)
     last_z = me.get("est_z", 0.0)
 
@@ -262,16 +331,20 @@ def locate_goalie(s, me, heading: float) -> tuple[float, float]:
         total_w = sum(w for _, w in z_beams)
         new_z = sum(v * w for v, w in z_beams) / total_w
 
-    new_x = clamp(new_x, -HALF_LENGTH, HALF_LENGTH)
-    new_z = clamp(new_z, -HALF_WIDTH, HALF_WIDTH)
+    if cam_estimates:
+        cx = sum(p[0] for p in cam_estimates) / len(cam_estimates)
+        cz = sum(p[1] for p in cam_estimates) / len(cam_estimates)
+        final_x = cx * 0.7 + new_x * 0.3
+        final_z = cz * 0.7 + new_z * 0.3
+    else:
+        final_x, final_z = new_x, new_z
 
-    alpha = 0.5
-    smoothed_x = last_x + (new_x - last_x) * alpha
-    smoothed_z = last_z + (new_z - last_z) * alpha
+    final_x = clamp(final_x, -HALF_LENGTH, HALF_LENGTH)
+    final_z = clamp(final_z, -HALF_WIDTH, HALF_WIDTH)
 
-    me.est_x = smoothed_x
-    me.est_z = smoothed_z
-    return smoothed_x, smoothed_z
+    me.est_x = final_x
+    me.est_z = final_z
+    return final_x, final_z
 
 
 def off_the_line(s) -> float | None:
@@ -293,16 +366,17 @@ def off_the_line(s) -> float | None:
 
 
 def update_ball_memory(s, me, heading: float) -> tuple[float, float] | None:
-    """Low-pass filter ball observations with camera fallback."""
+    """Track ball observations with 360 camera and 24-sensor IR."""
     measured_field = None
     measured_range = None
 
-    if s.ball is not None:
+    cam_ball = getattr(getattr(s, "camera", None), "ball", None)
+    if cam_ball is not None:
+        measured_field = wrap_angle(heading + cam_ball.bearing)
+        measured_range = cam_ball.range
+    elif s.ball is not None:
         measured_field = wrap_angle(heading + s.ball.bearing)
         measured_range = 200.0 / math.sqrt(max(s.ball.strength, 1e-4))
-    elif getattr(s.camera, "ball", None) is not None:
-        measured_field = wrap_angle(heading + s.camera.ball.bearing)
-        measured_range = s.camera.ball.range
 
     if measured_field is not None and measured_range is not None:
         if me.get("field_bearing") is None:
@@ -311,8 +385,8 @@ def update_ball_memory(s, me, heading: float) -> tuple[float, float] | None:
         else:
             dt = max(1e-3, s.clock - me.get("last_ball_clock", s.clock))
             me.last_ball_clock = s.clock
-            k_bearing = 1.0 - math.exp(-dt / 0.06)
-            k_range = 1.0 - math.exp(-dt / 0.08)
+            k_bearing = 1.0 - math.exp(-dt / 0.03)
+            k_range = 1.0 - math.exp(-dt / 0.04)
             me.field_bearing = wrap_angle(
                 me.field_bearing + wrap_angle(measured_field - me.field_bearing) * k_bearing
             )
