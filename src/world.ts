@@ -212,6 +212,16 @@ export class World {
   kickingOffTeam: TeamId = 'cyan';
   private kickOffPending = false;
   /**
+   * Consecutive illegal kick-offs, whichever side committed them.
+   *
+   * Awarding the kick-off to the other team is right once. Doing it every time
+   * loops forever when both sides carry the ball off the spot, which is what
+   * two ordinary ball-chasing robots do: a ladder run hit 194 illegal kick-offs
+   * and 203 restarts in one four-minute match, and no football was played at
+   * all. After a couple of attempts the referee has to let the game go.
+   */
+  private consecutiveIllegalKickOffs = 0;
+  /**
    * Without auto-resolution the ball stays where it went out, so the detector
    * would fire on every frame. Latched until the ball is placed again.
    */
@@ -223,6 +233,14 @@ export class World {
     const r = ballDiameter(config.league) / 2;
     this.ball = { x: 0, z: 0, vx: 0, vz: 0, radius: r, mass: ballMass(config.league) };
     this.resetRobots();
+  }
+
+  /** Whether a kick-off is under way, and whose it is. Rule 5.4.7 turns on it. */
+  get restart(): { pending: boolean; team: TeamId | null } {
+    return {
+      pending: this.kickOffPending,
+      team: this.kickOffPending ? this.kickingOffTeam : null,
+    };
   }
 
   /** Rule 5.4: both teams on their defensive half, non-kicking team in the box. */
@@ -1042,6 +1060,7 @@ export class World {
     // 5.4.7: If the ball has rolled clear of the robot by at least 50 mm, the kick-off was legal!
     if (gap >= 50) {
       this.kickOffPending = false;
+      this.consecutiveIllegalKickOffs = 0;
       return;
     }
 
@@ -1056,6 +1075,18 @@ export class World {
       const offendingTeam = this.kickingOffTeam;
       const awardedTeam: TeamId = offendingTeam === 'cyan' ? 'yellow' : 'cyan';
       this.kickOffPending = false;
+
+      // Two re-takes is enough. Beyond that, play on: a restart nobody can
+      // execute legally is worse for the game than a kick-off nobody earned.
+      if (++this.consecutiveIllegalKickOffs > 2) {
+        this.emit({
+          kind: 'illegal-kickoff',
+          rule: '5.4.7',
+          team: offendingTeam,
+          message: 'Repeated illegal kick-offs; referee plays on.',
+        });
+        return;
+      }
       this.emit({
         kind: 'illegal-kickoff',
         rule: '5.4.7',

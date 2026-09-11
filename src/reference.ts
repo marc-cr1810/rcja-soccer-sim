@@ -55,29 +55,64 @@ export function locate(frame: SensorFrame): Estimate {
   push(Math.PI, frame.range.back);
   push(-Math.PI / 2, frame.range.right);
 
-  // A beam is only usable for an axis if it is pointing mostly along it.
+  /*
+   * Solve one axis, and check the answer against the opposite beam.
+   *
+   * A sonar can only ever read SHORT — an obstruction returns an echo early,
+   * nothing makes one arrive late. So a robot standing in front of a beam makes
+   * this robot believe it is closer to that wall than it is, with no hint that
+   * anything is wrong.
+   *
+   * The check is that opposite beams have to add up: front + back + the
+   * robot's own width is the length of the field, and if it comes out short
+   * then one of them is blocked. Trust the longer one, because that is the one
+   * an obstruction cannot have produced, and drop the confidence so nothing
+   * downstream bets on it.
+   *
+   * Without this, a striker would confidently locate itself against a
+   * team mate's flank and attack the wrong way. In a ladder run that showed up
+   * as a robot which spins on the spot finishing third, on 166 goals it did not
+   * score: everyone else was scoring them for it.
+   */
   const solve = (
     component: (b: { angle: number }) => number,
     wall: number,
-  ): number | null => {
-    let best: { value: number; weight: number } | null = null;
+  ): { value: number; sure: boolean } | null => {
+    let plus: { value: number; range: number } | null = null;
+    let minus: { value: number; range: number } | null = null;
+
     for (const b of beams) {
       const c = component(b);
       if (Math.abs(c) < 0.6) continue;
       // centre + (range + radius) * direction = wall
       const value = Math.sign(c) * wall - (b.range + ROBOT_RADIUS) * c;
-      if (!best || Math.abs(c) > best.weight) best = { value, weight: Math.abs(c) };
+      const slot = c > 0 ? 'plus' : 'minus';
+      const held = slot === 'plus' ? plus : minus;
+      if (!held || b.range > held.range) {
+        if (slot === 'plus') plus = { value, range: b.range };
+        else minus = { value, range: b.range };
+      }
     }
-    return best ? best.value : null;
+
+    if (plus && minus) {
+      const span = plus.range + minus.range + 2 * ROBOT_RADIUS;
+      const agree = Math.abs(span - 2 * wall) < 150;
+      // Longer beam wins: an obstruction can only shorten a reading.
+      const better = plus.range >= minus.range ? plus : minus;
+      return { value: better.value, sure: agree };
+    }
+    const only = plus ?? minus;
+    // A single beam cannot be checked against anything, so it is never sure.
+    return only ? { value: only.value, sure: false } : null;
   };
 
   const x = solve((b) => Math.cos(b.angle), WALL_X);
   const z = solve((b) => Math.sin(b.angle), WALL_Z);
 
   return {
-    x: clamp(x ?? 0, -HALF_LENGTH, HALF_LENGTH),
-    z: clamp(z ?? 0, -HALF_WIDTH, HALF_WIDTH),
-    confidence: (x === null ? 0 : 0.5) + (z === null ? 0 : 0.5),
+    x: clamp(x?.value ?? 0, -HALF_LENGTH, HALF_LENGTH),
+    z: clamp(z?.value ?? 0, -HALF_WIDTH, HALF_WIDTH),
+    confidence: (x?.sure ? 0.5 : 0) + (z?.sure ? 0.5 : 0),
   };
 }
 
@@ -230,6 +265,24 @@ export class ReferenceAgent implements Agent {
   private decide(frame: SensorFrame): ActuatorFrame {
 
     if (!frame.playing) return { motors: [0, 0, 0, 0] };
+
+    /*
+     * Rule 5.4.7: a kick-off has to be a strike, not a carry.
+     *
+     * The dribbler is on by default the rest of the time, and leaving it on at
+     * a kick-off means the ball never rolls the 50 mm clear the rule asks for.
+     * The referee then awards the kick-off to the other side, who do the same
+     * thing, and the match becomes nothing but restarts - 203 of them in four
+     * minutes, in the ladder run that found this.
+     *
+     * So: roller off, drive through the ball, and let it run.
+     */
+    if (frame.kickoff.pending && frame.kickoff.ours && frame.ball) {
+      return {
+        motors: mixOmni(this.drive, frame.ball.bearing, 1, 0),
+        dribbler: 0,
+      };
+    }
 
     // Nothing else matters while a wheel is over the line. 5.7.1.6 takes a
     // robot wholly in the out area off the field for thirty seconds, which

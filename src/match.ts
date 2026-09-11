@@ -69,6 +69,15 @@ export interface MatchResult {
   goals: { team: TeamId; at: number }[];
   /** Per-robot connection health, for the match record. */
   slots: Record<string, ReturnType<AgentSlot['report']>>;
+  /**
+   * Every referee call of the match, counted by kind.
+   *
+   * Not taken from world.events, which is a 60-entry ring buffer sized for the
+   * referee panel and silently drops the early part of a ten-minute match.
+   * Counting restarts is the whole point of a balance run, so they are tallied
+   * as they happen.
+   */
+  calls: Record<string, number>;
 }
 
 interface Slot {
@@ -98,6 +107,8 @@ export class Match {
   private sinceControl = 0;
   private readonly goals: { team: TeamId; at: number }[] = [];
   private lastScore = { cyan: 0, yellow: 0 };
+  private readonly calls: Record<string, number> = {};
+  private lastSeenEvent: unknown = null;
 
   constructor(opts: MatchOptions) {
     const league = getLeague(opts.league ?? 'open');
@@ -137,6 +148,7 @@ export class Match {
       playing: this.world.running,
       ball: { x: this.world.ball.x, z: this.world.ball.z },
       robots,
+      kickoff: this.world.restart,
     };
   }
 
@@ -226,6 +238,25 @@ export class Match {
     this.dribble(dt);
     this.world.step(dt);
     this.recordGoals();
+    this.recordCalls();
+  }
+
+  /**
+   * Count referee calls as they are emitted.
+   *
+   * The world's event list is a ring buffer, so it has to be read before it
+   * rolls. Find the last event already counted; anything after it is new, and
+   * if it has rolled off entirely, the whole buffer is new.
+   */
+  private recordCalls(): void {
+    const events = this.world.events;
+    if (events.length === 0) return;
+    const from = this.lastSeenEvent ? events.indexOf(this.lastSeenEvent as never) + 1 : 0;
+    for (let i = from; i < events.length; i++) {
+      const kind = events[i]!.kind;
+      this.calls[kind] = (this.calls[kind] ?? 0) + 1;
+    }
+    this.lastSeenEvent = events[events.length - 1];
   }
 
   private recordGoals(): void {
@@ -265,6 +296,7 @@ export class Match {
       clock: this.world.clock,
       goals: [...this.goals],
       slots,
+      calls: { ...this.calls },
     };
   }
 }

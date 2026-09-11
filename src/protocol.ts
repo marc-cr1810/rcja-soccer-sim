@@ -85,6 +85,23 @@ export interface TeamMessage {
   age: number;
 }
 
+/**
+ * The restart the referee is part way through, if any.
+ *
+ * Rule 5.4.7 requires the kicking-off robot to strike the ball at least 50 mm
+ * clear rather than carrying it away, so a robot has to know a kick-off is in
+ * progress to play one legally. A real team is told by the referee; so is this
+ * one. Leaving it out was not a simplification, it was withholding something
+ * the rules assume the robot knows - and every agent written against the first
+ * version of this protocol committed an illegal kick-off at every restart.
+ */
+export interface KickoffReading {
+  /** A kick-off is under way and 5.4.7 is live. */
+  pending: boolean;
+  /** Whether it is ours to take. */
+  ours: boolean;
+}
+
 export interface SensorFrame {
   /** Seconds since the match started. */
   clock: number;
@@ -94,6 +111,7 @@ export interface SensorFrame {
   team: string;
   /** True when the referee has the game running; false at a kick-off or stoppage. */
   playing: boolean;
+  kickoff: KickoffReading;
 
   ball: BallReading | null;
   compass: CompassReading;

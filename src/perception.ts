@@ -21,7 +21,7 @@ import {
   readRange,
   type Pose,
 } from './sensors';
-import type { SensorFrame, TeamMessage } from './protocol';
+import type { KickoffReading, SensorFrame, TeamMessage } from './protocol';
 
 export interface SensedRobot extends Pose {
   /** Stable id, e.g. 'c1'. */
@@ -38,6 +38,8 @@ export interface MatchView {
   playing: boolean;
   ball: { x: number; z: number };
   robots: readonly SensedRobot[];
+  /** Which team, if any, has a kick-off to take. */
+  kickoff: { pending: boolean; team: string | null };
 }
 
 export interface SenseInput {
@@ -110,6 +112,10 @@ export class Senses {
       robot: self.number,
       team: self.team,
       playing: view.playing,
+      kickoff: {
+        pending: view.kickoff.pending,
+        ours: view.kickoff.pending && view.kickoff.team === self.team,
+      } satisfies KickoffReading,
       ball: readIr(self, view.ball, { blockers }, this.ir),
       compass: { heading: this.compass.read(self.heading, this.compassNoise) },
       lines: readLines(self, this.lineNoise),

@@ -37,6 +37,7 @@ function view(over: Partial<MatchView> = {}): MatchView {
     playing: true,
     ball: { x: 400, z: 0 },
     robots: [robot()],
+    kickoff: { pending: false, team: null },
     ...over,
   };
 }
@@ -200,6 +201,7 @@ describe('perception hands over only what a sensor knows', () => {
         'clock',
         'compass',
         'encoders',
+        'kickoff',
         'lines',
         'messages',
         'playing',
