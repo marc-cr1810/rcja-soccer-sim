@@ -243,21 +243,44 @@ def update_heading(s, me, est_x: float, est_z: float) -> float:
 
 
 def spin_to(error: float, me) -> float:
-    """High-torque agile PD heading controller with gyro damping."""
-    SPIN_KP = 3.5
-    SPIN_KD = 0.15
+    """Smooth, critically-damped PD heading controller with encoder damping."""
+    SPIN_KP = 1.1
+    SPIN_KD = 0.4
     yaw_rate = me.get("yaw_rate", 0.0)
     return clamp(error * SPIN_KP - yaw_rate * SPIN_KD, -1.0, 1.0)
 
 
-def update_yaw_rate(s, me) -> None:
-    """Compute yaw rate from clean compass heading."""
+def update_yaw_rate(s, me) -> float:
+    """Compute clean yaw rate from wheel encoders with low-pass filtering."""
+    encoders = getattr(s, "encoders", None)
     dt = max(1e-3, s.clock - me.get("last_clock", s.clock))
     me.last_clock = s.clock
+
+    if encoders is not None and len(encoders) >= 4:
+        last_enc = me.get("last_encoders")
+        me.last_encoders = list(encoders)
+        if last_enc is not None and len(last_enc) == len(encoders):
+            sum_diff = sum(encoders[i] - last_enc[i] for i in range(len(encoders)))
+            enc_delta = sum(abs(encoders[i] - last_enc[i]) for i in range(len(encoders))) / len(encoders)
+            me.last_enc_delta = enc_delta
+
+            mean_speed = (sum_diff / len(encoders)) / dt
+            omega = (mean_speed * WHEEL_RADIUS) / MOUNT_RADIUS
+            rate = me.get("yaw_rate", 0.0)
+            rate += (omega - rate) * min(1.0, dt * 20.0)
+            me.yaw_rate = rate
+            return rate
+
+    # Fallback to compass differencing
     last_h = me.get("last_heading", s.compass.heading)
-    yaw_rate = wrap_angle(s.compass.heading - last_h) / dt
+    diff = wrap_angle(s.compass.heading - last_h)
     me.last_heading = s.compass.heading
-    me.yaw_rate = yaw_rate
+    raw_rate = diff / dt
+    rate = me.get("yaw_rate", 0.0)
+    rate += (raw_rate - rate) * min(1.0, dt * 10.0)
+    me.yaw_rate = rate
+    me.last_enc_delta = 1.0
+    return rate
 
 
 def locate_goalie(s, me, heading: float) -> tuple[float, float]:
@@ -366,17 +389,22 @@ def off_the_line(s) -> float | None:
 
 
 def update_ball_memory(s, me, heading: float) -> tuple[float, float] | None:
-    """Track ball observations with 360 camera and 24-sensor IR."""
+    """Track ball observations from 50 Hz 24-sensor IR seeker, with fresh camera fallback."""
     measured_field = None
     measured_range = None
 
-    cam_ball = getattr(getattr(s, "camera", None), "ball", None)
-    if cam_ball is not None:
-        measured_field = wrap_angle(heading + cam_ball.bearing)
-        measured_range = cam_ball.range
-    elif s.ball is not None:
+    # Primary sensor: 24-sensor IR ring at 50 Hz
+    if s.ball is not None:
         measured_field = wrap_angle(heading + s.ball.bearing)
         measured_range = 200.0 / math.sqrt(max(s.ball.strength, 1e-4))
+    # Secondary fallback: 360 camera (only when IR is blocked and frame is fresh)
+    else:
+        cam = getattr(s, "camera", None)
+        if cam is not None and getattr(cam, "fresh", False):
+            cam_ball = getattr(cam, "ball", None)
+            if cam_ball is not None:
+                measured_field = wrap_angle(heading + cam_ball.bearing)
+                measured_range = cam_ball.range
 
     if measured_field is not None and measured_range is not None:
         if me.get("field_bearing") is None:
@@ -385,12 +413,12 @@ def update_ball_memory(s, me, heading: float) -> tuple[float, float] | None:
         else:
             dt = max(1e-3, s.clock - me.get("last_ball_clock", s.clock))
             me.last_ball_clock = s.clock
-            k_bearing = 1.0 - math.exp(-dt / 0.03)
-            k_range = 1.0 - math.exp(-dt / 0.04)
+            # Filter with tau = 0.2s to swallow 24-sensor stepping without lag
+            k = 1.0 - math.exp(-dt / 0.2)
             me.field_bearing = wrap_angle(
-                me.field_bearing + wrap_angle(measured_field - me.field_bearing) * k_bearing
+                me.field_bearing + wrap_angle(measured_field - me.field_bearing) * k
             )
-            me.range = me.range + (measured_range - me.range) * k_range
+            me.range = me.range + (measured_range - me.range) * k
 
         me.age = 0
         return wrap_angle(me.field_bearing - heading), me.range
