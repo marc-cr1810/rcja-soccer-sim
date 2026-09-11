@@ -297,3 +297,32 @@ describe('stepDrive', () => {
     expect(b.heading).toBeLessThanOrEqual(Math.PI);
   });
 });
+
+describe('stepDrive moves the robot', () => {
+  it('carries the robot across the carpet, not just its velocity', () => {
+    // The regression that mattered: an earlier version updated velocity and
+    // left position alone, so robots accelerated on the spot forever.
+    const spec = openDrive();
+    const b = body();
+    for (let i = 0; i < 120; i++) stepDrive(b, spec, mixOmni(spec, 0, 1, 0), DT);
+    expect(b.x).toBeGreaterThan(500);
+    expect(Math.abs(b.z)).toBeLessThan(20);
+  });
+
+  it('goes backwards when asked to', () => {
+    const spec = openDrive();
+    const b = body();
+    for (let i = 0; i < 120; i++) stepDrive(b, spec, mixOmni(spec, Math.PI, 1, 0), DT);
+    expect(b.x).toBeLessThan(-500);
+  });
+
+  it('travels about as far as its speed says it should', () => {
+    const spec = openDrive();
+    const b = body();
+    const seconds = 2;
+    for (let i = 0; i < seconds / DT; i++) stepDrive(b, spec, mixOmni(spec, 0, 1, 0), DT);
+    // Two seconds at ~1150 mm/s, less the ramp up from rest.
+    expect(b.x).toBeGreaterThan(1800);
+    expect(b.x).toBeLessThan(2300);
+  });
+});

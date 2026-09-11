@@ -226,10 +226,17 @@ export interface DrivenBody extends DriveMotion {
 /**
  * Advance a driven robot by one step.
  *
- * Integration is semi-implicit — accelerate, then move with the new velocity —
- * which is what physics.ts does and is stable at the step sizes a match runs at.
- * Position itself is left to the existing solver so that collisions, walls and
- * the ball keep behaving exactly as they already do.
+ * Move first with the velocity the robot already had, then apply this step's
+ * forces — the same order physics.ts uses in `integrate`, so a driven robot and
+ * the ball advance consistently and collisions land where the existing solver
+ * expects them.
+ *
+ * This replaces `stepRobot` for robots under power. It has to do the whole job,
+ * position included: an earlier draft applied forces and left the position to
+ * the caller, which quietly froze every robot in place. The rule detectors did
+ * not notice, because most of them put robots where they want them and step;
+ * the lack-of-progress test did, because it is the one that needs robots to
+ * actually push.
  */
 export function stepDrive(
   body: DrivenBody,
@@ -238,6 +245,9 @@ export function stepDrive(
   dt: number,
 ): DriveResult {
   const result = driveForces(spec, powers, body);
+
+  body.x += body.vx * dt;
+  body.z += body.vz * dt;
 
   body.vx += (result.fx / body.mass) * dt;
   body.vz += (result.fz / body.mass) * dt;
