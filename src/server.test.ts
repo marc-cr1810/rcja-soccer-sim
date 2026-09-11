@@ -9,6 +9,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { Match, type MatchAgents } from './match';
 import { referenceTeam } from './reference';
+import { waller } from './bots';
 import { MatchServer } from './server';
 import { VIEW_HZ, type ViewMessage } from './view';
 
@@ -85,6 +86,64 @@ describe('the frame a viewer gets', () => {
     for (const secret of ['motors', 'encoders', 'compass', 'camera', 'bearing', 'strength']) {
       expect(json).not.toContain(secret);
     }
+  });
+});
+
+describe('a robot standing down under rule 5.7', () => {
+  /**
+   * Play until somebody is sent off.
+   *
+   * Wallers drive themselves off the field, so 5.7.1.6 fires within seconds
+   * rather than once or twice in a whole match.
+   */
+  function untilRemoved() {
+    const match = new Match({
+      agents: {
+        ...referenceTeam('cyan'),
+        'yellow-1': waller,
+        'yellow-2': waller,
+      } as unknown as MatchAgents,
+      teams: { cyan: 'ACT-01', yellow: 'WALLERS' },
+      halfSeconds: 120,
+      seed: 2,
+    });
+    match.world.kickOff('cyan');
+    match.world.running = true;
+    for (let i = 0; i < 120 * 100; i++) {
+      match.step(1 / 100);
+      if (match.snapshot().robots.some((r) => r.removed)) return match;
+    }
+    throw new Error('nobody was sent off');
+  }
+
+  it('tells a viewer how long the robot has left', () => {
+    // Without this a robot simply vanished from the field with nothing to say
+    // why or for how long, and a team playing a robot short is the most
+    // consequential thing that happens in a match short of a goal.
+    const off = untilRemoved().snapshot().robots.find((r) => r.removed)!;
+    expect(Number.isFinite(off.penaltyRemaining)).toBe(true);
+    expect(off.penaltyRemaining).toBeGreaterThan(0);
+  });
+
+  it('names the rule it came off under', () => {
+    const off = untilRemoved().snapshot().robots.find((r) => r.removed)!;
+    expect(off.removalRule ?? '').toMatch(/^5\./);
+    expect(off.removalReason ?? '').not.toBe('');
+  });
+
+  it('counts the stand-down down as the match runs', () => {
+    const match = untilRemoved();
+    const id = match.snapshot().robots.find((r) => r.removed)!.id;
+    const before = match.snapshot().robots.find((r) => r.id === id)!.penaltyRemaining;
+    for (let i = 0; i < 300; i++) match.step(1 / 100);
+    const after = match.snapshot().robots.find((r) => r.id === id)!.penaltyRemaining;
+    expect(after).toBeLessThan(before);
+    expect(after).toBeGreaterThanOrEqual(0);
+  });
+
+  it('serves no more than the 30 seconds 5.7.2 asks for in a five-minute half', () => {
+    const off = untilRemoved().snapshot().robots.find((r) => r.removed)!;
+    expect(off.penaltyRemaining).toBeLessThanOrEqual(30);
   });
 });
 

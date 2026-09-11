@@ -52,16 +52,29 @@ function num(flags: Map<string, string>, name: string, fallback: number): number
 }
 
 /**
- * Two reference teams, for a demonstration match.
+ * Who is playing.
  *
- * Until submitted programs can be loaded, this is what there is to watch — and
- * it is also what an organiser wants on the screen while the hall fills up.
+ * Until submitted programs can be loaded both sides are the reference agent,
+ * which is what an organiser wants on the screen while the hall fills up.
+ *
+ * `--opponent` swaps the yellow side for one of the deliberately poor robots.
+ * Not only for demonstrations: a waller drives itself off the field within
+ * seconds, and that is the only quick way to watch a rule 5.7 stand-down
+ * actually happen rather than waiting most of a match for one.
  */
-function demoAgents(): MatchAgents {
-  return {
-    ...referenceTeam('cyan'),
-    ...referenceTeam('yellow'),
-  } as unknown as MatchAgents;
+function agentsFor(opponent: string | undefined): MatchAgents {
+  const cyan = referenceTeam('cyan');
+  if (!opponent || opponent === 'reference') {
+    return { ...cyan, ...referenceTeam('yellow') } as unknown as MatchAgents;
+  }
+  const bot = botRoster().find((b) => b.name === opponent);
+  if (!bot) {
+    const names = ['reference', ...botRoster().map((b) => b.name)].join(', ');
+    console.error(`  unknown opponent "${opponent}". try: ${names}`);
+    process.exit(1);
+  }
+  const [y1, y2] = bot.make('yellow');
+  return { ...cyan, 'yellow-1': y1!, 'yellow-2': y2! } as unknown as MatchAgents;
 }
 
 function viewerRoot(): string | undefined {
@@ -88,7 +101,7 @@ async function serve(flags: Map<string, string>): Promise<void> {
   const halfSeconds = num(flags, 'half', 300);
   const teams = {
     cyan: flags.get('home') ?? 'Cyan',
-    yellow: flags.get('away') ?? 'Yellow',
+    yellow: flags.get('away') ?? flags.get('opponent') ?? 'Yellow',
   };
 
   // Keep playing. A screen in a hall should never be showing nothing, and an
@@ -97,7 +110,7 @@ async function serve(flags: Map<string, string>): Promise<void> {
   for (;;) {
     console.log(`  kick-off: ${teams.cyan} v ${teams.yellow}  (seed ${seed})`);
     const result = await server.play({
-      agents: demoAgents(),
+      agents: agentsFor(flags.get('opponent')),
       teams,
       halfSeconds,
       seed,
@@ -113,11 +126,11 @@ async function serve(flags: Map<string, string>): Promise<void> {
 function once(flags: Map<string, string>): void {
   const teams = {
     cyan: flags.get('home') ?? 'Cyan',
-    yellow: flags.get('away') ?? 'Yellow',
+    yellow: flags.get('away') ?? flags.get('opponent') ?? 'Yellow',
   };
   const started = Date.now();
   const match = new Match({
-    agents: demoAgents(),
+    agents: agentsFor(flags.get('opponent')),
     teams,
     halfSeconds: num(flags, 'half', 300),
     seed: num(flags, 'seed', 1),
@@ -170,9 +183,12 @@ function usage(): void {
   console.log(`
   rcja-soccer-sim
 
-    serve     run the match server and keep playing matches   [--port --half --home --away --seed --fast]
-    match     play one match headless and print the result    [--half --home --away --seed]
+    serve     run the match server and keep playing matches   [--port --half --home --away --seed --opponent --fast]
+    match     play one match headless and print the result    [--half --home --away --seed --opponent]
     ladder    play every bot against every other              [--half --rounds --seed]
+
+  --opponent puts a test robot on the yellow side instead of the reference
+  agent: naive-chaser, shover, chaser+camper, spinner, waller, wanderer, statue
 
   Watch a match:   npm run build:viewer && npm run serve
 `);

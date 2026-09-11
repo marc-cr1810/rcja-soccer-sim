@@ -78,7 +78,20 @@ only what the server told it a moment ago. And the broadcast camera frames
 itself to the aspect it is given, as referee mode already did, instead of
 sitting at a fixed distance that left the field filling half the screen.
 
-Press **C** to change camera. The default is the broadcast angle.
+Four cameras, along the bottom of the screen or by pressing **C**. Broadcast is
+the one to leave it on; **Overhead** settles an argument about where a robot
+actually was; **Follow ball** is what a small screen wants; **Orbit** is for the
+hall while it fills up.
+
+When a robot is taken off under rule 5.7, a card appears with the rule it went
+off under and the seconds left of its stand-down. It says *Ready* rather than
+counting past zero, because serving the time does not put a robot back on —
+5.7.4 wants the referee to agree it has been repaired. A team playing a robot
+short is the most consequential thing that happens in a match short of a goal,
+and until now the robot simply vanished with nothing to say why.
+
+`--opponent waller` puts a robot on the yellow side that drives itself off the
+field, which is the quick way to watch a stand-down happen.
 
 ### The drivetrain is sized against the lab's own numbers
 

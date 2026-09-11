@@ -17,6 +17,8 @@ import type { ViewFrame, ViewMessage } from '../src/view';
 const canvas = document.getElementById('field') as HTMLCanvasElement;
 const status = document.getElementById('status')!;
 const call = document.getElementById('call')!;
+const standdown = document.getElementById('standdown')!;
+const cameras = document.getElementById('cameras')!;
 
 const board = {
   cyanName: document.getElementById('cyan-name')!,
@@ -87,6 +89,63 @@ function formatClock(seconds: number, half: number): string {
   return `${m}:${String(s).padStart(2, '0')}`;
 }
 
+/**
+ * Robots off the field under rule 5.7, and how long they have left.
+ *
+ * Rebuilt from scratch each frame rather than diffed. There are at most four
+ * robots and this runs 60 times a second on a machine doing nothing else; the
+ * bookkeeping to update it in place would cost more to read than it saves.
+ */
+function updateStandDown(frame: ViewFrame): void {
+  const out = frame.robots.filter((r) => r.removed);
+  if (out.length === 0) {
+    standdown.hidden = true;
+    standdown.replaceChildren();
+    return;
+  }
+
+  standdown.hidden = false;
+  const cards = out.map((robot) => {
+    /*
+     * Tolerate a frame without the field.
+     *
+     * A viewer and a server can be different builds - the page is cached, or
+     * the server has been running since before the last deploy - and the first
+     * version of this printed "NaNs" onto a hall screen when that happened.
+     * A dash says the same thing honestly.
+     */
+    const seconds = robot.penaltyRemaining;
+    const known = Number.isFinite(seconds);
+    const left = known ? Math.ceil(seconds) : 0;
+    const ready = known && left <= 0;
+
+    const card = document.createElement('div');
+    card.className = `sd-card ${robot.team}`;
+
+    const who = document.createElement('span');
+    who.className = 'who';
+    // 'cyan-2' reads as nothing from twenty metres away; 'Cyan 2' reads.
+    const [team = '', number = ''] = robot.id.split('-');
+    who.textContent = `${team.charAt(0).toUpperCase()}${team.slice(1)} ${number}`;
+
+    const rule = document.createElement('span');
+    rule.className = 'rule';
+    rule.textContent = `§${robot.removalRule ?? '5.7'}`;
+    if (robot.removalReason) card.title = robot.removalReason;
+
+    const timer = document.createElement('span');
+    timer.className = ready ? 'timer ready' : 'timer';
+    // Serving the time does not put a robot back on: 5.7.4 wants the referee
+    // to agree it has been repaired, so this says ready rather than counting
+    // on past zero as though it had already returned.
+    timer.textContent = !known ? '—' : ready ? 'Ready' : `${left}s`;
+
+    card.append(who, rule, timer);
+    return card;
+  });
+  standdown.replaceChildren(...cards);
+}
+
 function updateBoard(frame: ViewFrame): void {
   board.cyanName.textContent = frame.teams.cyan;
   board.yellowName.textContent = frame.teams.yellow;
@@ -130,6 +189,7 @@ function draw(): void {
   }
   renderer.render(frame, 1 / 60);
   updateBoard(latest);
+  updateStandDown(latest);
 }
 
 function receive(message: ViewMessage): void {
@@ -160,6 +220,7 @@ function receive(message: ViewMessage): void {
       renderer.resize();
       new ResizeObserver(() => renderer?.resize()).observe(canvas);
       window.addEventListener('keydown', cycleCamera);
+      buildCameraPicker();
     } else {
       renderer.setLeague(league);
     }
@@ -172,24 +233,52 @@ function receive(message: ViewMessage): void {
 }
 
 /**
- * Press C to change the view.
+ * The camera picker.
  *
- * Worth having on the night: an overhead shot settles an argument about where a
- * robot was, and following the ball is better on a small screen than on a big
- * one. Nobody has to remember it, and the default is the right one.
+ * Each of these earns its place on the night. Broadcast is the one to leave it
+ * on. Referee is straight overhead and settles an argument about where a robot
+ * actually was. Follow tracks the ball, which is what a small screen wants.
+ * Orbit is for the hall while it fills up.
+ *
+ * Buttons as well as a key, because a key nobody knows about is not a feature,
+ * and because the machine driving the projector is as likely to be poked at as
+ * typed on.
  */
-const CAMERAS = ['broadcast', 'referee', 'follow', 'orbit'] as const;
+const CAMERAS = [
+  { mode: 'broadcast', label: 'Broadcast' },
+  { mode: 'referee', label: 'Overhead' },
+  { mode: 'follow', label: 'Follow ball' },
+  { mode: 'orbit', label: 'Orbit' },
+] as const;
+
 let cameraIndex = 0;
+const cameraButtons: HTMLButtonElement[] = [];
+
+function setCamera(index: number): void {
+  cameraIndex = (index + CAMERAS.length) % CAMERAS.length;
+  const choice = CAMERAS[cameraIndex]!;
+  if (renderer) renderer.cameraMode = choice.mode;
+  cameraButtons.forEach((button, i) => {
+    button.setAttribute('aria-pressed', String(i === cameraIndex));
+  });
+}
+
+function buildCameraPicker(): void {
+  for (const [i, choice] of CAMERAS.entries()) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = choice.label;
+    button.title = `${choice.label} view (press C to cycle)`;
+    button.setAttribute('aria-pressed', String(i === cameraIndex));
+    button.addEventListener('click', () => setCamera(i));
+    cameraButtons.push(button);
+    cameras.append(button);
+  }
+}
 
 function cycleCamera(event: KeyboardEvent): void {
   if (event.key !== 'c' && event.key !== 'C') return;
-  cameraIndex = (cameraIndex + 1) % CAMERAS.length;
-  const mode = CAMERAS[cameraIndex]!;
-  if (renderer) renderer.cameraMode = mode;
-  status.textContent = mode;
-  setTimeout(() => {
-    if (status.textContent === mode) status.textContent = 'live';
-  }, 1500);
+  setCamera(cameraIndex + 1);
 }
 
 function connect(): void {

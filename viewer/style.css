@@ -95,3 +95,78 @@ html, body {
   text-transform: uppercase;
   color: var(--dim);
 }
+
+/* Rule 5.7 stand-down. A team playing a robot short is the most consequential
+   thing that happens in a match short of a goal, so it gets its own corner
+   rather than a line in the call banner that the next call would wipe. */
+.standdown {
+  position: fixed;
+  top: 5.6rem;
+  right: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  min-width: 15rem;
+}
+.standdown[hidden] { display: none; }
+
+.sd-card {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem 0.7rem;
+  background: rgba(8, 14, 10, 0.88);
+  border: 1px solid rgba(242, 245, 240, 0.14);
+  border-left: 4px solid var(--dim);
+  border-radius: 5px;
+  font-variant-numeric: tabular-nums;
+}
+.sd-card.cyan { border-left-color: var(--cyan); }
+.sd-card.yellow { border-left-color: var(--yellow); }
+
+.sd-card .who { font-size: 0.95rem; font-weight: 600; flex: 1; }
+.sd-card.cyan .who { color: var(--cyan); }
+.sd-card.yellow .who { color: var(--yellow); }
+
+.sd-card .rule {
+  font-size: 0.66rem;
+  letter-spacing: 0.06em;
+  color: var(--dim);
+}
+
+.sd-card .timer {
+  font-size: 1.3rem;
+  font-weight: 700;
+  min-width: 2.9rem;
+  text-align: right;
+}
+/* Ready is not the same as back on: 5.7.4 still needs the referee. */
+.sd-card .timer.ready { font-size: 0.8rem; font-weight: 600; color: #6fd39a; }
+
+/* Camera picker. Small, out of the way, and obvious once you look for it. */
+.cameras {
+  position: fixed;
+  bottom: 0.6rem;
+  left: 0.9rem;
+  display: flex;
+  gap: 0.3rem;
+}
+.cameras button {
+  font: inherit;
+  font-size: 0.66rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--dim);
+  background: rgba(8, 14, 10, 0.8);
+  border: 1px solid rgba(242, 245, 240, 0.14);
+  border-radius: 4px;
+  padding: 0.3rem 0.6rem;
+  cursor: pointer;
+}
+.cameras button:hover { color: var(--ink); }
+.cameras button[aria-pressed='true'] {
+  color: var(--ground);
+  background: var(--ink);
+  border-color: var(--ink);
+}
+.cameras button:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }

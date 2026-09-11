@@ -30,6 +30,19 @@ export interface ViewRobot {
   removed: boolean;
   /** Rule 5.8: nominated goalie. */
   isGoalie: boolean;
+  /**
+   * Seconds left of the 5.7.2 stand-down.
+   *
+   * A robot taken off is off for at least thirty seconds, and until it comes
+   * back its team is playing a robot short. That is the single most consequential
+   * thing that can happen in a match short of a goal, and it was invisible: the
+   * robot simply vanished from the field with no indication of why or for how
+   * long. Reaching zero does not put it back on — 5.7.4 needs the referee.
+   */
+  penaltyRemaining: number;
+  /** The rule it came off under, e.g. '5.7.1.6'. */
+  removalRule?: string;
+  removalReason?: string;
 }
 
 export interface ViewBall {
