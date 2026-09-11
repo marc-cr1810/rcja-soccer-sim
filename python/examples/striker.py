@@ -1,15 +1,27 @@
 """An attacking robot.
 
-A smart, decisive striker ported and enhanced from the reference agent:
-- Full position estimation (locate) using sonars, 360 camera, and compass.
-- Robust boundary protection: immediate line escape without spinning.
-- Noise-free encoder-based PD heading controller with critically damped tracking (no wiggling).
-- Continuous goal-oriented standoff approach and pocket convergence.
-- High-precision shot aiming targeting open corners and far posts.
-- Decisive kicker firing on ball-gate hold with clean dribbler release.
-- 50 Hz IR seeker primary ball perception with fresh-camera fallback.
-- Active scrum/stall detection with persistent lateral roll breakout maneuvers.
-- Teammate radio message sharing.
+The shape of it, in order of how much each part is worth:
+
+**Never shoot at something that is not the goal.** The kicker sends the ball
+along the robot's heading at better than two metres a second, and a ball that
+leaves the playing area is placed on a neutral point (rule 5.9.2) — possession
+handed back for nothing. So the kicker only fires when a ray cast from the ball
+along the current heading actually reaches the goal mouth. That single test is
+worth more than everything else here put together.
+
+**Get behind the ball, then drive through it.** Driving straight at the ball
+pushes it in whatever direction the robot happened to arrive from, which is how
+a robot scores at its own end. The target is a point behind the ball on the
+line to the goal; only once the robot is on that line does it drive at the ball
+at all.
+
+**The white line is a force, not an alarm.** Rule 5.7.1.6 only punishes a robot
+that is *wholly* in the out area, and the goal mouth sits 50 mm further out
+than the line does — so a robot that bolts for the middle every time a sensor
+sees white can never take a shot. The line pushes; it does not interrupt.
+
+**A kick-off is a strike (rule 5.4.7).** Drive at the ball and fire the kicker;
+the referee wants the ball 50 mm clear, and pushing it never gets there.
 """
 
 from __future__ import annotations
@@ -23,6 +35,28 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from rcja_soccer import Robot, clamp, drive, wrap_angle
+from rcja_soccer.field import (
+    HALF_GOAL_WIDTH,
+    HALF_LENGTH,
+    HALF_WIDTH,
+    attack_heading,
+    attack_x,
+    defend_x,
+    in_penalty_box,
+    our_goal,
+    shot_range,
+    their_goal,
+)
+from rcja_soccer.sense import (
+    BallTracker,
+    Locator,
+    YawRate,
+    back_inside,
+    obstacle_range,
+    spin_towards,
+    steer_clear_of_edges,
+    steer_ball_inside,
+)
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--team", default="cyan", choices=["cyan", "yellow"])
@@ -34,29 +68,21 @@ args = parser.parse_args()
 
 robot = Robot(team=args.team, number=args.number, name=args.name)
 
-# Field dimensions (mm)
-WALL_X = 1215.0
-WALL_Z = 910.0
-HALF_LENGTH = 915.0
-HALF_WIDTH = 610.0
-ROBOT_RADIUS = 110.0
-WHEEL_RADIUS = 25.0
-MOUNT_RADIUS = 90.0
+TEAM = args.team
+UPFIELD = attack_heading(TEAM)
+ATTACK_X = attack_x(TEAM)
+DEFEND_X = defend_x(TEAM)
+#: +1 if this team attacks towards +x, -1 otherwise. Turns every "is it far
+#: enough up the field" question into one comparison.
+FORWARD = 1.0 if ATTACK_X > 0 else -1.0
 
-#: Cyan attacks +x (0 rad); yellow attacks -x (pi rad).
-TOWARDS_THEIR_GOAL = 0.0 if args.team == "cyan" else math.pi
-THEIR_GOAL = "yellow" if args.team == "cyan" else "cyan"
-OUR_GOAL = "cyan" if args.team == "cyan" else "yellow"
-ATTACK_X = HALF_LENGTH if args.team == "cyan" else -HALF_LENGTH
-DEFEND_X = -ATTACK_X
+#: Inside the posts by enough that the ball fits and a keeper on the line has
+#: to actually move. The posts are at 225 mm.
+AIM_POST = 155.0
 
-MEMORY_TICKS = 50
-EDGE_MARGIN = 260.0
-WALL_REPULSION = 1.4
-
-# Smooth, critically-damped heading gains
-SPIN_KP = 1.1
-SPIN_KD = 0.4
+yaw = YawRate()
+locator = Locator(TEAM)
+ball = BallTracker()
 
 
 @robot.tick
@@ -64,394 +90,342 @@ def think(s, me):
     if not s.playing:
         return robot.coast()
 
-    # 1. Update yaw rate from encoders and heading
-    update_yaw_rate(s, me)
+    # `me` is emptied at every kick-off, so an empty one is the signal that the
+    # previous passage of play is over. The trackers are not in `me` and have
+    # to be told: a ball estimate from before the restart is an estimate of
+    # where the ball no longer is.
+    if s.kickoff.pending and not me.get("restarted"):
+        me.restarted = True
+        ball.reset()
+        yaw.reset()
+
+    yaw.update(s)
     heading = s.compass.heading
+    me_x, me_z = locator.update(s, heading)
+    ball.update(s, heading, me_x, me_z)
+    holding = s.ball_gate.held
 
-    # 2. Rule 5.7.1.6: Boundary line recovery takes absolute priority.
-    # Escape immediately with spin=0 so the robot drives straight back in.
-    line_escape = off_the_line(s)
-    if line_escape is not None:
-        log(me, "ESCAPE_LINE")
-        return robot.motors(drive(bearing=line_escape, speed=1.0, spin=0.0), dribbler=1.0)
-
-    # 3. Rule 5.4.7: Kick-off must be a clean strike clear of the center spot.
-    seen = update_ball_memory(s, me, heading)
-    if s.kickoff.pending and s.kickoff.ours and seen is not None:
-        log(me, "KICK_OFF")
-        return robot.motors(drive(bearing=seen[0], speed=1.0, spin=0.0), dribbler=0.0)
-
-    # 4. If locally blinded, check radio messages from teammate.
-    if seen is None:
-        teammate_ball = get_teammate_ball(s)
-        if teammate_ball is not None:
-            rel_bearing = wrap_angle(teammate_ball - heading)
-            seen = (rel_bearing, 400.0)
-
-    # 5. Ball lost: hunt towards own half while scanning
-    if seen is None:
-        log(me, "SEARCH")
-        towards_own_half = wrap_angle(math.atan2(0.0, DEFEND_X) - heading)
+    # -- rule 5.4.7 ---------------------------------------------------------
+    # A kick-off is a strike, not a carry: the ball has to roll 50 mm clear or
+    # the referee gives the kick-off to the other side. Pushing never gets
+    # there, because a shoved ball travels with the robot and the gap never
+    # opens.
+    #
+    # So: touch the ball, then stop dead and keep asking for the kicker. The
+    # stopping is the part that matters. The kicker is very often still
+    # charging at a restart — a goal is generally scored by firing at it, and
+    # the restart follows within the recharge time — and a robot that keeps
+    # driving while it waits has carried the ball off the spot and given the
+    # kick-off away before the solenoid is ready. Standing still is legal for
+    # the three seconds rule 5.4.7 allows, and the charge arrives first.
+    if s.kickoff.pending:
+        if not s.kickoff.ours:
+            # Rule 5.4.5 has us in our own box and 5.4.6 keeps us off the ball.
+            return robot.motors(drive(speed=0.0), dribbler=0.0)
+        square = spin_towards(wrap_angle(UPFIELD - heading), yaw)
+        if holding:
+            say(me, "KICK_OFF_WAIT")
+            return robot.motors(drive(speed=0.0, spin=square), dribbler=1.0, kicker=True)
+        to_ball = wrap_angle(math.atan2(ball.z - me_z, ball.x - me_x) - heading) if ball.seen else 0.0
+        say(me, "KICK_OFF")
         return robot.motors(
-            drive(bearing=towards_own_half, speed=0.3, spin=0.5),
-            dribbler=1.0,
-            say={"role": "striker", "ball_field": None, "held": False},
+            drive(bearing=to_ball, speed=0.55, spin=square), dribbler=1.0, kicker=True
         )
 
-    ball_bearing, ball_dist = seen
-    est_x, est_z, conf = locate(s, heading)
-    me.est_x = est_x
-    me.est_z = est_z
-
-    bx = est_x + math.cos(heading + ball_bearing) * ball_dist
-    bz = est_z + math.sin(heading + ball_bearing) * ball_dist
-
-    upfield_dir = 1.0 if args.team == "cyan" else -1.0
-
-    # 6. Rule 5.8 / 5.11: Friendly Penalty Box Exclusion Zone.
-    PENALTY_DEPTH = 300.0
-    PENALTY_WIDTH = 900.0
-    ball_in_friendly_box = (
-        upfield_dir * (bx - DEFEND_X) < (PENALTY_DEPTH + 40.0)
-        and abs(bz) < (PENALTY_WIDTH / 2.0 + 30.0)
-    )
-
-    carrying = s.ball_gate.held
-
-    if ball_in_friendly_box and not carrying:
-        log(me, "COVER_BOX", ball_dist)
-        wait_x = DEFEND_X + upfield_dir * (PENALTY_DEPTH + 85.0)
-        wait_z = clamp(bz * 0.65, -280.0, 280.0)
-        dx = wait_x - est_x
-        dz = wait_z - est_z
-        to_wait = wrap_angle(math.atan2(dz, dx) - heading)
-        wait_dist = math.hypot(dx, dz)
-        wait_speed = clamp(wait_dist / 110.0, 0.35, 1.0) if wait_dist > 25.0 else 0.0
-        # Face the opponent goal ready for clearance
-        to_goal_local = wrap_angle(TOWARDS_THEIR_GOAL - heading)
-        spin = spin_to(to_goal_local, me)
+    # -- the edges ----------------------------------------------------------
+    # Only an emergency when the robot is already out, which is the only thing
+    # rule 5.7.1.6 actually punishes; everything short of that is handled by
+    # folding a push back inside into the direction of travel.
+    #
+    # And the way back in comes from the position fix, not from the line
+    # sensors. The ring reports that the boundary is underneath the chassis; it
+    # cannot report which side of it the robot is on, because both sides give
+    # the same reading. Steering away from the line is right when the robot is
+    # inside it and drives the robot off the field when it is not, so a robot
+    # that decides on the ring alone sits on the boundary turning round and
+    # round until it is removed.
+    if abs(me_x) > HALF_LENGTH + 25 or abs(me_z) > HALF_WIDTH + 25:
+        home_x, home_z = back_inside(me_x, me_z, margin=170.0)
+        say(me, "RECOVER")
         return robot.motors(
-            drive(bearing=to_wait, speed=wait_speed, spin=spin),
+            drive(
+                bearing=wrap_angle(math.atan2(home_z - me_z, home_x - me_x) - heading),
+                speed=1.0,
+                spin=0.0,
+            ),
             dribbler=1.0,
-            kicker=False,
-            say={"role": "striker", "ball_field": me.get("field_bearing"), "held": False},
         )
 
-    # 7. Goal Aiming: target open corner / far post of the goal mouth
-    if conf >= 0.5:
-        target_x, target_z = select_shot_target(bx, bz, est_x, est_z)
-        push_angle = math.atan2(target_z - bz, target_x - bx)
-    else:
-        push_angle = TOWARDS_THEIR_GOAL
-
-    to_goal_local = wrap_angle(push_angle - heading)
-
-    # Visual lock-on from 360 camera if goal is directly seen
-    their_cam = getattr(getattr(s.camera, "goals", None), THEIR_GOAL, None)
-    if their_cam is not None and abs(their_cam.bearing - to_goal_local) < 0.4:
-        to_goal_local = their_cam.bearing * 0.7 + to_goal_local * 0.3
-
-    # Always keep chassis smoothly tracking the opponent goal
-    spin = spin_to(to_goal_local, me)
-
-    # 8. Continuous Standoff Approach and Strike in Robot Frame
-    ball_x = math.cos(ball_bearing) * ball_dist
-    ball_z = math.sin(ball_bearing) * ball_dist
-    gx = math.cos(to_goal_local)
-    gz = math.sin(to_goal_local)
-
-    standoff = clamp(ball_dist * 0.8, 120.0, 240.0)
-    target_x = ball_x - gx * standoff
-    target_z = ball_z - gz * standoff
-    dist_to_pocket = math.hypot(target_x, target_z)
-
-    # Check whether the robot is already positioned behind the ball relative to goal
-    behind = (
-        carrying
-        or (dist_to_pocket < 90.0)
-        or (ball_dist <= 220.0 and abs(ball_bearing) < 0.5 and abs(to_goal_local) < 0.5)
-    )
-
-    approach = math.atan2(target_z, target_x)
-
-    # Detour around the ball only when pocket is behind us and ball is directly in between
-    if target_x < -20.0 and abs(ball_z) < 150.0:
-        steer_z = target_z + (160.0 if ball_z >= 0 else -160.0)
-        approach = math.atan2(steer_z, target_x)
-
-    bearing = ball_bearing if behind else approach
-    closing = clamp(dist_to_pocket / 280.0, 0.45, 1.0)
-    speed = 1.0 if behind else closing
-
-    lined_up = abs(to_goal_local) < 0.32 or (their_cam is not None and abs(their_cam.bearing) < 0.30)
-    # Fire kicker whenever ball is in contact/held and lined up
-    kick = lined_up and (carrying or (behind and ball_dist <= 210.0))
-    dribbler_pwr = 0.0 if kick else 1.0
-
-    if carrying:
-        log(me, "CARRY_AND_SHOOT", ball_dist)
-        if not lined_up:
-            speed = 0.5
-    elif behind:
-        log(me, "STRIKE", ball_dist)
-    else:
-        log(me, "CONVERGE_POCKET", dist_to_pocket)
-
-    # 9. Anti-Scrum Stall Detection and Persistent Breakout Maneuver
-    enc_delta = me.get("last_enc_delta", 1.0)
-    last_speed = me.get("last_speed", 0.0)
-
-    is_stalled = (
-        last_speed > 0.6
-        and enc_delta < 0.20
-        and ball_dist <= 260.0
-    )
-
-    stall_ticks = me.get("stall_ticks", 0)
-    if is_stalled:
-        stall_ticks += 1
-    else:
-        stall_ticks = max(0, stall_ticks - 1)
-    me.stall_ticks = stall_ticks
-
-    # Trigger sustained breakout for ~0.35s (18 ticks) upon stall
-    breakout_timer = me.get("breakout_timer", 0)
-    if stall_ticks >= 6 and breakout_timer == 0:
-        me.breakout_timer = 18
-        me.scrum_side = 1.0 if (me.get("scrum_count", 0) % 2 == 0) else -1.0
-        me.scrum_count = me.get("scrum_count", 0) + 1
-        me.stall_ticks = 0
-
-    if breakout_timer > 0:
-        me.breakout_timer = breakout_timer - 1
-        log(me, "SCRUM_BREAKOUT")
-        if carrying:
-            kick = True
-            dribbler_pwr = 0.0
-            bearing = to_goal_local
-            speed = 1.0
-        else:
-            scrum_side = me.get("scrum_side", 1.0)
-            # Lateral jink 90 degrees across attack line to roll off the opponent
-            bearing = wrap_angle(to_goal_local + scrum_side * (math.pi / 2))
-            speed = 1.0
-            spin = spin_to(to_goal_local, me)
-
-    me.last_speed = speed
-
-    return robot.motors(
-        drive(bearing=bearing, speed=speed, spin=spin),
-        dribbler=dribbler_pwr,
-        kicker=kick,
-        say={"role": "striker", "ball_field": me.get("field_bearing"), "held": carrying},
-    )
-
-
-def select_shot_target(bx: float, bz: float, est_x: float, est_z: float) -> tuple[float, float]:
-    """Aim at the far post or open side to beat the goalkeeper (from rcja-soccer-lab)."""
-    post = 150.0  # inside 225 mm post
-
-    # If ball is on right side of field, aim across goal to left post
-    if bz > 35.0:
-        target_z = -post
-    elif bz < -35.0:
-        target_z = post
-    else:
-        # Central: aim for far corner away from where striker is approaching
-        target_z = post if est_z <= 0.0 else -post
-
-    return ATTACK_X, clamp(target_z, -post, post)
-
-
-def spin_to(error: float, me) -> float:
-    """Smooth, critically-damped PD heading controller with encoder damping."""
-    yaw_rate = me.get("yaw_rate", 0.0)
-    return clamp(error * SPIN_KP - yaw_rate * SPIN_KD, -1.0, 1.0)
-
-
-def update_yaw_rate(s, me) -> float:
-    """Compute clean yaw rate from wheel encoders with low-pass filtering."""
-    encoders = getattr(s, "encoders", None)
-    dt = max(1e-3, s.clock - me.get("last_clock", s.clock))
-    me.last_clock = s.clock
-
-    if encoders is not None and len(encoders) >= 4:
-        last_enc = me.get("last_encoders")
-        me.last_encoders = list(encoders)
-        if last_enc is not None and len(last_enc) == len(encoders):
-            sum_diff = sum(encoders[i] - last_enc[i] for i in range(len(encoders)))
-            enc_delta = sum(abs(encoders[i] - last_enc[i]) for i in range(len(encoders))) / len(encoders)
-            me.last_enc_delta = enc_delta
-
-            mean_speed = (sum_diff / len(encoders)) / dt
-            omega = (mean_speed * WHEEL_RADIUS) / MOUNT_RADIUS
-            rate = me.get("yaw_rate", 0.0)
-            rate += (omega - rate) * min(1.0, dt * 20.0)
-            me.yaw_rate = rate
-            return rate
-
-    # Fallback to compass differencing
-    last_h = me.get("last_heading", s.compass.heading)
-    diff = wrap_angle(s.compass.heading - last_h)
-    me.last_heading = s.compass.heading
-    raw_rate = diff / dt
-    rate = me.get("yaw_rate", 0.0)
-    rate += (raw_rate - rate) * min(1.0, dt * 10.0)
-    me.yaw_rate = rate
-    me.last_enc_delta = 1.0
-    return rate
-
-
-def locate(s, heading: float) -> tuple[float, float, float]:
-    """Estimate field coordinates (x, z) using 360-degree dual-goal visual triangulation & sonar."""
-    cam_estimates = []
-    cam = getattr(s, "camera", None)
-    if cam is not None and getattr(cam, "fresh", True):
-        yellow_cam = getattr(cam.goals, "yellow", None)
-        if yellow_cam is not None:
-            angle = wrap_angle(heading + yellow_cam.bearing)
-            cam_estimates.append((
-                915.0 - math.cos(angle) * yellow_cam.range,
-                0.0 - math.sin(angle) * yellow_cam.range,
-            ))
-        cyan_cam = getattr(cam.goals, "cyan", None)
-        if cyan_cam is not None:
-            angle = wrap_angle(heading + cyan_cam.bearing)
-            cam_estimates.append((
-                -915.0 - math.cos(angle) * cyan_cam.range,
-                0.0 - math.sin(angle) * cyan_cam.range,
-            ))
-
-    beams = []
-    offsets = [
-        (0.0, s.range.front),
-        (math.pi / 2, s.range.left),
-        (math.pi, s.range.back),
-        (-math.pi / 2, s.range.right),
-    ]
-    for offset, r in offsets:
-        if r is not None:
-            beams.append((wrap_angle(heading + offset), r))
-
-    def solve(component_fn, wall):
-        plus = None
-        minus = None
-        for angle, r in beams:
-            c = component_fn(angle)
-            if abs(c) < 0.6:
-                continue
-            val = math.copysign(wall, c) - (r + ROBOT_RADIUS) * c
-            if c > 0:
-                if plus is None or r > plus[1]:
-                    plus = (val, r)
-            else:
-                if minus is None or r > minus[1]:
-                    minus = (val, r)
-        if plus is not None and minus is not None:
-            better = plus if plus[1] >= minus[1] else minus
-            return better[0], True
-        only = plus or minus
-        return (only[0], False) if only else None
-
-    sol_x = solve(math.cos, WALL_X)
-    sol_z = solve(math.sin, WALL_Z)
-
-    if cam_estimates:
-        cx = sum(p[0] for p in cam_estimates) / len(cam_estimates)
-        cz = sum(p[1] for p in cam_estimates) / len(cam_estimates)
-        if sol_x and sol_z:
-            final_x = cx * 0.7 + sol_x[0] * 0.3
-            final_z = cz * 0.7 + sol_z[0] * 0.3
-        else:
-            final_x, final_z = cx, cz
-        return clamp(final_x, -HALF_LENGTH, HALF_LENGTH), clamp(final_z, -HALF_WIDTH, HALF_WIDTH), 1.0
-
-    if sol_x and sol_z:
-        return clamp(sol_x[0], -HALF_LENGTH, HALF_LENGTH), clamp(sol_z[0], -HALF_WIDTH, HALF_WIDTH), 0.8
-
-    return (0.0, 0.0, 0.2)
-
-
-def off_the_line(s) -> float | None:
-    """Direction pointing inward away from the white boundary line."""
-    x = 0.0
-    z = 0.0
-    hits = 0
-    for sensor in s.lines:
-        if sensor.surface != "line":
-            continue
-        hits += 1
-        x -= math.cos(sensor.bearing)
-        z -= math.sin(sensor.bearing)
-    if hits == 0:
-        return None
-    if math.hypot(x, z) < 0.2:
-        return math.pi
-    return math.atan2(z, x)
-
-
-def update_ball_memory(s, me, heading: float) -> tuple[float, float] | None:
-    """Track ball observations from 50 Hz 24-sensor IR seeker, with fresh camera fallback."""
-    measured_field = None
-    measured_range = None
-
-    # Primary sensor: 24-sensor IR ring at 50 Hz
-    if s.ball is not None:
-        measured_field = wrap_angle(heading + s.ball.bearing)
-        measured_range = 200.0 / math.sqrt(max(s.ball.strength, 1e-4))
-    # Secondary fallback: 360 camera (only when IR is blocked and frame is fresh)
-    else:
-        cam = getattr(s, "camera", None)
-        if cam is not None and getattr(cam, "fresh", False):
-            cam_ball = getattr(cam, "ball", None)
-            if cam_ball is not None:
-                measured_field = wrap_angle(heading + cam_ball.bearing)
-                measured_range = cam_ball.range
-
-    if measured_field is not None and measured_range is not None:
-        if me.get("field_bearing") is None:
-            me.field_bearing = measured_field
-            me.range = measured_range
-        else:
-            dt = max(1e-3, s.clock - me.get("last_ball_clock", s.clock))
-            me.last_ball_clock = s.clock
-            # Filter with tau = 0.2s to swallow 24-sensor stepping without lag
-            k = 1.0 - math.exp(-dt / 0.2)
-            me.field_bearing = wrap_angle(
-                me.field_bearing + wrap_angle(measured_field - me.field_bearing) * k
+    # -- no ball ------------------------------------------------------------
+    if not ball.seen:
+        told = teammate_ball(s)
+        if told is None:
+            # Fall back towards the middle of our own half, facing up the
+            # field, which is where the ball will most likely reappear and
+            # where being wrong costs least.
+            home_x = DEFEND_X * 0.35
+            travel = wrap_angle(math.atan2(-me_z, home_x - me_x) - heading)
+            say(me, "SEARCH")
+            return robot.motors(
+                drive(bearing=travel, speed=0.55, spin=spin_towards(wrap_angle(UPFIELD - heading), yaw)),
+                dribbler=1.0,
+                say={"role": "striker", "ball": None, "held": False},
             )
-            me.range = me.range + (measured_range - me.range) * k
+        bx, bz = told
+    else:
+        bx, bz = ball.x, ball.z
 
-        me.age = 0
-        return wrap_angle(me.field_bearing - heading), me.range
+    # -- where to put it ----------------------------------------------------
+    aim_x, aim_z = choose_aim(bx, bz, me_z)
+    push = math.atan2(aim_z - bz, aim_x - bx)
 
-    age = me.get("age", MEMORY_TICKS + 1) + 1
-    me.age = age
-    if age > MEMORY_TICKS or me.get("field_bearing") is None:
-        return None
-    return wrap_angle(me.field_bearing - heading), me.range
+    # Face the way the ball has to go. The kicker fires along the heading, so
+    # this is the aim as much as it is the posture. Recomputed below once the
+    # push has been bent away from any edge it was heading for.
+    spin = spin_towards(wrap_angle(push - heading), yaw)
+
+    # Stay out of our own box while the keeper is working it (rule 5.11).
+    keeper_active = teammate_is_keeping(s)
+    if keeper_active and in_penalty_box(bx, bz, our_goal(TEAM), slack=60.0) and not holding:
+        return cover(s, me, me_x, me_z, bz, heading, spin)
+
+    # -- curve round behind it, then drive through it ----------------------
+    # Keep the push on the field. Most of the balls that go out in a match are
+    # not wild shots, they are a robot patiently dribbling one over a touchline
+    # (rule 5.9.2, and the ball comes back on a neutral point).
+    push = steer_ball_inside(bx, bz, push)
+    spin = spin_towards(wrap_angle(push - heading), yaw)
+
+    range_to_ball = math.hypot(bx - me_x, bz - me_z)
+    to_ball = math.atan2(bz - me_z, bx - me_x)
+
+    # One number decides the whole approach: how far round the ball the robot
+    # is from where it ought to be. Zero means it is directly behind the ball
+    # on the line to the target, and driving straight at the ball pushes it
+    # straight at the target. A right angle means it is beside the ball, and
+    # driving at the ball would knock it sideways.
+    #
+    # Steering by an amount proportional to that angle turns the two cases into
+    # one: the robot curves round the ball and straightens up onto the line as
+    # it arrives, with no state and no moment where it switches plans. A
+    # threshold instead — "am I behind it yet?" — gives a robot that charges
+    # from wherever it happens to be standing and spends the match shoving the
+    # ball towards the nearest touchline.
+    # `swing` is zero when the robot is directly behind the ball on the line to
+    # the target, and grows to +/-pi as it works round to the wrong side.
+    swing = wrap_angle(to_ball - push)
+    # Steering off the line to the ball by a fraction of it gives a path that
+    # curves round the ball and straightens onto the line as it arrives: there
+    # is always some component towards the ball, so the robot spirals in
+    # rather than orbiting forever, and there is always some component round
+    # it, so it never arrives from the wrong side. Wider arcs close in, where
+    # there is no room left to correct.
+    gain = clamp(0.6 + 120.0 / max(range_to_ball, 100.0), 0.6, 1.4)
+    travel_field = wrap_angle(to_ball + clamp(swing * gain, -1.9, 1.9))
+
+    aligned = abs(swing) < 0.35
+    if holding:
+        travel_field = to_ball
+        state = "CARRY"
+    elif aligned:
+        state = "STRIKE"
+    else:
+        state = "ROUND"
+
+    # Full power down the line, a little less while swinging round, so the
+    # robot does not arrive at the ball still travelling sideways.
+    speed = 1.0 if (holding or aligned) else clamp(1.15 - abs(swing) * 0.35, 0.6, 1.0)
+
+    # The edges, as a force. Zero in open play, decisive on the line.
+    travel_field = steer_clear_of_edges(travel_field, me_x, me_z, 190.0 if holding else 150.0)
+    if not holding and keeper_active:
+        travel_field = leave_room_for_the_keeper(travel_field, me_x, me_z)
+
+    # -- shoot --------------------------------------------------------------
+    # Three questions, and all of them have to be yes.
+    #
+    # Does the shot reach the goal if nothing is in the way? Is anything in the
+    # way? And is it close enough to be a shot rather than a hopeful punt? A
+    # geometrically perfect shot from the halfway line has a keeper, an
+    # opposing striker and a metre and a half of carpet to survive, and when it
+    # hits any of them it rebounds into the out area about half the time — the
+    # ball comes back on a neutral point (rule 5.9.2), which is to say the
+    # robot has just made a save against itself.
+    blocker = obstacle_range(s, heading, me_x, me_z)
+    lane_clear = blocker is None or blocker > 430.0
+    reach = shot_range(bx, bz, heading, their_goal(TEAM))
+    close_enough = reach is not None and reach < (1100.0 if blocker is None else 800.0)
+    shot_on = reach is not None and lane_clear and close_enough
+    kick = holding and shot_on
+    dribbler = 0.0 if kick else 1.0
+
+    if holding and not shot_on:
+        if reach is not None and not lane_clear:
+            # Aimed right, but there is a robot in front. Carry on round it:
+            # the heading stays on the goal, and an omni drive can travel
+            # sideways while it does.
+            side = -1.0 if me_z > 0 else 1.0
+            travel_field = wrap_angle(push + side * 1.15)
+            travel_field = steer_clear_of_edges(travel_field, me_x, me_z, 190.0)
+            speed = 0.9
+            state = "DRIBBLE_ROUND"
+        elif reach is not None:
+            # On target and unobstructed, just too far out. Take it closer.
+            state = "CARRY_IN"
+        else:
+            # Carrying, but pointed at nothing. Turn rather than driving on and
+            # firing at a sideline.
+            speed = min(speed, 0.5)
+            state = "TURN_ON_GOAL"
+
+    # -- stuck --------------------------------------------------------------
+    travel_field, speed, spin, state = unstick(
+        s, me, me_x, me_z, travel_field, speed, spin, state, push, holding
+    )
+
+    say(me, state, range_to_ball)
+    return robot.motors(
+        drive(bearing=wrap_angle(travel_field - heading), speed=speed, spin=spin),
+        dribbler=dribbler,
+        kicker=kick,
+        say={"role": "striker", "ball": [round(bx), round(bz)], "held": holding},
+    )
 
 
-def get_teammate_ball(s) -> float | None:
-    """Read teammate radio messages for ball field coordinates."""
-    for msg in getattr(s, "messages", []):
-        body = getattr(msg, "body", None)
-        if body is None and isinstance(msg, dict):
-            body = msg.get("body")
-        if isinstance(body, dict) and body.get("ball_field") is not None:
-            return body["ball_field"]
+def leave_room_for_the_keeper(travel: float, me_x: float, me_z: float) -> float:
+    """Stay out of the strip of our own box the keeper is working in.
+
+    Rule 5.11.1 is two robots of one team inside their own penalty box, in
+    front of the goal, for long enough to affect the game — and the referee's
+    remedy is to move one of them, which is a worse outcome than never having
+    been there. The detector tests the central corridor, so the corners of the
+    box are not the problem; standing on the keeper's toes is.
+    """
+    if not in_penalty_box(me_x, me_z, our_goal(TEAM), slack=30.0) or abs(me_z) > 290.0:
+        return travel
+    # Up the field is always out of our own box, and it is where the striker
+    # wants to be anyway.
+    wx = math.cos(travel) + FORWARD * 1.5
+    wz = math.sin(travel)
+    return math.atan2(wz, wx)
+
+
+def choose_aim(bx: float, bz: float, me_z: float) -> tuple[float, float]:
+    """Where in the goal to put it — or, deep in our own half, where instead.
+
+    Near our own goal the opponent's net is the wrong target: the line to it
+    runs straight across our own mouth, and a push that goes wrong there is a
+    goal against. Aim up the wing the ball is already on and sort the rest out
+    in the other half.
+    """
+    if (bx - DEFEND_X) * FORWARD < HALF_LENGTH * 0.55:
+        wing = math.copysign(HALF_WIDTH * 0.55, bz if abs(bz) > 60 else 1.0)
+        return DEFEND_X + FORWARD * HALF_LENGTH * 1.5, wing
+
+    # Otherwise the far post, so a keeper sitting on the near one has to travel.
+    if bz > 45:
+        post = -AIM_POST
+    elif bz < -45:
+        post = AIM_POST
+    else:
+        post = AIM_POST if me_z <= 0 else -AIM_POST
+    return ATTACK_X, clamp(post, -HALF_GOAL_WIDTH + 70, HALF_GOAL_WIDTH - 70)
+
+
+def cover(s, me, me_x, me_z, bz, heading, spin):
+    """Wait outside our own box while the keeper deals with it.
+
+    Rule 5.11 makes two robots defending one goal a call the referee has to
+    make, and the keeper is better placed than we are. Sit on the edge of the
+    box, square on, ready for the clearance.
+    """
+    wait_x = DEFEND_X + FORWARD * 390.0
+    wait_z = clamp(bz * 0.6, -300.0, 300.0)
+    gap = math.hypot(wait_x - me_x, wait_z - me_z)
+    travel = math.atan2(wait_z - me_z, wait_x - me_x)
+    say(me, "COVER")
+    return robot.motors(
+        drive(
+            bearing=wrap_angle(travel - heading),
+            speed=clamp(gap / 140.0, 0.0, 1.0) if gap > 30 else 0.0,
+            spin=spin,
+        ),
+        dribbler=1.0,
+        say={"role": "striker", "ball": None, "held": False},
+    )
+
+
+def unstick(s, me, me_x, me_z, travel, speed, spin, state, push, holding):
+    """Notice a scrum and roll out of it sideways.
+
+    A stall here is wheels turning with the robot not moving, which is what
+    happens when two robots meet over the ball. Rule 5.6.1.2 gives it a few
+    seconds before the referee intervenes; going sideways is faster and keeps
+    the ball.
+    """
+    history = me.get("track", [])
+    history.append((s.clock, me_x, me_z))
+    while history and s.clock - history[0][0] > 0.45:
+        history.pop(0)
+    me.track = history
+
+    moved = math.hypot(me_x - history[0][1], me_z - history[0][2]) if len(history) > 1 else 999.0
+    trying = yaw.moving > 180.0
+    stalled = len(history) > 8 and moved < 22.0 and trying
+
+    timer = me.get("breakout", 0)
+    if timer > 0:
+        me.breakout = timer - 1
+        side = me.get("breakout_side", 1.0)
+        if holding:
+            # Holding it and pinned: turning is better than shoving, because
+            # the shot only needs the heading to come round.
+            return travel, 0.45, spin, "PINNED_TURN"
+        return wrap_angle(push + side * math.pi / 2), 1.0, spin, "BREAK_OUT"
+
+    count = me.get("stall", 0)
+    count = count + 1 if stalled else max(0, count - 1)
+    me.stall = count
+    if count >= 8:
+        me.stall = 0
+        me.breakout = 16
+        me.breakout_side = -me.get("breakout_side", -1.0)
+    return travel, speed, spin, state
+
+
+def teammate_ball(s):
+    """Where the keeper last saw the ball, if it said."""
+    for message in getattr(s, "messages", []):
+        body = getattr(message, "body", None)
+        if isinstance(body, dict) and isinstance(body.get("ball"), list):
+            spot = body["ball"]
+            if len(spot) == 2:
+                return float(spot[0]), float(spot[1])
     return None
 
 
-def log(me, state: str, dist: float | None = None) -> None:
+def teammate_is_keeping(s) -> bool:
+    for message in getattr(s, "messages", []):
+        body = getattr(message, "body", None)
+        if isinstance(body, dict) and body.get("role") == "goalie":
+            return True
+    return False
+
+
+def say(me, state: str, distance: float | None = None) -> None:
     """Optional debug telemetry at ~2 Hz."""
     if not args.debug:
         return
-    ticks = me.get("log_ticks", 0) + 1
-    me.log_ticks = ticks
+    ticks = me.get("log", 0) + 1
+    me.log = ticks
     if ticks % 25 == 0:
-        d_str = f"dist={dist:.0f}mm" if dist is not None else ""
-        print(f"[{args.team}-{args.number} Striker] {state:<16} {d_str}", file=sys.stderr)
+        extra = f"ball {distance:6.0f}" if distance is not None else " " * 11
+        print(
+            f"[{args.team}-{args.number} striker] {state:<14} {extra}"
+            f"  at ({locator.x:7.0f},{locator.z:6.0f})"
+            f"  ball ({ball.x:7.0f},{ball.z:6.0f}) age {ball.age:.2f}",
+            file=sys.stderr,
+        )
 
 
 if __name__ == "__main__":

@@ -68,24 +68,58 @@ export const AGENT_PATH = '/agent';
 export class RemoteTransport implements Transport {
   private pending: ActuatorFrame | null = null;
   private closed = false;
+  private socket: WebSocket;
   /** Commands that arrived and were superseded before the next poll. */
   overruns = 0;
   /** Commands rejected as malformed. */
   rejected = 0;
+  /** How many times this seat's program has come back after dropping out. */
+  reconnects = 0;
 
   constructor(
     readonly name: string,
     readonly robotId: string,
-    private readonly socket: WebSocket,
+    socket: WebSocket,
     private readonly motorCount: number,
   ) {
+    this.socket = socket;
+    this.listen(socket);
+  }
+
+  private listen(socket: WebSocket): void {
     socket.on('error', () => {
-      this.closed = true;
+      if (this.socket === socket) this.closed = true;
     });
-    socket.on('message', (data) => this.receive(String(data)));
+    socket.on('message', (data) => {
+      if (this.socket === socket) this.receive(String(data));
+    });
     socket.on('close', () => {
-      this.closed = true;
+      if (this.socket === socket) this.closed = true;
     });
+  }
+
+  /**
+   * Point this seat at a new connection.
+   *
+   * The seat survives the program behind it dying, because the match is
+   * holding this object: swapping the socket underneath keeps a reconnecting
+   * team in the same seat instead of handing them a new one, and keeps the
+   * record of what they did before they dropped.
+   *
+   * Whatever the old connection had queued is dropped. It was an answer to a
+   * sensor frame the world has long since moved past.
+   */
+  reattach(socket: WebSocket): void {
+    try {
+      if (this.socket !== socket) this.socket.close();
+    } catch {
+      // Already gone, which is usually why we are here.
+    }
+    this.socket = socket;
+    this.pending = null;
+    this.closed = false;
+    this.reconnects++;
+    this.listen(socket);
   }
 
   get connected(): boolean {
@@ -139,6 +173,13 @@ export class RemoteTransport implements Transport {
   }
 }
 
+export interface SeatReport {
+  overruns: number;
+  rejected: number;
+  connected: boolean;
+  reconnects: number;
+}
+
 export interface Seat {
   transport: RemoteTransport;
   team: 'cyan' | 'yellow';
@@ -157,6 +198,14 @@ export interface Seat {
 export class AgentGateway {
   private readonly seats = new Map<string, Seat>();
   private waiters: (() => void)[] = [];
+  /**
+   * Asked whether a seat is still serving a penalty, and for how long.
+   *
+   * The gateway does not own that fact - the match does, because it is
+   * measured in match seconds and paused with the clock - so it asks. Absent
+   * outside a match, when a seat can always be claimed.
+   */
+  standDown: ((robotId: string) => number) | null = null;
 
   /** How many of the four seats are filled. */
   get filled(): number {
@@ -164,7 +213,8 @@ export class AgentGateway {
   }
 
   get ready(): boolean {
-    return this.seats.size === 4;
+    if (this.seats.size !== 4) return false;
+    return [...this.seats.values()].every((seat) => seat.transport.connected);
   }
 
   /** Team names as claimed by whoever connected, for the scoreboard. */
@@ -220,19 +270,64 @@ export class AgentGateway {
       }
 
       const id = `${join.team}-${join.robot}`;
-      if (this.seats.has(id)) {
+      const held = this.seats.get(id);
+
+      if (held?.transport.connected) {
         reject(`${id} is already connected`);
+        return;
+      }
+
+      /*
+       * Rule 5.7: a robot that stops is a damaged robot, and it comes off.
+       *
+       * A program that loses its connection mid-match has stopped, whatever
+       * the reason - the laptop slept, the process crashed, someone kicked the
+       * cable - and it is not different in kind from a robot whose battery
+       * came loose. The referee takes it off for thirty seconds (5.7.2) and it
+       * comes back at a corner of its own penalty box (5.7.4). Letting the
+       * program reconnect and resume instantly would make a crash cost nothing
+       * and make a crash-loop a tactic: the robot would be immune to shoving
+       * for as long as it kept dying.
+       *
+       * So the seat is held, not freed, and the reconnect is refused until the
+       * stand-down is served. The team keeps the seat - nobody else can take
+       * it - and their match record keeps the disconnection in it.
+       */
+      const remaining = held ? (this.standDown?.(id) ?? 0) : 0;
+      if (held && remaining > 0) {
+        reject(
+          `${id} was disconnected during play and is standing down under rule 5.7.2; ` +
+            `${remaining.toFixed(0)} s remaining`,
+        );
+        return;
+      }
+
+      if (held) {
+        // Same seat, same transport object, new socket underneath, so the
+        // match keeps talking to the thing it is already holding.
+        held.transport.reattach(socket);
+        socket.send(
+          JSON.stringify({
+            type: 'welcome',
+            robot: id,
+            motors: motorCount,
+            protocol: PROTOCOL_VERSION,
+          } satisfies WelcomeMessage),
+        );
+        if (this.ready) {
+          for (const wake of this.waiters.splice(0)) wake();
+        }
         return;
       }
 
       const teamName = join.name ?? (join.team === 'cyan' ? 'Cyan' : 'Yellow');
       const transport = new RemoteTransport(`${teamName}/${id}`, id, socket, motorCount);
       this.seats.set(id, { transport, team: join.team, number: join.robot, teamName });
-      socket.on('close', () => {
-        // Only drop the seat if it is still this connection's. A reconnect that
-        // raced a close would otherwise unseat itself.
-        if (this.seats.get(id)?.transport === transport) this.seats.delete(id);
-      });
+      // The seat is deliberately NOT freed when the socket closes. A seat is a
+      // team's place in the match, and losing a connection is a robot fault,
+      // not a withdrawal - see the stand-down above. `closeAll` clears them
+      // between matches.
+
 
       socket.send(
         JSON.stringify({
@@ -256,13 +351,14 @@ export class AgentGateway {
   }
 
   /** What went wrong for whom, for the match record. */
-  report(): Record<string, { overruns: number; rejected: number; connected: boolean }> {
-    const out: Record<string, { overruns: number; rejected: number; connected: boolean }> = {};
+  report(): Record<string, SeatReport> {
+    const out: Record<string, SeatReport> = {};
     for (const [id, seat] of this.seats) {
       out[id] = {
         overruns: seat.transport.overruns,
         rejected: seat.transport.rejected,
         connected: seat.transport.connected,
+        reconnects: seat.transport.reconnects,
       };
     }
     return out;

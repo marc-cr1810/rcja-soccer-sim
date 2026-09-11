@@ -56,6 +56,7 @@ npm run serve            # then open http://localhost:8080
 | `src/ladder.ts` | **New.** Every entry against every other, both ways round. |
 | `src/server.ts` | **New.** The match server: runs matches, streams them. |
 | `src/gateway.ts` | **New.** Where robot programs connect, on the same port. |
+| `src/bench.ts` | **New.** Measures a robot program and says what is wrong with it. |
 | `viewer/` | **New.** The spectator client, using the lab's renderer. |
 | `python/` | **New.** The client library teams write against, and examples. |
 
@@ -154,6 +155,51 @@ the ball out.
 Rolling resistance on carpet is near enough a constant force, so distance goes
 with the square of speed: hard kicks carry, gentle knocks die. Per ten-minute
 match this took goals from 17.5 to 4.8 and ball-out-of-play from 183 to 89.
+
+## Watching it
+
+```bash
+npm run build:viewer && npm run serve       # then open http://localhost:8080
+```
+
+The viewer is served by the match server, so it watches whatever is on the port
+it was loaded from and there is nothing to configure.
+
+Working on the viewer itself, `npm run dev:viewer` serves it from Vite instead,
+on port 5173, with hot reload — and Vite knows nothing about any match, so in
+dev the client looks for a match server on its own default port. Start one
+alongside. A screen watching a different machine, or a second server on another
+port, wants `?server=host:port`.
+
+If it cannot reach a server it says so, and says which address it tried. A
+socket left hanging in CONNECTING is not a state worth showing anybody: Vite
+accepts the connection and then never completes the upgrade, so neither `open`
+nor `close` ever fires, and the result is a black field, no error, and nothing
+to go on.
+
+## Measuring a robot
+
+```bash
+npm run bench -- --spawn "python3 python/examples/play.py --only cyan --url {url}"
+```
+
+Starts your programs, plays them against the reference team at about ten times
+real time, and prints a page of ground truth: where each robot spent the match,
+what it did with the ball, what the referee had to do about it — then a list of
+what is wrong, each one naming the rule it breaks and what the fix looked like.
+
+Everything it checks came from a fault that was genuinely in a robot in this
+repository, that was invisible watching the match at normal speed, and that
+took a measurement to find. A striker wholly outside the playing area for a
+quarter of the match. Every kick-off illegal, because a pushed ball travels
+with the robot pushing it and the 50 mm gap rule 5.4.7 asks for never opens. A
+keeper convinced it was on its own goal line while standing on the halfway
+mark, because it believed a sonar that had bounced off an opponent. Shots aimed
+perfectly and blocked at a metre, rebounding out for a neutral-point restart.
+
+`--json before.json` saves the numbers; `--baseline before.json` on the next
+run shows which way each one moved and whether that is the good direction,
+which is what makes it usable in a loop.
 
 ## Next
 

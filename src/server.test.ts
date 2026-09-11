@@ -230,6 +230,136 @@ describe('the match server', () => {
   });
 });
 
+describe('a robot program that goes away', () => {
+  const servers: MatchServer[] = [];
+
+  afterEach(async () => {
+    for (const s of servers.splice(0)) await s.close();
+  });
+
+  /** A program that answers every frame with the same command. */
+  function join(
+    port: number,
+    team: 'cyan' | 'yellow',
+    robot: 1 | 2,
+  ): Promise<{ socket: WebSocket; rejected: string | null }> {
+    return new Promise((ok, fail) => {
+      const socket = new WebSocket(`ws://127.0.0.1:${port}/agent`);
+      socket.addEventListener('open', () => {
+        socket.send(JSON.stringify({ type: 'join', protocol: 1, team, robot, name: team }));
+      });
+      socket.addEventListener('message', (e) => {
+        const message = JSON.parse(String(e.data)) as {
+          type: string;
+          reason?: string;
+        };
+        if (message.type === 'welcome') ok({ socket, rejected: null });
+        else if (message.type === 'reject') ok({ socket, rejected: message.reason ?? '' });
+        else if (message.type === 'sensors') {
+          socket.send(JSON.stringify({ type: 'command', frame: { motors: [0.3, 0.3, 0.3, 0.3] } }));
+        }
+      });
+      socket.addEventListener('error', () => fail(new Error('could not connect')));
+    });
+  }
+
+  it('is taken off for thirty seconds and may not simply come back', async () => {
+    /*
+     * Rule 5.7: a robot that has stopped is a damaged robot.
+     *
+     * A program losing its socket is not different in kind from a battery
+     * falling out, and treating it as free would make a crash cost nothing -
+     * worse, it would make a crash-loop a tactic, because a robot nobody can
+     * shove is a robot that keeps dying and reappearing.
+     */
+    const server = new MatchServer({ port: 0, realtime: false, idealSensors: true });
+    servers.push(server);
+    const port = await server.listen();
+
+    const first = await join(port, 'cyan', 1);
+    const second = await join(port, 'cyan', 2);
+    expect(first.rejected).toBeNull();
+
+    const playing = server.play({
+      agents: agents(),
+      transports: server.agents.transports(),
+      halfSeconds: 30,
+      seed: 1,
+    });
+
+    await new Promise((ok) => setTimeout(ok, 300));
+    first.socket.close();
+    await new Promise((ok) => setTimeout(ok, 200));
+
+    const match = server.currentMatch!;
+    const robot = match.world.robots.find((r) => r.id === 'cyan-1')!;
+    expect(robot.removed).toBe(true);
+    expect(robot.removalRule).toBe('5.7.1');
+    expect(match.standDown('cyan-1')).toBeGreaterThan(20);
+
+    // Coming straight back is refused, and the refusal says why.
+    const tooSoon = await join(port, 'cyan', 1);
+    expect(tooSoon.rejected).toContain('5.7.2');
+    tooSoon.socket.close();
+
+    // Nobody else can take the seat either: it is still that team's.
+    expect(server.agents.filled).toBe(2);
+
+    await playing;
+    second.socket.close();
+  }, 30000);
+
+  it('keeps the seat and the record when the program comes back', async () => {
+    const server = new MatchServer({ port: 0, realtime: false, idealSensors: true });
+    servers.push(server);
+    const port = await server.listen();
+
+    const first = await join(port, 'cyan', 1);
+    const playing = server.play({
+      agents: agents(),
+      transports: server.agents.transports(),
+      halfSeconds: 2,
+      seed: 1,
+    });
+    await playing;
+
+    // Between matches nothing is standing down, so a rejoin is allowed and
+    // lands in the same seat rather than a new one.
+    first.socket.close();
+    await new Promise((ok) => setTimeout(ok, 50));
+    const again = await join(port, 'cyan', 1);
+    expect(again.rejected).toBeNull();
+    expect(server.agents.filled).toBe(1);
+    expect(server.agents.report()['cyan-1']?.reconnects).toBe(1);
+    again.socket.close();
+  }, 20000);
+
+  it('plays a real match at speed when programs are attached', async () => {
+    /*
+     * `match.run()` never yields, so a "fast" match with sockets on it used to
+     * be played out in milliseconds against four programs that were never
+     * asked anything. The tell is that every cycle is a missed one.
+     */
+    const server = new MatchServer({ port: 0, realtime: false, idealSensors: true });
+    servers.push(server);
+    const port = await server.listen();
+    const one = await join(port, 'cyan', 1);
+
+    const result = await server.play({
+      agents: agents(),
+      transports: server.agents.transports(),
+      halfSeconds: 4,
+      seed: 1,
+    });
+
+    const slot = result.slots['cyan-1']!;
+    const cycles = 4 * 2 * 50;
+    expect(slot.missed).toBeLessThan(cycles / 2);
+    expect(slot.worstRun).toBeLessThan(25);
+    one.socket.close();
+  }, 20000);
+});
+
 describe('the frame rate', () => {
   it('sends at a rate an eye needs, not the rate the physics runs at', () => {
     // 100 Hz of physics streamed raw would be three times the bandwidth for

@@ -15,24 +15,58 @@
 No dependencies, on purpose: the schools this league exists to reach are the
 ones where pip is behind a proxy, offline, or not something a student is
 allowed to run, and a dependency is a reason a team cannot enter.
+
+Three modules, in the order a team meets them:
+
+``drive``   four wheel powers from a direction. Needed on day one.
+``field``   the rulebook's own dimensions. Facts, not help.
+``sense``   turning readings into where you are and where the ball is.
+
+Everything outside ``robot`` is ordinary readable code with no privileged
+access to anything. Read it, copy it, and replace the parts you want to beat
+somebody with.
 """
 
 from ._ws import WebSocketError
 from .drive import WHEEL_AXES, clamp, coast, drive, wrap_angle
 from .robot import DEFAULT_URL, PROTOCOL_VERSION, Memory, Reading, Robot
+from .sense import (
+    BallTracker,
+    Locator,
+    YawRate,
+    approach_point,
+    back_inside,
+    keep_inside,
+    line_bearing,
+    obstacle_range,
+    spin_towards,
+    steer_ball_inside,
+    steer_clear_of_edges,
+)
 
 __all__ = [
     "DEFAULT_URL",
     "PROTOCOL_VERSION",
+    "BallTracker",
+    "Locator",
     "Memory",
     "Reading",
     "Robot",
     "WHEEL_AXES",
     "WebSocketError",
+    "YawRate",
+    "approach_point",
+    "back_inside",
     "clamp",
     "coast",
     "drive",
+    "keep_inside",
+    "line_bearing",
+    "obstacle_range",
+    "spin_towards",
+    "steer_ball_inside",
+    "steer_clear_of_edges",
     "wrap_angle",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

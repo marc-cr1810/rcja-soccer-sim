@@ -5,7 +5,7 @@
  * reads exact ball coordinates out of the world object, and a competition robot
  * must not, because no robot on a real field can. What makes a sensor
  * interesting to program against is not the reading, it is the specific way the
- * reading is wrong — a bearing quantised to sixteen sectors, a range that
+ * reading is wrong — a bearing quantised to a ring of sectors, a range that
  * vanishes off a wall struck at a shallow angle, a heading that drifts all half.
  *
  * Noise is deterministic, seeded per robot per match. A match that cannot be
@@ -119,11 +119,11 @@ export function blocks(
 /**
  * Sectors in the infrared ring.
  *
- * Sixteen phototransistors around the chassis is the common build, and it is
- * what fixes the resolution of everything downstream: 22.5° of ambiguity, which
- * is about 100 mm of lateral error at half a field. Teams that want better
- * bearing than this have to get it by moving and comparing, which is a real
- * technique and worth having to discover.
+ * A ring of phototransistors around the chassis is the common build, and it is
+ * what fixes the resolution of everything downstream: at twenty-four of them,
+ * 15° of ambiguity, which is about 70 mm of lateral error at half a field.
+ * Teams that want better bearing than this have to get it by moving and
+ * comparing, which is a real technique and worth having to discover.
  */
 export const IR_SECTORS = 24;
 
@@ -132,8 +132,23 @@ export const IR_SECTORS = 24;
  * is detectable across the diagonal of the field but not reliably.
  */
 const IR_MAX_RANGE = 2200;
-/** Range at which strength reads 1.0. */
-const IR_REFERENCE_RANGE = 200;
+/**
+ * Range at which strength reads 1.0, and therefore the range below which it
+ * reads 1.0 and says nothing further.
+ *
+ * This is the contact distance — the robot's 110 mm shell plus the ball's
+ * radius — and it is deliberately no larger. A real ring does saturate when
+ * the ball is against the chassis, so the plateau is honest; where it was
+ * dishonest was its width. At 200 mm the reading went flat 70 mm before the
+ * ball could touch anything, which is the exact band in which a program has
+ * to decide whether it is behind the ball, whether to fire, and how wide to
+ * stand off. Half of every sighting in a match falls inside it.
+ *
+ * Programs converting strength back to a range should use this constant, and
+ * should treat any reading at 1.0 as "at the mouth, distance unknown" rather
+ * than as a measurement. The camera is the sensor with a real range on it.
+ */
+export const IR_REFERENCE_RANGE = 131;
 
 export interface IrOptions {
   /** Other robots that might be in the way. */

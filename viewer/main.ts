@@ -1,3 +1,4 @@
+/// <reference types="vite/client" />
 /**
  * The spectator client.
  *
@@ -283,21 +284,65 @@ function cycleCamera(event: KeyboardEvent): void {
   setCamera(cameraIndex + 1);
 }
 
+/**
+ * Which match server to watch.
+ *
+ * Built and served BY the match server, that is wherever the page came from,
+ * and there is nothing to configure. Run from the Vite dev server it is not:
+ * the page comes from Vite's own port, which serves the client and knows
+ * nothing about any match — so the default there is the match server's own
+ * default port, and `?server=host:port` overrides both for a screen watching a
+ * machine other than the one it is plugged into.
+ *
+ * Getting this wrong used to produce a black screen and nothing else. Vite
+ * accepts the TCP connection and then never completes the upgrade, so the
+ * socket sits in CONNECTING rather than failing, and neither `open` nor
+ * `close` ever fires: no status change, no retry, no error in the console, and
+ * a field that is never drawn because the renderer is built on the first
+ * frame. See the timeout below.
+ */
+const DEFAULT_SERVER_PORT = 8080;
+
+function serverAddress(): string {
+  const asked = new URLSearchParams(location.search).get('server');
+  if (asked) return asked;
+  if (import.meta.env.DEV) return `${location.hostname}:${DEFAULT_SERVER_PORT}`;
+  return location.host;
+}
+
+/** How long to let a socket sit in CONNECTING before calling it a failure. */
+const CONNECT_TIMEOUT = 4000;
+
 function connect(): void {
-  const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`;
+  const host = serverAddress();
+  const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${host}`;
   const socket = new WebSocket(url);
+  let everLive = false;
+
+  // A socket that never opens and never closes is the worst of both worlds: it
+  // is indistinguishable from a slow connection, forever. Give it a deadline,
+  // and let the close handler below do the reporting either way.
+  const deadline = setTimeout(() => socket.close(), CONNECT_TIMEOUT);
 
   socket.addEventListener('open', () => {
+    everLive = true;
+    clearTimeout(deadline);
     status.textContent = 'live';
   });
   socket.addEventListener('message', (event) => {
     receive(JSON.parse(String(event.data)) as ViewMessage);
   });
   socket.addEventListener('close', () => {
-    status.textContent = 'reconnecting…';
-    // Venue wifi drops. A screen in a hall has to come back on its own,
-    // because nobody is going to be watching it to press refresh.
-    setTimeout(connect, 1000);
+    clearTimeout(deadline);
+    /*
+     * Two different failures, and telling them apart is the whole value of the
+     * line. A socket that was live and dropped is venue wifi, and the screen
+     * should say so and quietly come back — nobody is going to be watching it
+     * to press refresh. A socket that never opened at all is pointed at the
+     * wrong place, and the one thing worth printing is where it was pointed.
+     */
+    status.textContent = everLive ? 'reconnecting…' : `no match server at ${host}`;
+    setTimeout(connect, everLive ? 1000 : 2000);
   });
   socket.addEventListener('error', () => socket.close());
 }

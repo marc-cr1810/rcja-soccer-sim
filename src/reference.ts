@@ -17,12 +17,11 @@
 import { MOUNT_RADIUS, mixOmni, openDrive, wrapAngle, type DriveSpec } from './drive';
 import { WHEEL_RADIUS } from './sensors';
 import { HALF_LENGTH, HALF_WIDTH, WALL_X, WALL_Z } from './field';
+import { IR_REFERENCE_RANGE } from './sensors';
 import type { ActuatorFrame, SensorFrame } from './protocol';
 import type { Agent } from './agent';
 
 const ROBOT_RADIUS = 110;
-/** Matches IR_REFERENCE_RANGE in sensors.ts: strength 1.0 at 200 mm. */
-const IR_REFERENCE_RANGE = 200;
 
 export type Role = 'striker' | 'goalie';
 
@@ -308,7 +307,7 @@ export class ReferenceAgent implements Agent {
   private readonly role: Role;
   private readonly skill: number;
   private lastClock = 0;
-  private thinkHold = 0;
+  private thinkCredit = 0;
   private lastCommand: ActuatorFrame = { motors: [0, 0, 0, 0] };
 
   constructor(private readonly opts: ReferenceOptions) {
@@ -323,7 +322,7 @@ export class ReferenceAgent implements Agent {
     this.yaw.reset();
     this.yawRate = 0;
     this.lastClock = 0;
-    this.thinkHold = 0;
+    this.thinkCredit = 0;
     this.lastCommand = { motors: [0, 0, 0, 0] };
   }
 
@@ -363,11 +362,21 @@ export class ReferenceAgent implements Agent {
      * fraction of the rate is a handicap that actually costs something, and it
      * is also the honest way a cheaper robot is worse - its control loop is
      * slower, so it acts on staler information.
+     *
+     * The rate is carried as a fractional credit rather than a whole number of
+     * ticks to hold for, because rounding made most of the dial do nothing.
+     * `Math.round(1 / skill)` is 1 for every skill above 0.67 - so a 0.8 robot
+     * was not handicapped at all, only slowed, and being slowed on its own can
+     * make a robot BETTER. It measured -7 goals over 48 matches: the weaker
+     * setting winning. Between 0.6 and 0.45 the rounding collapsed two
+     * settings onto the same 2-tick hold, so they were the same robot under
+     * two names. A credit gives a think rate of exactly skill x CONTROL_HZ,
+     * and every turn of the dial changes something.
      */
     if (this.skill < 1) {
-      this.thinkHold -= 1;
-      if (this.thinkHold > 0) return this.lastCommand;
-      this.thinkHold = Math.round(1 / this.skill);
+      this.thinkCredit += this.skill;
+      if (this.thinkCredit < 1) return this.lastCommand;
+      this.thinkCredit -= 1;
     }
     const command = this.decide(frame);
     this.lastCommand = command;
@@ -381,19 +390,35 @@ export class ReferenceAgent implements Agent {
     /*
      * Rule 5.4.7: a kick-off has to be a strike, not a carry.
      *
-     * The dribbler is on by default the rest of the time, and leaving it on at
-     * a kick-off means the ball never rolls the 50 mm clear the rule asks for.
-     * The referee then awards the kick-off to the other side, who do the same
-     * thing, and the match becomes nothing but restarts - 203 of them in four
-     * minutes, in the ladder run that found this.
+     * The obvious reading of that - roller off, drive through the ball, let it
+     * run - does not work, and measuring it was the only way to find out. A
+     * robot and a ball separate by position in this world, not by impulse, so
+     * a shoved ball travels along with the robot that is shoving it and the
+     * 50 mm gap the rule asks for never opens at all. The referee awarded the
+     * kick-off to the other side at every restart: 10.6 of 10.6 in a run of
+     * five matches.
      *
-     * So: roller off, drive through the ball, and let it run.
+     * The only thing that makes the ball leave is the kicker. So: come up to
+     * the ball, then STOP, and hold the kicker request until it fires.
+     *
+     * The stopping is the part that is easy to miss. The kicker is usually
+     * still charging at a restart, because the goal that caused the restart
+     * was scored by firing it, and a robot that keeps driving while it waits
+     * has carried the ball off the spot and given the kick-off away before the
+     * solenoid is ready. Standing still is legal for the three seconds the
+     * rule allows; carrying is not.
      */
-    if (frame.kickoff.pending && frame.kickoff.ours && frame.ball) {
-      return {
-        motors: mixOmni(this.drive, frame.ball.bearing, 1, 0),
-        dribbler: 0,
-      };
+    if (frame.kickoff.pending && frame.kickoff.ours) {
+      if (frame.ballGate.held) {
+        return { motors: [0, 0, 0, 0], dribbler: 1, kicker: true };
+      }
+      if (frame.ball) {
+        return {
+          motors: mixOmni(this.drive, frame.ball.bearing, 0.55, 0),
+          dribbler: 1,
+          kicker: true,
+        };
+      }
     }
 
     // Nothing else matters while a wheel is over the line. 5.7.1.6 takes a
@@ -468,30 +493,46 @@ export class ReferenceAgent implements Agent {
     }
 
     // Everything from here is in the robot's own frame: where the ball is,
-    // and the point behind it on the line towards their goal.
+    // and which way round it the robot has to come.
     const toGoalLocal = this.offTheWall(frame, wrapAngle(toGoal - heading));
-    const ballX = Math.cos(seen.bearing) * seen.range;
-    const ballZ = Math.sin(seen.bearing) * seen.range;
-    const standoff = clamp(seen.range * 0.8, 120, 260);
-    const targetX = ballX - Math.cos(toGoalLocal) * standoff;
-    const targetZ = ballZ - Math.sin(toGoalLocal) * standoff;
-
-    const behind = Math.hypot(targetX, targetZ) < 90;
-    const approach = Math.atan2(targetZ, targetX);
+    /*
+     * How far round the ball the robot is from where it ought to be.
+     *
+     * Zero means directly behind the ball on the line to their goal, so that
+     * driving straight at it pushes it straight at the target. A right angle
+     * means beside it, where driving at it knocks it sideways.
+     *
+     * Steering off the line to the ball by a fraction of this angle turns the
+     * two cases into one continuous path: there is always some component
+     * towards the ball, so the robot spirals in rather than orbiting forever,
+     * and always some component round it, so it never arrives from the wrong
+     * side.
+     *
+     * This replaced a threshold - "is the standoff point within 90 mm yet?" -
+     * and the threshold was a defect rather than a rough edge. It sat on a
+     * noisy quantity, so it chattered between two different plans several
+     * times a second and the robot spent its time switching rather than
+     * arriving. It showed up from a long way off, too: a copy of this agent
+     * with its decision loop slowed to two thirds BEAT the full-rate original
+     * by 22 goals over 48 matches, because running at half the rate is a
+     * low-pass filter on the chatter. A controller that gets better when you
+     * slow it down is over-reacting somewhere, and this was the somewhere.
+     */
+    const swing = wrapAngle(seen.bearing - toGoalLocal);
+    // Wider arcs close in, where there is no room left to correct.
+    const gain = clamp(0.6 + 120 / Math.max(seen.range, 100), 0.6, 1.4);
+    const bearing = this.offTheWall(
+      frame,
+      wrapAngle(seen.bearing + clamp(swing * gain, -1.9, 1.9)),
+    );
+    const aligned = Math.abs(swing) < 0.35;
 
     // Face the goal while doing it, so the dribbler and kicker point the right
     // way when the ball arrives.
     const spin = this.spinTo(toGoalLocal);
-    const bearing = behind ? seen.bearing : approach;
-    /*
-     * Ease off as the standoff point comes up.
-     *
-     * Full power right up to the target overshoots it, and an overshoot near
-     * the ball is how a robot ends up shoving it over the touchline. The ramp
-     * starts about a robot's length out.
-     */
-    const closing = clamp(Math.hypot(targetX, targetZ) / 300, 0.35, 1);
-    const speed = (behind ? 1 : 0.85 * closing) * this.skill;
+    // Full power down the line, a little less while swinging round, so the
+    // robot does not arrive at the ball still travelling sideways.
+    const speed = (aligned ? 1 : clamp(1.15 - Math.abs(swing) * 0.35, 0.6, 1)) * this.skill;
 
     const goal = frame.camera.goals[this.opts.team === 'cyan' ? 'yellow' : 'cyan'];
     const lined = goal !== null && Math.abs(goal.bearing) < 0.2;

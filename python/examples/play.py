@@ -6,6 +6,11 @@ Starts four programs — a striker and a keeper for each team — and points the
 all at a match server. Both sides run the identical code, so whatever happens
 is the robots, not the matchup.
 
+    python play.py --only cyan
+
+Starts one side, which is what a bench run wants: the other two robots are the
+opponent the bench is measuring you against, and it supplies them itself.
+
 Start the server first, in another terminal:
 
     npm run build:viewer
@@ -30,6 +35,12 @@ parser.add_argument("--url", default="ws://localhost:8080/agent")
 parser.add_argument("--cyan", default="ACT-01", help="name for the cyan team")
 parser.add_argument("--yellow", default="QLD-04", help="name for the yellow team")
 parser.add_argument("--debug", action="store_true", help="stream live robot decision telemetry")
+parser.add_argument(
+    "--only",
+    choices=["cyan", "yellow"],
+    default=None,
+    help="start one side only, which is what a bench run of that side wants",
+)
 args = parser.parse_args()
 
 #: Both sides, same two programs. Robot 1 attacks, robot 2 keeps goal - which
@@ -40,6 +51,9 @@ LINE_UP = [
     ("striker.py", "yellow", 1, args.yellow),
     ("goalie.py", "yellow", 2, args.yellow),
 ]
+
+if args.only:
+    LINE_UP = [entry for entry in LINE_UP if entry[1] == args.only]
 
 processes: list[subprocess.Popen] = []
 

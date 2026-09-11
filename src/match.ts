@@ -74,6 +74,18 @@ export interface MatchOptions {
   seed?: number;
   inclined?: boolean;
   idealSensors?: boolean;
+  /**
+   * Called after every physics step, with the match.
+   *
+   * The one way to watch a match closely from outside without the watcher
+   * being able to change it. Sampling from a timer cannot see a ball cross a
+   * line between two frames, and polling from the outer loop cannot see
+   * anything the outer loop does not already know — so a telemetry harness
+   * either gets a hook here or reimplements the match loop, and a harness that
+   * reimplements the loop is measuring a different match from the one people
+   * play.
+   */
+  observe?: (match: Match) => void;
 }
 
 export interface MatchResult {
@@ -108,6 +120,8 @@ interface Slot {
   /** Seconds until the kicker can fire again. */
   kickCooldown: number;
   command: ActuatorFrame;
+  /** Whether this slot's program was reachable at the last control cycle. */
+  wasConnected: boolean;
 }
 
 export class Match {
@@ -124,6 +138,7 @@ export class Match {
   private lastScore = { cyan: 0, yellow: 0 };
   private readonly calls: Record<string, number> = {};
   private lastSeenEvent: unknown = null;
+  private readonly observer: ((match: Match) => void) | undefined;
 
   constructor(opts: MatchOptions) {
     const league = getLeague(opts.league ?? 'open');
@@ -136,6 +151,8 @@ export class Match {
       commsEnabled: league.commsAllowed,
     });
     this.world.resetRobots('cyan');
+
+    this.observer = opts.observe;
 
     const seed = opts.seed ?? 1;
     const byId = opts.agents as unknown as Record<string, Agent>;
@@ -156,6 +173,7 @@ export class Match {
         ),
         kickCooldown: 0,
         command: { motors: [0, 0, 0, 0] },
+        wasConnected: true,
       });
     }
   }
@@ -200,6 +218,35 @@ export class Match {
         continue;
       }
 
+      /*
+       * Rule 5.7.1: a robot that has stopped is a damaged robot.
+       *
+       * A program at the other end of a socket can go away — the process
+       * crashes, the laptop sleeps, somebody trips over the cable — and when
+       * it does, the robot coasts on its last command for the rest of the
+       * match. That is not a robot playing badly; it is a robot that has
+       * stopped, and leaving it on the field as an obstacle its own team no
+       * longer controls is worse for the game than taking it off. The referee
+       * takes it off for thirty seconds and returns it at a corner of its own
+       * penalty box, exactly as for a robot whose battery fell out.
+       *
+       * Only while the game is running: a program that drops out at half time
+       * has not failed at anything, and has until the whistle to come back.
+       */
+      const connected = slot.agent.transport.connected ?? true;
+      if (slot.wasConnected && !connected && this.world.running) {
+        this.world.removeRobot(
+          robot.id,
+          '5.7.1',
+          'Robot stopped responding: its program disconnected during play.',
+        );
+        slot.wasConnected = false;
+        robot.motors = [0, 0, 0, 0];
+        slot.command = { motors: [0, 0, 0, 0] };
+        continue;
+      }
+      slot.wasConnected = connected;
+
       const held = this.gateHeld(robot);
       const number = numberOf(robot.id);
       const frame = slot.senses.read({
@@ -223,6 +270,19 @@ export class Match {
         slot.kickCooldown = KICK_COOLDOWN;
       }
     }
+  }
+
+  /**
+   * How long this robot is still standing down, in match seconds.
+   *
+   * The gateway asks this before it lets a dropped program back into its seat,
+   * because the penalty is measured in match time and pauses with the clock —
+   * which the gateway has no way to know.
+   */
+  standDown(robotId: string): number {
+    const robot = this.robotFor(robotId);
+    if (!robot || !robot.removed) return 0;
+    return robot.penaltyRemaining;
   }
 
   /** Rule 4.7: the kicker sends the ball away along the robot's heading. */
@@ -261,6 +321,7 @@ export class Match {
     this.world.step(dt);
     this.recordGoals();
     this.recordCalls();
+    this.observer?.(this);
   }
 
   /**

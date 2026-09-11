@@ -11,7 +11,8 @@
     "typecheck": "tsc --noEmit",
     "serve": "tsx src/cli.ts",
     "build:viewer": "vite build",
-    "dev:viewer": "vite"
+    "dev:viewer": "vite",
+    "bench": "tsx src/cli.ts bench"
   },
   "devDependencies": {
     "@types/node": "^22.20.2",

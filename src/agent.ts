@@ -38,6 +38,15 @@ export interface Transport {
   take(): ActuatorFrame | null;
   reset(): void;
   close(): void;
+  /**
+   * Whether the program is still reachable.
+   *
+   * Optional, and absent for an in-process program, which cannot go away. A
+   * program at the other end of a socket can, and the difference matters: a
+   * robot whose brain has stopped answering is not a robot playing badly, it
+   * is a robot that has stopped, and rule 5.7 has a word for that.
+   */
+  readonly connected?: boolean;
 }
 
 /**

@@ -260,30 +260,82 @@ describe('the reference agent', () => {
      * This is the damping check, and only incidentally a check on the dial.
      *
      * If thinking less often makes the robot better, its controller is
-     * over-reacting - and for a while it did: a 0.6-rate copy beat the
-     * full-rate one by 17 goals over 24 matches, which is what sent me back to
-     * the filter and the derivative term. With those raised it reads
-     * +14 / +27 / +54 as the copy is slowed to 0.6, 0.35 and 0.2, which is
-     * what a working skill axis looks like.
+     * over-reacting - and for a long time it did. The striker chose between
+     * two plans on a threshold ("am I within 90 mm of the standoff point?")
+     * sitting on a noisy quantity, so it chattered between them several times
+     * a second, and halving the decision rate was a low-pass filter on the
+     * chatter: a 0.65-skill copy beat the full-rate original by 22 goals over
+     * 48 matches. The approach is continuous now, and it does not.
      *
-     * Monotonic matters more than any single number. A dial that is better in
-     * the middle is not a dial, and a ladder of practice opponents cannot be
-     * built by turning it down.
+     * Two things about how this is measured, both learned the hard way.
+     *
+     * Every pairing is played BOTH WAYS and the two summed. Sides are not
+     * symmetric in a single match - the halves alternate who kicks off, and
+     * the contact solver resolves robots in array order - and when the agent
+     * was giving away every kick-off under 5.4.7 that asymmetry was worth an
+     * entire goal a match, always to yellow. Playing each way cancels it,
+     * which is the same reason a tournament plays every pairing twice.
+     *
+     * And the dial is only asserted where the handicap is bigger than the
+     * noise. A match is about two goals a side, so the goal difference over
+     * 48 matches has a standard deviation around ten; a 0.8-skill copy is
+     * within that, and asserting a sign on it is asserting a coin flip. Below
+     * about 0.5 the handicap is real and the numbers are not close.
      */
-    const differences = [0.6, 0.35, 0.2].map((skill) => {
+    const margins = [0.35, 0.2].map((skill) => {
       let goalDifference = 0;
       for (let seed = 31; seed < 55; seed++) {
-        const agents = {
-          ...referenceTeam('cyan', 1),
-          ...referenceTeam('yellow', skill),
-        } as unknown as MatchAgents;
-        const r = new Match({ agents, halfSeconds: HALF, seed }).run();
-        goalDifference += r.score.cyan - r.score.yellow;
+        const asCyan = new Match({
+          agents: {
+            ...referenceTeam('cyan', 1),
+            ...referenceTeam('yellow', skill),
+          } as unknown as MatchAgents,
+          halfSeconds: HALF,
+          seed,
+        }).run();
+        const asYellow = new Match({
+          agents: {
+            ...referenceTeam('cyan', skill),
+            ...referenceTeam('yellow', 1),
+          } as unknown as MatchAgents,
+          halfSeconds: HALF,
+          seed,
+        }).run();
+        goalDifference += asCyan.score.cyan - asCyan.score.yellow;
+        goalDifference += asYellow.score.yellow - asYellow.score.cyan;
       }
       return goalDifference;
     });
 
-    for (const difference of differences) expect(difference).toBeGreaterThan(0);
-    expect(differences[2]!).toBeGreaterThan(differences[0]!);
+    for (const margin of margins) expect(margin).toBeGreaterThan(0);
+    expect(margins[1]!).toBeGreaterThan(margins[0]!);
   }, 120000);
+
+  it('takes a legal kick-off', () => {
+    /*
+     * Rule 5.4.7 wants the ball to roll 50 mm clear of the robot, and pushing
+     * it never gets there: robot and ball separate by position in this world,
+     * so a shoved ball travels along with whatever is shoving it. The agent
+     * used to drive through the ball with the roller off and lose the
+     * kick-off every single time - 10.6 of 10.6 across five matches - which
+     * hands the restart to the opposition under 5.4.7 and turns a match into
+     * a queue of restarts.
+     */
+    let kickoffs = 0;
+    let illegal = 0;
+    for (let seed = 1; seed <= 6; seed++) {
+      const result = new Match({
+        agents: {
+          ...referenceTeam('cyan', 1),
+          ...referenceTeam('yellow', 1),
+        } as unknown as MatchAgents,
+        halfSeconds: HALF,
+        seed,
+      }).run();
+      kickoffs += result.calls['kickoff'] ?? 0;
+      illegal += result.calls['illegal-kickoff'] ?? 0;
+    }
+    expect(kickoffs).toBeGreaterThan(6);
+    expect(illegal).toBe(0);
+  }, 60000);
 });

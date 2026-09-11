@@ -13,8 +13,9 @@ import { referenceTeam } from './reference';
 import { runLadder, formatLadder, type Entry } from './ladder';
 import { ReferenceAgent } from './reference';
 import { botRoster } from './bots';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { DEFAULT_OPTIONS, formatBench, runBench, type BenchResult } from './bench';
 
 interface Args {
   command: string;
@@ -128,6 +129,7 @@ async function serve(flags: Map<string, string>): Promise<void> {
       Object.assign(teams, server.agents.teamNames());
     }
     console.log(`  kick-off: ${teams.cyan} v ${teams.yellow}  (seed ${seed})`);
+    const dropouts: string[] = [];
     const result = await server.play({
       agents: agentsFor(flags.get('opponent')),
       transports: waitForAgents ? server.agents.transports() : undefined,
@@ -140,6 +142,19 @@ async function serve(flags: Map<string, string>): Promise<void> {
       `  full time: ${teams.cyan} ${result.score.cyan} — ${result.score.yellow} ${teams.yellow}` +
         `   (${server.watching} watching)`,
     );
+    if (waitForAgents) {
+      for (const [id, seat] of Object.entries(server.agents.report())) {
+        if (!seat.connected) dropouts.push(`${id} never came back`);
+        else if (seat.reconnects > 0) dropouts.push(`${id} reconnected ${seat.reconnects}x`);
+      }
+      if (dropouts.length > 0) console.log(`  connections: ${dropouts.join(', ')}`);
+      // Seats are deliberately left alone between matches. A stand-down under
+      // 5.7.2 belongs to the match it was served in, and the next match has
+      // its own robots, all of them on the field — so `standDown` answers zero
+      // and anyone who dropped out can simply rejoin. Closing the sockets here
+      // instead would make every robot reconnect between every match, which is
+      // a second of dead air and four lines of log for nothing.
+    }
     seed++;
   }
 }
@@ -202,6 +217,87 @@ function ladder(flags: Map<string, string>): void {
   console.log();
 }
 
+/**
+ * Measure a robot program instead of watching it.
+ *
+ * The defaults are the ones an afternoon of work wants: three matches against
+ * the reference team, ideal sensors because that is what the server uses, and
+ * a report short enough to read every time.
+ */
+async function bench(flags: Map<string, string>): Promise<void> {
+  const seeds = parseSeeds(flags.get('seeds') ?? '1-3');
+  const team = (flags.get('team') ?? 'cyan') as 'cyan' | 'yellow' | 'both';
+  if (!['cyan', 'yellow', 'both'].includes(team)) {
+    console.error(`  --team must be cyan, yellow or both, not "${team}"`);
+    process.exit(1);
+  }
+
+  /*
+   * Where the JSON goes decides everything else about the output.
+   *
+   * To stdout, it has to be the ONLY thing on stdout - a report printed
+   * alongside it is not JSON any more, and whatever is parsing it says so in a
+   * stack trace. To a file, the person at the terminal still wants the report,
+   * and the progress lines while it plays.
+   */
+  const jsonTo = flags.get('json');
+  const toStdout = jsonTo === 'true' || jsonTo === '-';
+  let result: BenchResult;
+  try {
+    result = await runBench(
+      {
+        team,
+        opponent: flags.get('opponent') ?? DEFAULT_OPTIONS.opponent,
+        seeds,
+        halfSeconds: num(flags, 'half', 90),
+        idealSensors: flags.get('noisy-sensors') !== 'true',
+        port: num(flags, 'port', 0),
+        spawn: flags.get('spawn'),
+        connectTimeout: num(flags, 'wait', 30),
+      },
+      (line) => {
+        if (!toStdout) console.error(line);
+      },
+    );
+  } catch (error) {
+    console.error(`\n  ${error instanceof Error ? error.message : String(error)}\n`);
+    process.exit(1);
+  }
+
+  if (jsonTo !== undefined) {
+    const text = JSON.stringify(result, null, 2);
+    if (toStdout) {
+      console.log(text);
+      return;
+    }
+    writeFileSync(jsonTo, text);
+    console.error(`  wrote ${jsonTo}`);
+  }
+
+  let baseline: BenchResult | undefined;
+  const against = flags.get('baseline');
+  if (against) {
+    try {
+      baseline = JSON.parse(readFileSync(against, 'utf8')) as BenchResult;
+    } catch {
+      console.error(`  could not read baseline ${against}; showing absolute numbers`);
+    }
+  }
+  console.log(formatBench(result, baseline));
+}
+
+/** "1-5", "1,4,9" or "7" - a range, a list, or one. */
+function parseSeeds(raw: string): number[] {
+  if (raw.includes('-')) {
+    const [from, to] = raw.split('-').map(Number);
+    if (Number.isFinite(from) && Number.isFinite(to) && to! >= from!) {
+      return Array.from({ length: to! - from! + 1 }, (_, i) => from! + i);
+    }
+  }
+  const list = raw.split(',').map(Number).filter(Number.isFinite);
+  return list.length > 0 ? list : DEFAULT_OPTIONS.seeds;
+}
+
 function usage(): void {
   console.log(`
   rcja-soccer-sim
@@ -209,12 +305,28 @@ function usage(): void {
     serve     run the match server and keep playing matches   [--port --half --home --away --seed --opponent --agents --fast]
     match     play one match headless and print the result    [--half --home --away --seed --opponent]
     ladder    play every bot against every other              [--half --rounds --seed]
+    bench     measure your robot program and say what is wrong
 
   --opponent puts a test robot on the yellow side instead of the reference
   agent: naive-chaser, shover, chaser+camper, spinner, waller, wanderer, statue
 
   --agents waits for four robot programs to connect on /agent before kicking
   off, instead of playing the built-in reference team. See python/README.md.
+
+  bench flags:
+    --spawn CMD     start your robots with CMD; {url} becomes the address
+    --team          cyan (default), yellow, or both for a mirror match
+    --opponent      reference (default) or a bot name, as above
+    --seeds 1-5     which matches to play: a range, a list, or one
+    --half 90       seconds per half
+    --noisy-sensors noise, drift and camera latency on
+    --json FILE     write the full numbers as JSON (- for stdout)
+    --baseline FILE compare against a JSON written earlier
+
+  Measure a change:
+    npm run bench -- --spawn "python3 python/examples/play.py --url {url}" --json before.json
+    ...edit the robot...
+    npm run bench -- --spawn "python3 python/examples/play.py --url {url}" --baseline before.json
 
   Watch a match:   npm run build:viewer && npm run serve
 `);
@@ -230,6 +342,9 @@ switch (command) {
     break;
   case 'ladder':
     ladder(flags);
+    break;
+  case 'bench':
+    await bench(flags);
     break;
   default:
     usage();

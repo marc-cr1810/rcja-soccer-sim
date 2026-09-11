@@ -17,7 +17,7 @@ import { readFile } from 'node:fs/promises';
 import { extname, join, normalize, resolve } from 'node:path';
 import { WebSocketServer, type WebSocket } from 'ws';
 
-import { Match, PHYSICS_HZ, type MatchOptions, type MatchResult } from './match';
+import { Match, CONTROL_HZ, PHYSICS_HZ, type MatchOptions, type MatchResult } from './match';
 import { VIEW_HZ, type ViewMessage } from './view';
 import { AGENT_PATH, AgentGateway } from './gateway';
 
@@ -97,6 +97,11 @@ export class MatchServer {
     return this.viewers.size;
   }
 
+  /** The match in progress, for a caller that needs to ask it something. */
+  get currentMatch(): Match | null {
+    return this.current;
+  }
+
   private join(ws: WebSocket): void {
     this.viewers.add(ws);
     ws.on('error', () => this.viewers.delete(ws));
@@ -151,6 +156,10 @@ export class MatchServer {
       ...options,
     });
     this.current = match;
+    // A program that dropped out mid-match may not simply reconnect and carry
+    // on; the gateway refuses it until rule 5.7.2's stand-down is served, and
+    // only the match knows how much of it is left.
+    this.agents.standDown = (robotId) => match.standDown(robotId);
     this.broadcast({
       type: 'hello',
       league: match.league,
@@ -158,8 +167,12 @@ export class MatchServer {
       halfSeconds: match.halfLength,
     });
 
+    // Programs over a socket need the event loop, and `match.run()` never
+    // gives it up. See playFast.
+    const remote = Object.keys(options.transports ?? {}).length > 0;
+
     if (!this.realtime) {
-      const result = match.run();
+      const result = remote ? await this.playFast(match) : match.run();
       this.broadcast({ type: 'frame', frame: match.snapshot() });
       return result;
     }
@@ -197,6 +210,42 @@ export class MatchServer {
       this.broadcast({ type: 'frame', frame: match.snapshot() });
     }
 
+    return match.result();
+  }
+
+  /**
+   * Play as fast as the programs can answer, rather than as fast as possible.
+   *
+   * `match.run()` steps the whole match inside one synchronous loop, which is
+   * exactly right for the built-in agents — they are function calls — and
+   * exactly wrong for programs on a socket. Nothing on the event loop runs
+   * while it is going, so not one sensor frame is delivered and not one reply
+   * is collected: the match is played out in milliseconds against four
+   * programs that were never asked anything, and every one of them sits at its
+   * last command until the sockets time out and reconnect. `--fast --agents`
+   * used to churn 182 goalless matches in thirty seconds that way.
+   *
+   * Yielding once per control cycle fixes it and still runs at better than ten
+   * times real time, because a local round trip costs well under the
+   * millisecond the timer rounds up to. A program that cannot keep up just
+   * misses cycles, which is what it would do on a slow field too, and the
+   * misses are already in the match record.
+   */
+  private async playFast(match: Match): Promise<MatchResult> {
+    const dt = 1 / PHYSICS_HZ;
+    const perControl = Math.max(1, Math.round(PHYSICS_HZ / CONTROL_HZ));
+    for (const half of [1, 2] as const) {
+      match.world.half = half;
+      match.world.kickOff(half === 1 ? 'cyan' : 'yellow');
+      match.resetAgents();
+      match.world.running = true;
+      const until = match.world.clock + match.halfLength;
+      while (match.world.clock < until) {
+        for (let i = 0; i < perControl && match.world.clock < until; i++) match.step(dt);
+        await sleep(0);
+      }
+      match.world.running = false;
+    }
     return match.result();
   }
 

@@ -9,6 +9,7 @@ import {
   CameraState,
   CompassState,
   EncoderState,
+  IR_REFERENCE_RANGE,
   Noise,
   blocks,
   readIr,
@@ -328,6 +329,17 @@ describe('ideal sensors mode', () => {
     const r = readIr(at(0, 0), { x: 400, z: 0 }, { blockers: [], ideal: true }, seed());
     expect(r).not.toBeNull();
     expect(r!.bearing).toBe(0);
-    expect(r!.strength).toBeCloseTo(0.25, 4); // (200 / 400)^2 = 0.25
+    expect(r!.strength).toBeCloseTo((IR_REFERENCE_RANGE / 400) ** 2, 4);
+  });
+
+  it('still resolves range where the ball is close enough to touch', () => {
+    // The band between the mouth and a standoff is where an approach is
+    // decided, so it must not be one flat number. Saturating at 200 mm made it
+    // one, for half of every sighting in a match.
+    const near = readIr(at(0, 0), { x: 150, z: 0 }, { blockers: [], ideal: true }, seed())!;
+    const mouth = readIr(at(0, 0), { x: 131, z: 0 }, { blockers: [], ideal: true }, seed())!;
+    expect(mouth.strength).toBeCloseTo(1, 4);
+    expect(near.strength).toBeLessThan(0.95);
+    expect(IR_REFERENCE_RANGE / Math.sqrt(near.strength)).toBeCloseTo(150, 0);
   });
 });
