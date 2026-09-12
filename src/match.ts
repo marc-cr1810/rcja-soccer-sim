@@ -378,10 +378,19 @@ export class Match {
   }
 
   step(dt: number): void {
-    this.slotOrderFlipped = !this.slotOrderFlipped;
     this.sinceControl += dt;
     const period = 1 / CONTROL_HZ;
     if (this.sinceControl >= period) {
+      // Flip HERE, not once per physics step. control() runs every
+      // PHYSICS_HZ/CONTROL_HZ steps - an even number - so a flip on every step
+      // lands on the same parity every time control() looks at it, and the
+      // order never actually alternated: cyan-1 was polled first on every
+      // control cycle of every match. That is the fixed order this flip exists
+      // to avoid, and for a program on a socket it is not a tie-break detail -
+      // frames are written in poll order, so the last seat polled is the one
+      // whose reply is most often too late, and it misses control cycles at
+      // several times the rate of the first.
+      this.slotOrderFlipped = !this.slotOrderFlipped;
       this.control(this.sinceControl);
       this.sinceControl = 0;
     }

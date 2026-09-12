@@ -89,13 +89,27 @@ def our_goal(direction: float) -> str:
     return "cyan" if direction > 0 else "yellow"
 
 
+def other_side(team: str) -> str:
+    """The other team's name.
+
+    Only the names here are colours; the goals themselves are *places* that
+    keep their paint for the whole match, so which name a robot calls the goal
+    it is shooting at is a field fact found from the frame, not a team fact.
+    """
+    return "yellow" if team == "cyan" else "cyan"
+
+
 def goal_centre(side: str) -> tuple[float, float]:
     """Centre of a goal mouth, on the goal line — what the camera ranges to."""
     return (-HALF_LENGTH if side == "cyan" else HALF_LENGTH, 0.0)
 
 
 def in_penalty_box(x: float, z: float, side: str, slack: float = 0.0) -> bool:
-    """Whether a point is inside the penalty box defending the given goal."""
+    """Whether a point is inside the penalty box defending the given goal.
+
+    ``side`` names a goal by its paint, which lives at a fixed place; pass the
+    frame's ``my_colour`` to get this team's own box in either half.
+    """
     if abs(z) > PENALTY_WIDTH / 2 + slack:
         return False
     if side == "cyan":

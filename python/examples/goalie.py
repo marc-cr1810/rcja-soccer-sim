@@ -38,11 +38,9 @@ from rcja_soccer.field import (
     HALF_WIDTH,
     PENALTY_DEPTH,
     PENALTY_WIDTH,
-    attack_heading,
-    attack_x,
     clear_is_safe,
-    defend_x,
 )
+from rcja_soccer.frame import GoalFrame
 from rcja_soccer.sense import (
     BallTracker,
     Locator,
@@ -64,19 +62,17 @@ args = parser.parse_args()
 
 robot = Robot(team=args.team, number=args.number, name=args.name, token=args.token)
 
-#: Identity only - radio, name. NOT which goal to guard: rule 1.4/5.4 swaps
-#: ends at half-time, so everything below derived from attack direction is
-#: recomputed from `s.attack_direction` at the top of every tick instead.
+#: Which goal this robot is guarding is its own team's colour wherever on the
+#: field it stands (rule 1.4/5.4 only swaps which end that is). The frame finds
+#: that goal - and the one it defends from - in the camera every kick-off, so
+#: no ref-fed attack direction is involved.
 TEAM = args.team
-UPFIELD = 0.0
-ATTACK_X = 0.0
-DEFEND_X = 0.0
-FORWARD = 1.0
+frame = GoalFrame(TEAM)
 
 #: How far off the goal line to guard. Far enough forward to cut the angle down
 #: and to keep clear of rule 5.7.1.2's goal area, which starts at 965 mm; close
 #: enough that a shot cannot simply be rolled round behind.
-GUARD_X = 0.0
+GUARD_DIST = 175.0
 #: The posts are at 225 mm. Staying inside them means a keeper on the correct
 #: side of the mouth is always still in front of the goal.
 POST_CLAMP = 180.0
@@ -89,7 +85,7 @@ POST_CLAMP = 180.0
 #: it is being timed. And behind the goal line is where a keeper gets shoved
 #: wholly into the out area by an attacker, which is rule 5.7.1.6 and another
 #: thirty seconds off. Both are lost by standing still while being pushed.
-DEPTH_FLOOR = 0.0
+DEPTH_DIST = 120.0
 
 #: How far across the field the keeper is ever allowed to be, and how far up
 #: it. Nothing out there is its job: the goal is 450 mm wide and it is behind
@@ -97,8 +93,7 @@ DEPTH_FLOOR = 0.0
 #: open net. Passed to every steering call, which is what keeps it true even
 #: when the ball is somewhere tempting.
 LEASH_Z = 430.0
-# abs(DEFEND_X) is HALF_LENGTH either way round, so unlike GUARD_X/DEPTH_FLOOR
-# this needs no per-tick recompute from attack_direction.
+# `LEASH_X` is the goal-line distance either way round, so it needs no frame.
 LEASH_X = HALF_LENGTH - 40.0
 
 yaw = YawRate()
@@ -108,14 +103,6 @@ ball = BallTracker()
 
 @robot.tick
 def think(s, me):
-    global UPFIELD, ATTACK_X, DEFEND_X, FORWARD, GUARD_X, DEPTH_FLOOR
-    UPFIELD = attack_heading(s.attack_direction)
-    ATTACK_X = attack_x(s.attack_direction)
-    DEFEND_X = defend_x(s.attack_direction)
-    FORWARD = 1.0 if ATTACK_X > 0 else -1.0
-    GUARD_X = DEFEND_X + FORWARD * 175.0
-    DEPTH_FLOOR = DEFEND_X + FORWARD * 120.0
-
     if not s.playing:
         return robot.coast()
 
@@ -131,15 +118,18 @@ def think(s, me):
     yaw.update(s)
     heading = s.compass.heading
     me_x, me_z = locator.update(s, heading)
+    frame.update(s, heading, me_x, me_z)
     ball.update(s, heading, me_x, me_z)
     holding = s.ball_gate.held
 
+    guard_x, guard_z = frame.from_our_goal(GUARD_DIST)
+
     # Square to the field, so the kicker points out of the goal rather than
     # across it, and so the dribbler mouth faces whatever is coming.
-    square = spin_towards(wrap_angle(UPFIELD - heading), yaw)
+    square = spin_towards(wrap_angle(frame.up_angle() - heading), yaw)
 
     if s.kickoff.pending:
-        return hold(s, me, me_x, me_z, GUARD_X, 0.0, square, heading, "KICK_OFF")
+        return hold(s, me, me_x, me_z, guard_x, guard_z, square, heading, "KICK_OFF")
 
     # Out of the playing area is the only thing worth abandoning the goal for,
     # and the way back in comes from the position fix. The line sensors cannot
@@ -159,10 +149,10 @@ def think(s, me):
         )
 
     if not ball.seen:
-        return hold(s, me, me_x, me_z, GUARD_X, 0.0, square, heading, "HOLD_CENTRE")
+        return hold(s, me, me_x, me_z, guard_x, guard_z, square, heading, "HOLD_CENTRE")
 
     bx, bz = ball.x, ball.z
-    depth = (bx - DEFEND_X) * FORWARD          # how far up the field the ball is
+    depth = frame.depth(bx, bz)               # how far up the field the ball is
     in_box = depth < PENALTY_DEPTH + 60 and abs(bz) < PENALTY_WIDTH / 2 + 40
 
     # -- got it: get rid of it ---------------------------------------------
@@ -173,14 +163,14 @@ def think(s, me):
     # ball out over a touchline — with nobody at home. Stay on the guard line
     # and let the kicker do the travelling.
     if holding:
-        aim = clearance_heading(me_x, me_z)
+        aim = clearance_heading(me_x, me_z, frame.up_x, frame.up_z)
         error = wrap_angle(aim - heading)
         blocker = obstacle_range(s, heading, me_x, me_z)
         safe = clear_is_safe(bx, bz, heading) and (blocker is None or blocker > 380.0)
 
         # Drift back towards the guard spot while turning, so a clearance that
         # takes a moment to line up does not cost the position as well.
-        home_x = GUARD_X
+        home_x, home_z = guard_x, guard_z
         home_z = clamp(me_z, -POST_CLAMP, POST_CLAMP)
         gap = math.hypot(home_x - me_x, home_z - me_z)
         travel = steer_clear_of_edges(
@@ -200,11 +190,11 @@ def think(s, me):
         )
 
     # -- shoved onto the line: get back off it ------------------------------
-    if (me_x - DEPTH_FLOOR) * FORWARD < 0:
+    if frame.depth(me_x, me_z) < DEPTH_DIST:
         travel = steer_clear_of_edges(
-            math.atan2(-me_z * 0.3, (GUARD_X - me_x)), me_x, me_z, 210.0, LEASH_X, LEASH_Z
+            math.atan2(-me_z * 0.3, (guard_x - me_x)), me_x, me_z, 210.0, LEASH_X, LEASH_Z
         )
-        say(me, "OFF_THE_LINE", abs(me_x - GUARD_X))
+        say(me, "OFF_THE_LINE", abs(me_x - guard_x))
         return robot.motors(
             drive(bearing=wrap_angle(travel - heading), speed=1.0, spin=square),
             dribbler=1.0,
@@ -219,7 +209,7 @@ def think(s, me):
     # follows one into a corner has conceded the next two.
     reachable = math.hypot(bx - me_x, bz - me_z) < 520.0
     if in_box and reachable and (ball.speed() < 350 or depth < 150):
-        chase_x = DEFEND_X + FORWARD * clamp((bx - DEFEND_X) * FORWARD, 0.0, PENALTY_DEPTH)
+        chase_x, _ = frame.from_our_goal(clamp(depth, 0.0, PENALTY_DEPTH))
         chase_z = clamp(bz, -420.0, 420.0)
         travel = steer_clear_of_edges(
             math.atan2(chase_z - me_z, chase_x - me_x), me_x, me_z, 210.0, LEASH_X, LEASH_Z
@@ -232,16 +222,25 @@ def think(s, me):
         )
 
     # -- otherwise: guard the line it is going to cross ---------------------
-    target_z = intercept_z(me_x, me_z)
+    target_z = intercept_z(me_x, me_z, guard_x, guard_z, frame.my_x, frame.my_z, frame.up_x, frame.up_z)
     # Come off the line a little when the shot is central and square, which
     # narrows the angle; sit back when it is wide, so it cannot be rolled round.
     step = clamp((1.0 - abs(target_z) / POST_CLAMP) * 70.0, 0.0, 70.0)
-    target_x = GUARD_X + FORWARD * step
+    target_x, _ = frame.from_our_goal(GUARD_DIST + step)
     state = "GUARD" if ball.speed() < 350 else "TRACK_SHOT"
     return hold(s, me, me_x, me_z, target_x, target_z, square, heading, state, bx, bz)
 
 
-def intercept_z(me_x: float, me_z: float) -> float:
+def intercept_z(
+    me_x: float,
+    me_z: float,
+    guard_x: float,
+    guard_z: float,
+    my_x: float,
+    my_z: float,
+    up_x: float,
+    up_z: float,
+) -> float:
     """Where across the mouth to stand.
 
     Two answers, and the keeper wants whichever is more urgent. A moving ball
@@ -251,28 +250,33 @@ def intercept_z(me_x: float, me_z: float) -> float:
     """
     if ball.speed() > 220:
         # Time for the ball to reach the guard line, if it keeps going.
-        closing = -ball.vx * FORWARD
+        closing = -(ball.vx * up_x + ball.vz * up_z)
         if closing > 60:
-            travel = (ball.x - GUARD_X) * FORWARD / closing
+            travel = ((ball.x - guard_x) * up_x + (ball.z - guard_z) * up_z) / closing
             _, future_z = ball.predict(clamp(travel, 0.0, 1.4))
             return clamp(future_z, -POST_CLAMP, POST_CLAMP)
 
-    span = DEFEND_X - ball.x
+    span = (my_x - ball.x) * up_x + (my_z - ball.z) * up_z
     if abs(span) < 1.0:
         return clamp(ball.z, -POST_CLAMP, POST_CLAMP)
-    shadow = ball.z + ((GUARD_X - ball.x) / span) * (-ball.z)
+    guard_proj = (guard_x - ball.x) * up_x + (guard_z - ball.z) * up_z
+    shadow = ball.z + (guard_proj / span) * (-ball.z)
     return clamp(shadow, -POST_CLAMP, POST_CLAMP)
 
 
-def clearance_heading(me_x: float, me_z: float) -> float:
+def clearance_heading(me_x: float, me_z: float, up_x: float, up_z: float) -> float:
     """Which way to face before firing.
 
     Up the field and towards the wing with more room in it. Straight back down
     the middle returns the ball to whoever just attacked; a diagonal at least
     has to be chased.
     """
-    wing = -math.copysign(HALF_WIDTH * 0.62, me_z if abs(me_z) > 40 else 1.0)
-    return math.atan2(wing - me_z, (ATTACK_X * 0.55) - me_x)
+    # `up_x`, not a bare `1.0`: a constant names a fixed direction on the field,
+    # so a keeper defending the -x end would clear to the opposite side of its
+    # own field from one defending the +x end. And a keeper sits on its guard
+    # spot at z ~ 0, so this fallback is not the rare case - it is the usual one.
+    wing = -math.copysign(HALF_WIDTH * 0.62, me_z if abs(me_z) > 40 else up_x)
+    return math.atan2(wing - me_z, up_x * (HALF_LENGTH * 0.55) - me_x)
 
 
 def hold(s, me, me_x, me_z, target_x, target_z, spin, heading, state, bx=None, bz=None):

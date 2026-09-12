@@ -39,14 +39,10 @@ from rcja_soccer.field import (
     HALF_GOAL_WIDTH,
     HALF_LENGTH,
     HALF_WIDTH,
-    attack_heading,
-    attack_x,
-    defend_x,
     in_penalty_box,
-    our_goal,
     shot_range,
-    their_goal,
 )
+from rcja_soccer.frame import GoalFrame
 from rcja_soccer.sense import (
     BallTracker,
     Locator,
@@ -54,8 +50,8 @@ from rcja_soccer.sense import (
     back_inside,
     obstacle_range,
     spin_towards,
-    steer_clear_of_edges,
     steer_ball_inside,
+    steer_clear_of_edges,
 )
 
 parser = argparse.ArgumentParser(description=__doc__)
@@ -69,19 +65,13 @@ args = parser.parse_args()
 
 robot = Robot(team=args.team, number=args.number, name=args.name, token=args.token)
 
-#: Identity only - radio, name. NOT which goal to shoot at: rule 1.4/5.4 swaps
-#: ends at half-time, so UPFIELD/ATTACK_X/DEFEND_X/FORWARD below are recomputed
-#: from `s.attack_direction` at the top of every tick instead of fixed here.
+#: Which goal this robot scores in is whatever end its team currently defends,
+#: which a kick-off places it on (rule 1.4/5.4 only swaps which end that is).
+#: The frame finds both goals in the camera and takes the nearer one as its
+#: own, so no ref-fed attack direction is involved — the direction of attack is
+#: the line between the goals, as seen.
 TEAM = args.team
-UPFIELD = 0.0
-ATTACK_X = 0.0
-DEFEND_X = 0.0
-#: +1 if this team is currently attacking towards +x, -1 otherwise. Turns
-#: every "is it far enough up the field" question into one comparison.
-FORWARD = 1.0
-#: The camera's names for the goal we're shooting at and the one we defend.
-OUR_GOAL = "cyan"
-THEIR_GOAL = "yellow"
+frame = GoalFrame(TEAM)
 
 #: Inside the posts by enough that the ball fits and a keeper on the line has
 #: to actually move. The posts are at 225 mm.
@@ -94,14 +84,6 @@ ball = BallTracker()
 
 @robot.tick
 def think(s, me):
-    global UPFIELD, ATTACK_X, DEFEND_X, FORWARD, OUR_GOAL, THEIR_GOAL
-    UPFIELD = attack_heading(s.attack_direction)
-    ATTACK_X = attack_x(s.attack_direction)
-    DEFEND_X = defend_x(s.attack_direction)
-    FORWARD = 1.0 if ATTACK_X > 0 else -1.0
-    OUR_GOAL = our_goal(s.attack_direction)
-    THEIR_GOAL = their_goal(s.attack_direction)
-
     if not s.playing:
         return robot.coast()
 
@@ -117,6 +99,7 @@ def think(s, me):
     yaw.update(s)
     heading = s.compass.heading
     me_x, me_z = locator.update(s, heading)
+    frame.update(s, heading, me_x, me_z)
     ball.update(s, heading, me_x, me_z)
     holding = s.ball_gate.held
 
@@ -137,7 +120,7 @@ def think(s, me):
         if not s.kickoff.ours:
             # Rule 5.4.5 has us in our own box and 5.4.6 keeps us off the ball.
             return robot.motors(drive(speed=0.0), dribbler=0.0)
-        square = spin_towards(wrap_angle(UPFIELD - heading), yaw)
+        square = spin_towards(wrap_angle(frame.up_angle() - heading), yaw)
         if holding:
             say(me, "KICK_OFF_WAIT")
             return robot.motors(drive(speed=0.0, spin=square), dribbler=1.0, kicker=True)
@@ -178,11 +161,11 @@ def think(s, me):
             # Fall back towards the middle of our own half, facing up the
             # field, which is where the ball will most likely reappear and
             # where being wrong costs least.
-            home_x = DEFEND_X * 0.35
-            travel = wrap_angle(math.atan2(-me_z, home_x - me_x) - heading)
+            home_x, home_z = frame.from_our_goal(HALF_LENGTH * 0.65)
+            travel = wrap_angle(math.atan2(home_z - me_z, home_x - me_x) - heading)
             say(me, "SEARCH")
             return robot.motors(
-                drive(bearing=travel, speed=0.55, spin=spin_towards(wrap_angle(UPFIELD - heading), yaw)),
+                drive(bearing=travel, speed=0.55, spin=spin_towards(wrap_angle(frame.up_angle() - heading), yaw)),
                 dribbler=1.0,
                 say={"role": "striker", "ball": None, "held": False},
             )
@@ -191,7 +174,7 @@ def think(s, me):
         bx, bz = ball.x, ball.z
 
     # -- where to put it ----------------------------------------------------
-    aim_x, aim_z = choose_aim(bx, bz, me_z)
+    aim_x, aim_z = choose_aim(bx, bz, me_z, frame)
     push = math.atan2(aim_z - bz, aim_x - bx)
 
     # Face the way the ball has to go. The kicker fires along the heading, so
@@ -201,8 +184,8 @@ def think(s, me):
 
     # Stay out of our own box while the keeper is working it (rule 5.11).
     keeper_active = teammate_is_keeping(s)
-    if keeper_active and in_penalty_box(bx, bz, OUR_GOAL, slack=60.0) and not holding:
-        return cover(s, me, me_x, me_z, bz, heading, spin)
+    if keeper_active and in_penalty_box(bx, bz, frame.my_colour, slack=60.0) and not holding:
+        return cover(s, me, me_x, me_z, bz, heading, spin, frame)
 
     # -- curve round behind it, then drive through it ----------------------
     # Keep the push on the field. Most of the balls that go out in a match are
@@ -254,7 +237,7 @@ def think(s, me):
     # The edges, as a force. Zero in open play, decisive on the line.
     travel_field = steer_clear_of_edges(travel_field, me_x, me_z, 190.0 if holding else 150.0)
     if not holding and keeper_active:
-        travel_field = leave_room_for_the_keeper(travel_field, me_x, me_z)
+        travel_field = leave_room_for_the_keeper(travel_field, me_x, me_z, frame)
 
     # -- shoot --------------------------------------------------------------
     # Three questions, and all of them have to be yes.
@@ -268,7 +251,7 @@ def think(s, me):
     # robot has just made a save against itself.
     blocker = obstacle_range(s, heading, me_x, me_z)
     lane_clear = blocker is None or blocker > 430.0
-    reach = shot_range(bx, bz, heading, THEIR_GOAL)
+    reach = shot_range(bx, bz, heading, frame.their_colour)
     close_enough = reach is not None and reach < (1100.0 if blocker is None else 800.0)
     shot_on = reach is not None and lane_clear and close_enough
     kick = holding and shot_on
@@ -307,7 +290,9 @@ def think(s, me):
     )
 
 
-def leave_room_for_the_keeper(travel: float, me_x: float, me_z: float) -> float:
+def leave_room_for_the_keeper(
+    travel: float, me_x: float, me_z: float, frame: GoalFrame
+) -> float:
     """Stay out of the strip of our own box the keeper is working in.
 
     Rule 5.11.1 is two robots of one team inside their own penalty box, in
@@ -316,16 +301,18 @@ def leave_room_for_the_keeper(travel: float, me_x: float, me_z: float) -> float:
     been there. The detector tests the central corridor, so the corners of the
     box are not the problem; standing on the keeper's toes is.
     """
-    if not in_penalty_box(me_x, me_z, OUR_GOAL, slack=30.0) or abs(me_z) > 290.0:
+    if not in_penalty_box(me_x, me_z, frame.my_colour, slack=30.0) or abs(me_z) > 290.0:
         return travel
     # Up the field is always out of our own box, and it is where the striker
     # wants to be anyway.
-    wx = math.cos(travel) + FORWARD * 1.5
-    wz = math.sin(travel)
+    wx = math.cos(travel) + frame.up_x * 1.5
+    wz = math.sin(travel) + frame.up_z * 1.5
     return math.atan2(wz, wx)
 
 
-def choose_aim(bx: float, bz: float, me_z: float) -> tuple[float, float]:
+def choose_aim(
+    bx: float, bz: float, me_z: float, frame: GoalFrame
+) -> tuple[float, float]:
     """Where in the goal to put it — or, deep in our own half, where instead.
 
     Near our own goal the opponent's net is the wrong target: the line to it
@@ -333,9 +320,17 @@ def choose_aim(bx: float, bz: float, me_z: float) -> tuple[float, float]:
     goal against. Aim up the wing the ball is already on and sort the rest out
     in the other half.
     """
-    if (bx - DEFEND_X) * FORWARD < HALF_LENGTH * 0.55:
-        wing = math.copysign(HALF_WIDTH * 0.55, bz if abs(bz) > 60 else 1.0)
-        return DEFEND_X + FORWARD * HALF_LENGTH * 1.5, wing
+    if frame.depth(bx, bz) < HALF_LENGTH * 0.55:
+        # The tie-break, when the ball is too central to have a wing of its
+        # own, has to come from the frame and not from a bare `1.0`. A constant
+        # here names a fixed direction on the *field*, so the team attacking +x
+        # and the team attacking -x do not play the same game up their own
+        # field - and the ends swap at half-time, so neither does one team
+        # between halves. `up_x` reverses with the attack, which is what makes
+        # the choice the same choice at both ends.
+        wing = math.copysign(HALF_WIDTH * 0.55, bz if abs(bz) > 60 else frame.up_x)
+        wx, _ = frame.from_our_goal(HALF_LENGTH * 1.5)
+        return wx, wing
 
     # Otherwise the far post, so a keeper sitting on the near one has to travel.
     if bz > 45:
@@ -343,18 +338,29 @@ def choose_aim(bx: float, bz: float, me_z: float) -> tuple[float, float]:
     elif bz < -45:
         post = AIM_POST
     else:
-        post = AIM_POST if me_z <= 0 else -AIM_POST
-    return ATTACK_X, clamp(post, -HALF_GOAL_WIDTH + 70, HALF_GOAL_WIDTH - 70)
+        # A deadband, not `me_z <= 0`, and not `!= 0.0` either.
+        #
+        # On the centre line the fix does not come back as a clean zero, it
+        # comes back as whatever the least-squares solve rounded to - order
+        # 1e-14, and its SIGN is rounding noise rather than a fact about the
+        # field. Hanging a 310 mm swing of the aim on that sign means two
+        # robots in mirrored positions pick the same physical post instead of
+        # mirrored ones, and the two ends of the field stop being the same
+        # game. Every restart puts a robot on z = 0 exactly, so this is the
+        # normal case and not a corner: below the deadband, take the side from
+        # the frame, which does reverse with the attack.
+        post = math.copysign(AIM_POST, -me_z if abs(me_z) > 1.0 else frame.up_x)
+    return frame.their_x, clamp(post, -HALF_GOAL_WIDTH + 70, HALF_GOAL_WIDTH - 70)
 
 
-def cover(s, me, me_x, me_z, bz, heading, spin):
+def cover(s, me, me_x, me_z, bz, heading, spin, frame: GoalFrame):
     """Wait outside our own box while the keeper deals with it.
 
     Rule 5.11 makes two robots defending one goal a call the referee has to
     make, and the keeper is better placed than we are. Sit on the edge of the
     box, square on, ready for the clearance.
     """
-    wait_x = DEFEND_X + FORWARD * 390.0
+    wait_x, _ = frame.from_our_goal(390.0)
     wait_z = clamp(bz * 0.6, -300.0, 300.0)
     gap = math.hypot(wait_x - me_x, wait_z - me_z)
     travel = math.atan2(wait_z - me_z, wait_x - me_x)

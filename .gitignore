@@ -5,3 +5,9 @@ __pycache__/
 .venv/
 dist-viewer/
 dist-referee/
+
+# Probe output: trace logs and generated sensor frames. The probe SCRIPTS in
+# scratch/ are worth keeping; their several-megabyte output is not.
+scratch/*.jsonl
+scratch/frames/
+scratch/rotframes/

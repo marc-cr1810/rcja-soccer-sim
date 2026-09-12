@@ -32,7 +32,15 @@ async function playSeed(seed: number): Promise<{ h1: number; h2: number }> {
     detached: true,
   });
   try {
-    await server.agents.whenReady();
+    // Only cyan connects (--only cyan), so `whenReady` (all four gateway
+    // seats) would never resolve. Poll for just the two remote seats.
+    const deadline = Date.now() + 30000;
+    for (;;) {
+      const t = server.agents.transports();
+      if ((t['cyan-1'] ?? false) && (t['cyan-2'] ?? false)) break;
+      if (Date.now() > deadline) throw new Error('timeout waiting for cyan seats');
+      await new Promise((r) => setTimeout(r, 100));
+    }
     let h1 = 0;
     let h2 = 0;
     let prevTotal = 0;
