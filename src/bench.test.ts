@@ -12,6 +12,7 @@ import { runBench, formatBench, type BenchResult } from './bench';
 import { Match, type MatchAgents } from './match';
 import { referenceTeam } from './reference';
 import { naiveChaser, statue } from './bots';
+import { PROTOCOL_VERSION } from './protocol';
 
 describe('the observer hook', () => {
   it('is called every physics step and sees the match', () => {
@@ -224,7 +225,7 @@ const WebSocket = require('ws');
 const url = process.argv[process.argv.length - 1];
 for (const robot of [1, 2]) {
   const ws = new WebSocket(url);
-  ws.on('open', () => ws.send(JSON.stringify({ type: 'join', protocol: 1, team: 'cyan', robot, name: 'T' })));
+  ws.on('open', () => ws.send(JSON.stringify({ type: 'join', protocol: ${PROTOCOL_VERSION}, team: 'cyan', robot, name: 'T' })));
   ws.on('message', (d) => {
     const m = JSON.parse(String(d));
     if (m.type !== 'sensors') return;
@@ -244,7 +245,7 @@ const WebSocket = require('ws');
 const url = process.argv[process.argv.length - 1];
 for (const robot of [1, 2]) {
   const ws = new WebSocket(url);
-  ws.on('open', () => ws.send(JSON.stringify({ type: 'join', protocol: 1, team: 'cyan', robot, name: 'T' })));
+  ws.on('open', () => ws.send(JSON.stringify({ type: 'join', protocol: ${PROTOCOL_VERSION}, team: 'cyan', robot, name: 'T' })));
   ws.on('error', () => {});
 }
 `;

@@ -64,16 +64,19 @@ args = parser.parse_args()
 
 robot = Robot(team=args.team, number=args.number, name=args.name, token=args.token)
 
+#: Identity only - radio, name. NOT which goal to guard: rule 1.4/5.4 swaps
+#: ends at half-time, so everything below derived from attack direction is
+#: recomputed from `s.attack_direction` at the top of every tick instead.
 TEAM = args.team
-UPFIELD = attack_heading(TEAM)
-ATTACK_X = attack_x(TEAM)
-DEFEND_X = defend_x(TEAM)
-FORWARD = 1.0 if ATTACK_X > 0 else -1.0
+UPFIELD = 0.0
+ATTACK_X = 0.0
+DEFEND_X = 0.0
+FORWARD = 1.0
 
 #: How far off the goal line to guard. Far enough forward to cut the angle down
 #: and to keep clear of rule 5.7.1.2's goal area, which starts at 965 mm; close
 #: enough that a shot cannot simply be rolled round behind.
-GUARD_X = DEFEND_X + FORWARD * 175.0
+GUARD_X = 0.0
 #: The posts are at 225 mm. Staying inside them means a keeper on the correct
 #: side of the mouth is always still in front of the goal.
 POST_CLAMP = 180.0
@@ -86,7 +89,7 @@ POST_CLAMP = 180.0
 #: it is being timed. And behind the goal line is where a keeper gets shoved
 #: wholly into the out area by an attacker, which is rule 5.7.1.6 and another
 #: thirty seconds off. Both are lost by standing still while being pushed.
-DEPTH_FLOOR = DEFEND_X + FORWARD * 120.0
+DEPTH_FLOOR = 0.0
 
 #: How far across the field the keeper is ever allowed to be, and how far up
 #: it. Nothing out there is its job: the goal is 450 mm wide and it is behind
@@ -94,7 +97,9 @@ DEPTH_FLOOR = DEFEND_X + FORWARD * 120.0
 #: open net. Passed to every steering call, which is what keeps it true even
 #: when the ball is somewhere tempting.
 LEASH_Z = 430.0
-LEASH_X = abs(DEFEND_X) - 40.0
+# abs(DEFEND_X) is HALF_LENGTH either way round, so unlike GUARD_X/DEPTH_FLOOR
+# this needs no per-tick recompute from attack_direction.
+LEASH_X = HALF_LENGTH - 40.0
 
 yaw = YawRate()
 locator = Locator(TEAM)
@@ -103,6 +108,14 @@ ball = BallTracker()
 
 @robot.tick
 def think(s, me):
+    global UPFIELD, ATTACK_X, DEFEND_X, FORWARD, GUARD_X, DEPTH_FLOOR
+    UPFIELD = attack_heading(s.attack_direction)
+    ATTACK_X = attack_x(s.attack_direction)
+    DEFEND_X = defend_x(s.attack_direction)
+    FORWARD = 1.0 if ATTACK_X > 0 else -1.0
+    GUARD_X = DEFEND_X + FORWARD * 175.0
+    DEPTH_FLOOR = DEFEND_X + FORWARD * 120.0
+
     if not s.playing:
         return robot.coast()
 

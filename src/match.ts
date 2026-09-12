@@ -75,6 +75,25 @@ export interface MatchOptions {
   inclined?: boolean;
   idealSensors?: boolean;
   /**
+   * A human starts each half and can pause, resume, abandon, award a
+   * kick-off, remove/return a robot, or correct the score — but does not
+   * have to do any of it. Goals, restarts, lack of progress, multiple
+   * defence and rule 5.7 removal/return all keep resolving themselves
+   * exactly as a self-running match, per `autoResolve`/`autoDamaged`'s
+   * ordinary defaults (both true). The only thing gated on the referee is
+   * that neither half starts on its own — see `Match.kickOff`.
+   *
+   * `autoResolve`/`autoDamaged` are independent knobs, not implied by this:
+   * pass them explicitly (both false) for a fully staged mode where nothing
+   * resolves itself either, which nothing in this codebase does today. Off
+   * by default, so nothing that does not ask for it — bench, the ladder,
+   * `run()`, today's `serve` modes — changes at all.
+   */
+  refereed?: boolean;
+  /** Forwarded to `World` directly, independent of `refereed`. Defaults to World's own default (true). */
+  autoResolve?: boolean;
+  autoDamaged?: boolean;
+  /**
    * Called after every physics step, with the match.
    *
    * The one way to watch a match closely from outside without the watcher
@@ -86,6 +105,16 @@ export interface MatchOptions {
    * play.
    */
   observe?: (match: Match) => void;
+}
+
+/** A referee's correction to the score, kept for the match record. */
+export interface ScoreCorrection {
+  team: TeamId;
+  from: number;
+  to: number;
+  reason: string;
+  /** Match clock the correction was made at. */
+  at: number;
 }
 
 export interface MatchResult {
@@ -104,6 +133,11 @@ export interface MatchResult {
    * as they happen.
    */
   calls: Record<string, number>;
+  /** Every score correction a referee made, in order. */
+  scoreCorrections: ScoreCorrection[];
+  /** Whether a referee ended the match early rather than it running full time. */
+  abandoned: boolean;
+  abandonReason?: string;
 }
 
 interface Slot {
@@ -134,21 +168,47 @@ export class Match {
   private readonly halfSeconds: number;
   readonly teams: { cyan: string; yellow: string };
   private sinceControl = 0;
+  /**
+   * Flips every physics tick. `control()` and `dribble()` both resolve
+   * several robots against the same shared ball one at a time, and whichever
+   * one goes last keeps more of its own influence on the result - proven with
+   * a deterministic mirror-symmetric contest that came out perfectly even only
+   * once ball state stopped being progressively mutated tick to tick. Cyan is
+   * always first in `this.slots` (built once, from `world.robots`, before any
+   * kick-off ever happens), so a FIXED order would hand that edge to the same
+   * team for the entire match regardless of which end it is defending -
+   * exactly the effect that turned up as a persistent cyan lead in both halves
+   * even after ends were made to swap. Flipping who goes first every tick
+   * instead of once a match spreads the same edge over both teams equally,
+   * inside a single half - the granularity a mercy rule needs.
+   */
+  private slotOrderFlipped = false;
   private readonly goals: { team: TeamId; at: number }[] = [];
   private lastScore = { cyan: 0, yellow: 0 };
   private readonly calls: Record<string, number> = {};
   private lastSeenEvent: unknown = null;
   private readonly observer: ((match: Match) => void) | undefined;
+  /** Whether this match is driven by referee calls rather than the clock. */
+  readonly refereed: boolean;
+  private readonly scoreCorrections: ScoreCorrection[] = [];
+  private halfEndRequested = false;
+  private ended = false;
+  private abandoned = false;
+  private abandonReason: string | undefined;
+  private hasKickedOffThisHalf = false;
 
   constructor(opts: MatchOptions) {
     const league = getLeague(opts.league ?? 'open');
     this.halfSeconds = opts.halfSeconds ?? 300;
     this.teams = opts.teams ?? { cyan: 'Cyan', yellow: 'Yellow' };
+    this.refereed = opts.refereed ?? false;
     this.world = new World({
       league,
       halfLengthSeconds: this.halfSeconds,
       inclined: opts.inclined ?? false,
       commsEnabled: league.commsAllowed,
+      autoResolve: opts.autoResolve,
+      autoDamaged: opts.autoDamaged,
     });
     this.world.resetRobots('cyan');
 
@@ -197,6 +257,12 @@ export class Match {
     return this.world.robots.find((r) => r.id === id);
   }
 
+  /** All four slots, in an order that alternates tick to tick. See `slotOrderFlipped`. */
+  private orderedSlots(): Slot[] {
+    const all = [...this.slots.values()];
+    return this.slotOrderFlipped ? all.reverse() : all;
+  }
+
   /** Whether this robot's dribbler currently has the ball. */
   private gateHeld(robot: Robot): boolean {
     if (!this.world.config.league.dribblerAllowed) return false;
@@ -209,7 +275,7 @@ export class Match {
 
   private control(dt: number): void {
     const view = this.view();
-    for (const slot of this.slots.values()) {
+    for (const slot of this.orderedSlots()) {
       const robot = this.robotFor(slot.id);
       if (!robot) continue;
       slot.kickCooldown = Math.max(0, slot.kickCooldown - dt);
@@ -255,6 +321,7 @@ export class Match {
         wheelSpeeds: robot.wheelSpeeds,
         held,
         messages: this.world.commsEnabled ? this.radios[robot.team].deliver(number, this.world.clock) : [],
+        attackDirection: this.world.attackingGoal(robot.team) === 'yellow' ? 1 : -1,
         dt,
       });
 
@@ -299,7 +366,7 @@ export class Match {
    * what makes possession contestable rather than absolute.
    */
   private dribble(dt: number): void {
-    for (const slot of this.slots.values()) {
+    for (const slot of this.orderedSlots()) {
       const power = slot.command.dribbler ?? 0;
       const robot = this.robotFor(slot.id);
       if (power <= 0 || !robot || robot.removed) continue;
@@ -311,6 +378,7 @@ export class Match {
   }
 
   step(dt: number): void {
+    this.slotOrderFlipped = !this.slotOrderFlipped;
     this.sinceControl += dt;
     const period = 1 / CONTROL_HZ;
     if (this.sinceControl >= period) {
@@ -362,6 +430,114 @@ export class Match {
   resetAgents(): void {
     for (const slot of this.slots.values()) slot.agent.reset();
     for (const radio of Object.values(this.radios)) radio.clear();
+    // A new half has had no restart yet - see resume()'s guard below.
+    this.hasKickedOffThisHalf = false;
+  }
+
+  /**
+   * A referee's kick-off: repositions for the restart and starts play.
+   *
+   * `World.kickOff` itself never touches `running` — every existing caller
+   * (`run()`, `MatchServer.play()`) sets it by hand right after calling it,
+   * because in a self-running match "kick off" and "start play" are two
+   * separate decisions the loop makes together. In refereed play they are the
+   * same referee action, so this wrapper makes both at once.
+   */
+  kickOff(team: TeamId): void {
+    this.world.kickOff(team);
+    this.world.running = true;
+    this.hasKickedOffThisHalf = true;
+  }
+
+  /** Rule violated at kick-off: the other side gets it instead. */
+  awardKickOffToOther(): void {
+    this.world.callIllegalKickOff();
+    this.world.running = true;
+    this.hasKickedOffThisHalf = true;
+  }
+
+  /** Rule 5.7: take a robot off for the reason given. */
+  removeRobot(robotId: string, rule: string, reason: string): void {
+    this.world.removeRobot(robotId, rule, reason);
+  }
+
+  /** Rule 5.7.4: return a robot once the referee is satisfied it is fixed. Refuses early. */
+  returnRobot(robotId: string): boolean {
+    return this.world.returnRobot(robotId);
+  }
+
+  /** Stop play without ending anything — a referee's whistle. */
+  pause(): void {
+    if (!this.world.running) return;
+    this.world.running = false;
+    this.world.emit({ kind: 'paused', rule: '—', message: 'Play paused by referee.' });
+  }
+
+  /**
+   * Restart play after a pause.
+   *
+   * Refuses before this half has actually been kicked off: found live, a
+   * referee clicking Resume instead of Kick Off at the top of a half would
+   * otherwise start play with every robot wherever the last half left it,
+   * skipping the rule 5.4 restart placement entirely.
+   */
+  resume(): void {
+    if (this.world.running || !this.hasKickedOffThisHalf) return;
+    this.world.running = true;
+    this.world.emit({ kind: 'resumed', rule: '—', message: 'Play resumed by referee.' });
+  }
+
+  /** End the current half early. The loop driving the match checks this once per frame. */
+  endHalf(): void {
+    this.halfEndRequested = true;
+    this.world.running = false;
+  }
+
+  /** Read and clear the end-half request. */
+  consumeHalfEndRequest(): boolean {
+    const requested = this.halfEndRequested;
+    this.halfEndRequested = false;
+    return requested;
+  }
+
+  /** End the match after the current half — no second half is played. */
+  endMatch(): void {
+    this.ended = true;
+    this.halfEndRequested = true;
+    this.world.running = false;
+  }
+
+  /** End the match immediately, for a reason recorded against the result. */
+  abandon(reason: string): void {
+    this.abandoned = true;
+    this.abandonReason = reason;
+    this.ended = true;
+    this.halfEndRequested = true;
+    this.world.running = false;
+  }
+
+  get isEnded(): boolean {
+    return this.ended;
+  }
+
+  get isAbandoned(): boolean {
+    return this.abandoned;
+  }
+
+  /** Correct the score, with a reason recorded against the match. */
+  correctScore(team: TeamId, to: number, reason: string): void {
+    if (!Number.isInteger(to) || to < 0) {
+      throw new Error(`score correction must be a non-negative whole number, got ${to}`);
+    }
+    const from = this.world.score[team];
+    this.scoreCorrections.push({ team, from, to, reason, at: this.world.clock });
+    this.world.score[team] = to;
+    this.world.emit({
+      kind: 'score-corrected',
+      rule: '—',
+      team,
+      message: `Score corrected: ${team} ${from} → ${to}. ${reason}`,
+    });
   }
 
   /**
@@ -423,6 +599,9 @@ export class Match {
 
   /** Play both halves and hand back the result. */
   run(): MatchResult {
+    if (this.refereed) {
+      throw new Error('a refereed match is driven by referee calls, not run()');
+    }
     const dt = 1 / PHYSICS_HZ;
     for (const half of [1, 2] as const) {
       this.world.half = half;
@@ -449,6 +628,9 @@ export class Match {
       goals: [...this.goals],
       slots,
       calls: { ...this.calls },
+      scoreCorrections: [...this.scoreCorrections],
+      abandoned: this.abandoned,
+      abandonReason: this.abandonReason,
     };
   }
 }

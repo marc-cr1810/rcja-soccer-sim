@@ -568,6 +568,30 @@ describe('damaged robots (5.7)', () => {
     expect(robot.removalRule).toBeUndefined();
     expect(robot.removalReason).toBeUndefined();
   });
+
+  it('stays off across a kick-off, rather than a restart quietly reinstating it', () => {
+    // Found live: a referee's kick-off for the next half calls resetRobots,
+    // which used to build every robot fresh with removed: false — silently
+    // undoing a stand-down `returnRobot` (5.7.4) was never asked to end.
+    const w = new World({
+      league: getLeague('open'),
+      halfLengthSeconds: 300,
+      inclined: false,
+      autoDamaged: false,
+    });
+    const robot = w.robots[0]!;
+    w.removeRobot(robot.id, '5.7.1.1', 'Not responding to the ball.');
+    run(w, 5);
+    const remainingBefore = robot.penaltyRemaining;
+
+    w.kickOff('yellow');
+
+    const same = w.robots.find((r) => r.id === robot.id)!;
+    expect(same.removed).toBe(true);
+    expect(same.removalRule).toBe('5.7.1.1');
+    expect(same.penaltyRemaining).toBe(remainingBefore);
+    expect(w.returnRobot(same.id)).toBe(false);
+  });
 });
 
 describe('kick-off placement (5.4.5)', () => {

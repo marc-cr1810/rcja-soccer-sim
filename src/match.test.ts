@@ -192,6 +192,7 @@ describe('the reference agent', () => {
       wheelSpeeds: [0, 0, 0, 0],
       held: false,
       messages: [],
+      attackDirection: 1,
       dt: 0.02,
     });
     const me = locate(frame);
@@ -217,6 +218,7 @@ describe('the reference agent', () => {
       wheelSpeeds: [0, 0, 0, 0],
       held: false,
       messages: [],
+      attackDirection: 1,
       dt: 0.02,
     });
     const me = locate(frame);
@@ -338,4 +340,202 @@ describe('the reference agent', () => {
     expect(kickoffs).toBeGreaterThan(6);
     expect(illegal).toBe(0);
   }, 60000);
+});
+
+describe('refereed play: a human starts each half; everything else resolves itself', () => {
+  const dt = 1 / 100;
+
+  function refereedMatch(skill = 1) {
+    return new Match({ agents: teams(skill), halfSeconds: HALF, refereed: true, seed: 1 });
+  }
+
+  it('does not start until the referee kicks off', () => {
+    const m = refereedMatch();
+    m.world.half = 1;
+    for (let i = 0; i < 200; i++) m.step(dt);
+    expect(m.world.running).toBe(false);
+    expect(m.world.clock).toBe(0);
+  });
+
+  it("starts play on the referee's kick-off; after that, a goal resolves itself exactly like a self-running match", () => {
+    const m = refereedMatch();
+    m.world.half = 1;
+    m.resetAgents();
+    m.kickOff('cyan');
+    expect(m.world.running).toBe(true);
+
+    // Clear the field and fire the ball at the goal - the same technique
+    // world.test.ts uses to test scoring in isolation.
+    m.world.robots.forEach((r) => (r.removed = true));
+    m.world.ball.x = 400;
+    m.world.ball.z = 0;
+    m.world.ball.vx = 3000;
+    for (let i = 0; i < 200; i++) m.step(dt);
+
+    expect(m.world.score.cyan).toBe(1);
+    // Auto-resolved: play never stopped for a human to act on it.
+    expect(m.world.running).toBe(true);
+  });
+
+  it('supports a fully-manual staged mode when autoResolve/autoDamaged are explicitly turned off', () => {
+    // refereed alone no longer implies this - it's an independent knob for a
+    // future staged-scenario use, not what a live refereed match wants by
+    // default.
+    const m = new Match({
+      agents: teams(),
+      halfSeconds: HALF,
+      refereed: true,
+      autoResolve: false,
+      autoDamaged: false,
+      seed: 1,
+    });
+    m.resetAgents();
+    m.kickOff('cyan');
+
+    m.world.robots.forEach((r) => (r.removed = true));
+    m.world.ball.x = 400;
+    m.world.ball.z = 0;
+    m.world.ball.vx = 3000;
+    for (let i = 0; i < 200; i++) m.step(dt);
+
+    // A goal stops play instead of restarting it, because this match asked
+    // to be told rather than have it handled automatically.
+    expect(m.world.score.cyan).toBe(1);
+    expect(m.world.running).toBe(false);
+  });
+
+  it('pause and resume toggle play and appear in the event log', () => {
+    const m = refereedMatch();
+    m.resetAgents();
+    m.kickOff('cyan');
+    m.pause();
+    expect(m.world.running).toBe(false);
+    expect(m.world.events.at(-1)?.kind).toBe('paused');
+
+    m.resume();
+    expect(m.world.running).toBe(true);
+    expect(m.world.events.at(-1)?.kind).toBe('resumed');
+  });
+
+  it('a stood-down robot returns automatically once its penalty is served, just like a self-running match', () => {
+    const m = refereedMatch();
+    m.resetAgents();
+    m.kickOff('cyan');
+    m.removeRobot('cyan-1', '5.7.1', 'Testing a manual removal.');
+    const robot = m.world.robots.find((r) => r.id === 'cyan-1')!;
+    expect(robot.removed).toBe(true);
+
+    // Run the penalty all the way down.
+    while (robot.penaltyRemaining > 0) m.step(dt);
+    expect(robot.removed).toBe(false); // autoDamaged defaults true even when refereed
+  });
+
+  it('lets the referee still remove and return a robot by hand, on top of the automatic behaviour', () => {
+    const m = refereedMatch();
+    m.resetAgents();
+    m.kickOff('cyan');
+    m.removeRobot('cyan-1', 'unsporting conduct', 'Deliberately obstructing an opponent.');
+    const robot = m.world.robots.find((r) => r.id === 'cyan-1')!;
+    expect(robot.removed).toBe(true);
+
+    // A manual return still respects the 5.7.2 stand-down period.
+    expect(m.returnRobot('cyan-1')).toBe(false);
+    robot.penaltyRemaining = 0;
+    expect(m.returnRobot('cyan-1')).toBe(true);
+    expect(robot.removed).toBe(false);
+  });
+
+  it('correctScore mutates the score and is recorded with a reason', () => {
+    const m = refereedMatch();
+    m.correctScore('cyan', 2, 'Goal miscounted by the scoreboard operator.');
+    expect(m.world.score.cyan).toBe(2);
+    expect(m.world.events.at(-1)?.kind).toBe('score-corrected');
+
+    m.abandon('Field fault.');
+    const result = m.result();
+    expect(result.scoreCorrections).toEqual([
+      {
+        team: 'cyan',
+        from: 0,
+        to: 2,
+        reason: 'Goal miscounted by the scoreboard operator.',
+        at: 0,
+      },
+    ]);
+  });
+
+  it('abandon ends the match and records the reason', () => {
+    const m = refereedMatch();
+    m.resetAgents();
+    m.kickOff('cyan');
+    for (let i = 0; i < 50; i++) m.step(dt);
+    m.abandon('Safety issue on the field.');
+
+    expect(m.isAbandoned).toBe(true);
+    expect(m.isEnded).toBe(true);
+    expect(m.world.running).toBe(false);
+    const result = m.result();
+    expect(result.abandoned).toBe(true);
+    expect(result.abandonReason).toBe('Safety issue on the field.');
+  });
+
+  it('refuses to resume a half that was never kicked off', () => {
+    // Found live: clicking Resume instead of Kick Off at the top of a half
+    // used to start play with every robot wherever the last half left it,
+    // skipping the rule 5.4 restart placement entirely.
+    const m = refereedMatch();
+    m.resetAgents();
+    m.resume();
+    expect(m.world.running).toBe(false);
+
+    m.kickOff('cyan');
+    m.pause();
+    expect(m.world.running).toBe(false);
+    m.resume(); // fine once this half has actually been kicked off
+    expect(m.world.running).toBe(true);
+  });
+
+  it('requires a fresh kick-off after resetAgents, even mid-match', () => {
+    const m = refereedMatch();
+    m.resetAgents();
+    m.kickOff('cyan');
+    m.pause();
+    // A new half (or any other resetAgents boundary) needs its own kick-off.
+    m.resetAgents();
+    m.resume();
+    expect(m.world.running).toBe(false);
+  });
+
+  it('endHalf stops just this half; endMatch stops the whole thing', () => {
+    const half = refereedMatch();
+    half.resetAgents();
+    half.kickOff('cyan');
+    half.endHalf();
+    expect(half.consumeHalfEndRequest()).toBe(true);
+    expect(half.world.running).toBe(false);
+    expect(half.isEnded).toBe(false); // only this half ends, not the match
+
+    const whole = refereedMatch();
+    whole.resetAgents();
+    whole.kickOff('cyan');
+    whole.endMatch();
+    expect(whole.consumeHalfEndRequest()).toBe(true);
+    expect(whole.world.running).toBe(false);
+    expect(whole.isEnded).toBe(true);
+    expect(whole.isAbandoned).toBe(false); // ended on purpose, not abandoned
+    expect(whole.result().abandoned).toBe(false);
+  });
+
+  it('refuses to run() itself - a refereed match is driven by referee calls', () => {
+    expect(() => refereedMatch().run()).toThrow();
+  });
+
+  it('leaves an unreferereed match exactly as it always behaved', () => {
+    // The compatibility-critical seam: no refereed/autoResolve/autoDamaged
+    // option set at all should be indistinguishable from before this feature.
+    const r = play(1);
+    expect(r.clock).toBeGreaterThanOrEqual(HALF * 2 - 1);
+    expect(r.abandoned).toBe(false);
+    expect(r.scoreCorrections).toEqual([]);
+  });
 });

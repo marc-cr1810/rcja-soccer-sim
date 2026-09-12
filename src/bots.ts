@@ -72,11 +72,14 @@ export const statue: Agent = {
  * coming, rather than the pair quietly parking there all match.
  */
 export function camper(team: 'cyan' | 'yellow'): Agent {
-  const homeward = team === 'cyan' ? Math.PI : 0;
   return {
     name: `camper-${team}`,
     tick(frame) {
       if (!frame.playing) return stop;
+      // Facing away from the attack direction points at its own goal - ends
+      // swap at half-time (rule 1.4/5.4), so this is read from the frame
+      // rather than fixed from `team` at construction time.
+      const homeward = frame.attackDirection > 0 ? Math.PI : 0;
       const toHome = wrapAngle(homeward - frame.compass.heading);
       // Stop once the wall behind is close, then hold the spot.
       const backedUp = (frame.range.back ?? 9999) < 200;

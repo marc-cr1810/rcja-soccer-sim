@@ -14,7 +14,7 @@
  */
 
 /** Protocol version. Bumped when a frame changes shape; the server refuses a mismatch. */
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 
 /** What the infrared ring can see of the ball. Null when nothing is detected. */
 export interface BallReading {
@@ -107,8 +107,20 @@ export interface SensorFrame {
   clock: number;
   /** Which robot this is, 1 or 2. */
   robot: number;
-  /** 'cyan' or 'yellow'. Your goal is the one with your name on it. */
+  /**
+   * 'cyan' or 'yellow'. Your identity, your radio channel, your name on the
+   * scoreboard - but NOT which goal to shoot at. Rule 1.4/5.4: ends swap at
+   * half-time, so the goal with your name on it is the one you are
+   * *defending* only until half-time; use `attackDirection` for where to
+   * shoot, not this.
+   */
   team: string;
+  /**
+   * Rule 1.4/5.4: which goal this robot is currently attacking, independent
+   * of `team`. +1 means the yellow goal (+x); -1 means the cyan goal (-x).
+   * Fixed for the current half, and flips at half-time.
+   */
+  attackDirection: 1 | -1;
   /** True when the referee has the game running; false at a kick-off or stoppage. */
   playing: boolean;
   kickoff: KickoffReading;

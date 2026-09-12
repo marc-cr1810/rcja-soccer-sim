@@ -93,7 +93,10 @@ export type EventKind =
   | 'possible-multiple-defence'
   | 'possible-damaged'
   | 'kickoff'
-  | 'illegal-kickoff';
+  | 'illegal-kickoff'
+  | 'paused'
+  | 'resumed'
+  | 'score-corrected';
 
 export interface MatchEvent {
   kind: EventKind;
@@ -116,15 +119,18 @@ export interface MatchConfig {
    * When false, detectors still report what they see but do not act on it:
    * the ball is not moved to a neutral point and a goal does not trigger a
    * kick-off. A staged situation has to hold the arrangement the author set
-   * up, otherwise it resets itself out from under the referee looking at it.
-   * Defaults to true, which is what a live match wants.
+   * up, otherwise it resets itself out from under whoever is looking at it —
+   * not something either a self-running or a refereed match wants; both
+   * leave this at its default. Defaults to true.
    */
   autoResolve?: boolean;
   /**
    * Whether the simulator itself applies the "damaged" rules, or only reports
-   * them. Referee mode leaves them false so the human makes the call, which is
-   * the point of that mode; a self-running match sets it true so robots that
-   * drive off the field are actually taken off, as 5.7.1.6 requires.
+   * them. True (the default, for both a self-running and a refereed match)
+   * so robots that drive off the field are actually taken off, as 5.7.1.6
+   * requires, and returned the moment their stand-down is served. A referee
+   * can still remove or return a robot by hand at any time regardless — this
+   * only controls whether the simulator also does it on its own.
    * Defaults to autoResolve.
    */
   autoDamaged?: boolean;
@@ -188,14 +194,6 @@ function ballMass(league: League): number {
   return league.ball === 'ir-74' ? 140 : 46;
 }
 
-/** Which goal a team defends. Cyan defends -x, yellow defends +x. */
-export function defendingGoal(team: TeamId): GoalSide {
-  return team === 'cyan' ? 'cyan' : 'yellow';
-}
-
-export function attackingGoal(team: TeamId): GoalSide {
-  return team === 'cyan' ? 'yellow' : 'cyan';
-}
 
 export class World {
   readonly config: MatchConfig;
@@ -211,6 +209,18 @@ export class World {
   commsEnabled: boolean;
   /** Timestamp of most recent packet sent per team, for visual feedback. */
   commsActivity: Record<TeamId, number> = { cyan: -99, yellow: -99 };
+
+  /**
+   * Flips every physics tick. Robot-robot collisions and separation are
+   * resolved one pair at a time against state the previous pair just left
+   * behind, so a robot touching two others in the same tick (a keeper
+   * shoved while also on the ball, say) resolves differently depending on
+   * which pair goes first - and `actives` is always ordered
+   * cyan-1/cyan-2/yellow-1/yellow-2, never shuffled by which end either team
+   * is currently defending. See `Match.slotOrderFlipped` for the sibling fix
+   * this mirrors, and `pairOrder` below.
+   */
+  private pairOrderFlipped = false;
 
   /** Seconds the ball has been effectively stationary and contested (5.6.1.2). */
   private stalledFor = 0;
@@ -265,9 +275,41 @@ export class World {
     };
   }
 
+  /**
+   * Rule 1.4/5.4: ends swap at half-time. The cyan goal and the yellow goal
+   * are fixed physical places on the field (-x and +x respectively, per
+   * field.ts) - what changes each half is which team is standing in front of
+   * which one.
+   */
+  private get endsSwapped(): boolean {
+    return this.half === 2;
+  }
+
+  /** Which goal this team currently defends. Fixed for a half, not for the match. */
+  defendingGoal(team: TeamId): GoalSide {
+    const first = team === 'cyan' ? 'cyan' : 'yellow';
+    if (!this.endsSwapped) return first;
+    return first === 'cyan' ? 'yellow' : 'cyan';
+  }
+
+  /** Which goal this team currently attacks. Fixed for a half, not for the match. */
+  attackingGoal(team: TeamId): GoalSide {
+    return this.defendingGoal(team) === 'cyan' ? 'yellow' : 'cyan';
+  }
+
   /** Rule 5.4: both teams on their defensive half, non-kicking team in the box. */
   resetRobots(kickingOff: TeamId = 'cyan'): void {
+    // A robot still serving a 5.7 stand-down does not get a free pass just
+    // because some restart repositions everyone else - only returnRobot()
+    // (5.7.4) brings it back, automatically or by a referee's hand. Without
+    // this, any kick-off - including a referee's own, at the top of a half -
+    // would silently reinstate a robot mid-penalty.
+    const stillRemoved = new Map(this.robots.filter((r) => r.removed).map((r) => [r.id, r]));
     const mass = robotMass(this.config.league);
+    // +1 if this team is currently camped on the +x side of the field (i.e.
+    // defends the yellow goal this half), -1 if on the -x side. Swaps with
+    // `endsSwapped`, unlike the goal colours themselves.
+    const sideSign = (team: TeamId): 1 | -1 => (this.defendingGoal(team) === 'cyan' ? -1 : 1);
     const make = (
       id: string,
       team: TeamId,
@@ -283,7 +325,8 @@ export class World {
       vz: 0,
       radius: ROBOT_RADIUS,
       mass,
-      heading: team === 'cyan' ? 0 : Math.PI,
+      // Facing up the field, towards this team's current attacking end.
+      heading: sideSign(team) < 0 ? 0 : Math.PI,
       isGoalie,
       removed: false,
       penaltyRemaining: 0,
@@ -318,15 +361,25 @@ export class World {
     const bRadius = this.ball.radius;
     const standoff = this.config.league.kickerAllowed ? 15 : 55;
     const kickoffX = ROBOT_RADIUS + bRadius + standoff;
-    const cyanStriker = kickingOff === 'cyan' ? -kickoffX : -(boxEdge - 45);
-    const yellowStriker = kickingOff === 'yellow' ? kickoffX : boxEdge - 45;
+    const cyanSign = sideSign('cyan');
+    const yellowSign = sideSign('yellow');
+    const cyanStriker = cyanSign * (kickingOff === 'cyan' ? kickoffX : boxEdge - 45);
+    const yellowStriker = yellowSign * (kickingOff === 'yellow' ? kickoffX : boxEdge - 45);
 
     this.robots = [
       make('cyan-1', 'cyan', cyanStriker, 0, false),
-      make('cyan-2', 'cyan', -goalieX, 0, true),
+      make('cyan-2', 'cyan', cyanSign * goalieX, 0, true),
       make('yellow-1', 'yellow', yellowStriker, 0, false),
-      make('yellow-2', 'yellow', goalieX, 0, true),
+      make('yellow-2', 'yellow', yellowSign * goalieX, 0, true),
     ];
+    for (const robot of this.robots) {
+      const was = stillRemoved.get(robot.id);
+      if (!was) continue;
+      robot.removed = true;
+      robot.penaltyRemaining = was.penaltyRemaining;
+      robot.removalRule = was.removalRule;
+      robot.removalReason = was.removalReason;
+    }
 
     this.ball.x = 0;
     this.ball.z = 0;
@@ -351,12 +404,18 @@ export class World {
     return this.robots.filter((r) => !r.removed);
   }
 
+  /** `list`, in an order that alternates tick to tick. See `pairOrderFlipped`. */
+  private pairOrder(list: Robot[]): Robot[] {
+    return this.pairOrderFlipped ? [...list].reverse() : list;
+  }
+
   emit(event: Omit<MatchEvent, 'at'>): void {
     this.events.push({ ...event, at: this.clock });
     if (this.events.length > 60) this.events.shift();
   }
 
   step(dt: number): void {
+    this.pairOrderFlipped = !this.pairOrderFlipped;
     if (this.running) this.clock += dt;
     this.sinceKickOff += dt;
     for (const team of ['cyan', 'yellow'] as const) {
@@ -383,19 +442,42 @@ export class World {
     const actives = this.active();
 
     // One impulse pass, so a collision exchanges momentum exactly once.
+    //
+    // Every robot resolves against the SAME pre-pass ball state and the
+    // resulting corrections are summed, rather than each robot in turn
+    // resolving against whatever the previous one just left behind. Two
+    // robots contesting the ball in one tick is an even fight; letting the
+    // first one move the ball out from under the second - or hand it a
+    // head start - made whichever seat `actives` happened to reach last
+    // (always the same one, since active robots are always ordered
+    // cyan-1/cyan-2/yellow-1/yellow-2) systematically win the ball's
+    // outgoing velocity in a tie, with no such contest ever intended.
+    const ballBefore = { ...this.ball };
+    let ballDX = 0;
+    let ballDZ = 0;
+    let ballDVX = 0;
+    let ballDVZ = 0;
     for (const robot of actives) {
-      const recess = dribblerRecess(robot, this.ball, this.config.league);
-      if (collideBodies(robot, this.ball, recess)) {
+      const recess = dribblerRecess(robot, ballBefore, this.config.league);
+      const ballTrial = { ...ballBefore };
+      if (collideBodies(robot, ballTrial, recess)) {
+        ballDX += ballTrial.x - ballBefore.x;
+        ballDZ += ballTrial.z - ballBefore.z;
         // A robot striking the ball imparts a little of its own motion.
-        this.ball.vx += robot.vx * 0.25;
-        this.ball.vz += robot.vz * 0.25;
+        ballDVX += ballTrial.vx - ballBefore.vx + robot.vx * 0.25;
+        ballDVZ += ballTrial.vz - ballBefore.vz + robot.vz * 0.25;
       }
     }
+    this.ball.x += ballDX;
+    this.ball.z += ballDZ;
+    this.ball.vx += ballDVX;
+    this.ball.vz += ballDVZ;
     for (const robot of actives) robot.sinceOpponentContact += dt;
-    for (let i = 0; i < actives.length; i++) {
-      for (let j = i + 1; j < actives.length; j++) {
-        const a = actives[i]!;
-        const b = actives[j]!;
+    const robotPairOrder = this.pairOrder(actives);
+    for (let i = 0; i < robotPairOrder.length; i++) {
+      for (let j = i + 1; j < robotPairOrder.length; j++) {
+        const a = robotPairOrder[i]!;
+        const b = robotPairOrder[j]!;
         if (collideBodies(a, b) && a.team !== b.team) {
           a.sinceOpponentContact = 0;
           b.sinceOpponentContact = 0;
@@ -408,12 +490,12 @@ export class World {
     // situation in rule 5.6.1.3 - cannot be resolved in one pass, and robots
     // visibly merging into one another destroys the point of a referee view.
     for (let pass = 0; pass < CONTACT_PASSES; pass++) {
-      for (let i = 0; i < actives.length; i++) {
-        for (let j = i + 1; j < actives.length; j++) {
-          separateBodies(actives[i]!, actives[j]!);
+      for (let i = 0; i < robotPairOrder.length; i++) {
+        for (let j = i + 1; j < robotPairOrder.length; j++) {
+          separateBodies(robotPairOrder[i]!, robotPairOrder[j]!);
         }
       }
-      for (const robot of actives) {
+      for (const robot of this.pairOrder(actives)) {
         const recess = dribblerRecess(robot, this.ball, this.config.league);
         separateBodies(robot, this.ball, recess);
         collideWithPerimeter(robot, false);
@@ -444,8 +526,10 @@ export class World {
   private detectGoal(hit: ReturnType<typeof collideWithPerimeter>): void {
     if (hit !== 'goal-back') return;
     const scoringSide: GoalSide = this.ball.x > 0 ? 'yellow' : 'cyan';
-    // The goal at +x is defended by yellow, so a ball there scores for cyan.
-    const scorer: TeamId = scoringSide === 'yellow' ? 'cyan' : 'yellow';
+    // Whichever team does NOT currently defend that goal scored in it. Not a
+    // fixed cyan/yellow flip: which team defends which goal swaps at half-time
+    // (rule 1.4/5.4), even though the goals' own colours and places don't.
+    const scorer: TeamId = this.defendingGoal('cyan') === scoringSide ? 'yellow' : 'cyan';
 
     // Rule 5.6.1.3: If a goal is scored as a direct result of forcing, it will be disallowed!
     if (this.lastForcingTeam === scorer && this.sinceForcing < 0.8) {
@@ -701,7 +785,7 @@ export class World {
       if (ballDist > attacker.radius + this.ball.radius + 25) continue;
 
       const oppTeam: TeamId = attacker.team === 'cyan' ? 'yellow' : 'cyan';
-      const oppGoal = defendingGoal(oppTeam);
+      const oppGoal = this.defendingGoal(oppTeam);
       const sign = oppGoal === 'cyan' ? -1 : 1;
       const facingGoal = Math.cos(attacker.heading) * sign > 0.3;
       const drivingTowardsGoal = attacker.vx * sign > 25 || (facingGoal && attacker.vx * sign >= -10);
@@ -793,7 +877,7 @@ export class World {
 
       // Rule 5.8.2 / 5.8.3: Goalie must respond forward to intercept the ball.
       if (robot.isGoalie) {
-        const own = defendingGoal(robot.team);
+        const own = this.defendingGoal(robot.team);
         const ballInBox = inPenaltyBox(this.ball, own);
         const ballSlow = Math.hypot(this.ball.vx, this.ball.vz) < 40;
         const goalieOnLine = Math.abs(robot.x) > HALF_LENGTH - 65;
@@ -876,7 +960,8 @@ export class World {
       if (defenders.length > 1) {
         // Rule 5.11.1: Must "substantially affect the game". If the ball is
         // in the opponent's half, defenders in the box do not affect active play.
-        const ballInDefendingHalf = team === 'cyan' ? this.ball.x <= 150 : this.ball.x >= -150;
+        const ballInDefendingHalf =
+          this.defendingGoal(team) === 'cyan' ? this.ball.x <= 150 : this.ball.x >= -150;
         if (!ballInDefendingHalf) {
           this.multipleDefenceDwell[team] = 0;
           continue;
@@ -894,7 +979,7 @@ export class World {
         // Rule 5.6.1.4: Attacker using greater power to force two opposing robots
         // into their penalty box takes priority over Multiple Defence.
         const oppTeam: TeamId = team === 'cyan' ? 'yellow' : 'cyan';
-        const sign = team === 'cyan' ? -1 : 1;
+        const sign = this.defendingGoal(team) === 'cyan' ? -1 : 1;
         const forcingOpponent = this.active().find((opp) => {
           if (opp.team !== oppTeam) return false;
           const hasBall = distance(opp, this.ball) <= opp.radius + this.ball.radius + 35;
@@ -949,7 +1034,7 @@ export class World {
    * are not directly blocking the goal and do not trigger multiple defence.
    */
   multipleDefenceCandidates(team: TeamId): Robot[] {
-    const own = defendingGoal(team);
+    const own = this.defendingGoal(team);
     const maxGoalZ = HALF_GOAL_WIDTH + 50;
     return this.active().filter(
       (r) => r.team === team && inPenaltyBox(r, own) && Math.abs(r.z) <= maxGoalZ,
@@ -965,7 +1050,7 @@ export class World {
     let candidates = this.multipleDefenceCandidates(team);
     if (candidates.length < 2) {
       // If called manually by referee when multiple defenders are in the penalty box
-      const own = defendingGoal(team);
+      const own = this.defendingGoal(team);
       const inBox = this.active().filter((r) => r.team === team && inPenaltyBox(r, own));
       if (inBox.length < 2) return null;
       candidates = inBox;
@@ -1015,7 +1100,7 @@ export class World {
     target.vz = 0;
     target.omega = 0;
     // Rule 5.7.4 principle: not positioned to its advantage -> face own defending goal
-    target.heading = target.team === 'cyan' ? Math.PI : 0;
+    target.heading = this.defendingGoal(target.team) === 'cyan' ? Math.PI : 0;
 
     this.multipleDefenceCooldown[team] = 8;
     this.emit({
@@ -1100,7 +1185,7 @@ export class World {
     if (!robot || !robot.removed) return false;
     if (robot.penaltyRemaining > 0) return false;
 
-    const own = defendingGoal(robot.team);
+    const own = this.defendingGoal(robot.team);
     const sign = own === 'cyan' ? -1 : 1;
     const cornerX = sign * (HALF_LENGTH - PENALTY_DEPTH + robot.radius);
     const corners: Point[] = [
@@ -1180,7 +1265,8 @@ export class World {
     // An illegal kick-off occurs if the ball is carried/dribbled away from the centre (> 120 mm)
     // or across the halfway line without having rolled 50 mm clear.
     const ballDistFromCenter = Math.hypot(this.ball.x, this.ball.z);
-    const crossedHalf = this.kickingOffTeam === 'cyan' ? striker.x > 0 : striker.x < 0;
+    const crossedHalf =
+      this.attackingGoal(this.kickingOffTeam) === 'yellow' ? striker.x > 0 : striker.x < 0;
     const isCarrying = gap < 35 && (ballDistFromCenter > 120 || crossedHalf);
 
     if (isCarrying) {

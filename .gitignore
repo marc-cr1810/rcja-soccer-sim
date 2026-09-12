@@ -4,3 +4,4 @@ dist/
 __pycache__/
 .venv/
 dist-viewer/
+dist-referee/

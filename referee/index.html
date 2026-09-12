@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RCJA Soccer Simulation — Referee Console</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <div id="login" class="login">
+      <form id="login-form">
+        <h1>Referee console</h1>
+        <p>Enter the referee token printed when the server was started with <code>--referee</code>.</p>
+        <input id="token-input" type="password" autocomplete="off" placeholder="referee token" />
+        <button type="submit">Enter</button>
+      </form>
+    </div>
+
+    <div id="app" class="app" hidden>
+      <canvas id="field"></canvas>
+
+      <div id="board" class="board">
+        <div class="side cyan">
+          <span class="name" id="cyan-name">Cyan</span>
+          <span class="goals" id="cyan-score">0</span>
+        </div>
+        <div class="middle">
+          <span class="clock" id="clock">0:00</span>
+          <span class="half" id="half">1st half</span>
+        </div>
+        <div class="side yellow">
+          <span class="goals" id="yellow-score">0</span>
+          <span class="name" id="yellow-name">Yellow</span>
+        </div>
+      </div>
+
+      <div id="call" class="call" hidden></div>
+
+      <!-- Rule 5.7: robots off the field, with a Return button once ready. -->
+      <div id="standdown" class="standdown" hidden></div>
+
+      <aside id="panel" class="panel">
+        <section class="group">
+          <h2>Kick off</h2>
+          <div class="row">
+            <button data-action="kickoff" data-team="cyan">Cyan kicks off</button>
+            <button data-action="kickoff" data-team="yellow">Yellow kicks off</button>
+          </div>
+          <button data-action="award-kickoff">Award kick-off to other side</button>
+        </section>
+
+        <section class="group">
+          <h2>Play</h2>
+          <div class="row">
+            <button data-action="pause">Pause</button>
+            <button data-action="resume">Resume</button>
+          </div>
+          <div class="row">
+            <button data-action="end-half">End half</button>
+            <button data-action="end-match">End match</button>
+          </div>
+        </section>
+
+        <section class="group">
+          <h2>Remove a robot — rule 5.7</h2>
+          <select id="remove-robot"></select>
+          <input id="remove-rule" type="text" placeholder="rule, e.g. 5.7.1" />
+          <input id="remove-reason" type="text" placeholder="reason" />
+          <button data-action="remove-robot">Remove</button>
+        </section>
+
+        <section class="group">
+          <h2>Correct the score</h2>
+          <div class="row">
+            <select id="correct-team">
+              <option value="cyan">Cyan</option>
+              <option value="yellow">Yellow</option>
+            </select>
+            <input id="correct-to" type="number" min="0" step="1" placeholder="new score" />
+          </div>
+          <input id="correct-reason" type="text" placeholder="reason" />
+          <button data-action="correct-score">Correct score</button>
+        </section>
+
+        <section class="group danger">
+          <h2>Abandon</h2>
+          <input id="abandon-reason" type="text" placeholder="reason" />
+          <button data-action="abandon">Abandon match</button>
+        </section>
+
+        <div id="log" class="log"></div>
+      </aside>
+    </div>
+
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

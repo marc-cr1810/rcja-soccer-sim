@@ -424,7 +424,7 @@ describe('a robot program that goes away', () => {
     return new Promise((ok, fail) => {
       const socket = new WebSocket(`ws://127.0.0.1:${port}/agent`);
       socket.addEventListener('open', () => {
-        socket.send(JSON.stringify({ type: 'join', protocol: 1, team, robot, name: team, token }));
+        socket.send(JSON.stringify({ type: 'join', protocol: PROTOCOL_VERSION, team, robot, name: team, token }));
       });
       socket.addEventListener('message', (e) => {
         const message = JSON.parse(String(e.data)) as {
@@ -611,5 +611,208 @@ describe('the frame rate', () => {
     // to be bad.
     expect(VIEW_HZ).toBeLessThan(60);
     expect(VIEW_HZ).toBeGreaterThanOrEqual(24);
+  });
+});
+
+describe('referee actions', () => {
+  const servers: MatchServer[] = [];
+  const TOKEN = 'referee-secret';
+
+  afterEach(async () => {
+    for (const s of servers.splice(0)) await s.close();
+  });
+
+  async function start(refereeToken?: string): Promise<{ server: MatchServer; port: number }> {
+    const server = new MatchServer({ port: 0, realtime: false, refereeToken });
+    servers.push(server);
+    return { server, port: await server.listen() };
+  }
+
+  function post(port: number, action: string, token?: string, body?: unknown): Promise<Response> {
+    return fetch(`http://127.0.0.1:${port}/referee-api/${action}`, {
+      method: 'POST',
+      headers: token !== undefined ? { authorization: `Bearer ${token}` } : {},
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+  }
+
+  it('is entirely absent when no refereeToken is configured', async () => {
+    // The regression guard: bench, --agents and plain `serve` never set
+    // refereeToken, so this whole surface must not exist for them.
+    const { port } = await start(undefined);
+    const res = await post(port, 'pause', 'anything');
+    expect(res.status).toBe(404);
+  });
+
+  it('rejects an action with no token', async () => {
+    const { port } = await start(TOKEN);
+    const res = await post(port, 'pause');
+    expect(res.status).toBe(401);
+  });
+
+  it('rejects an action with the wrong token', async () => {
+    const { port } = await start(TOKEN);
+    const res = await post(port, 'pause', 'not-it');
+    expect(res.status).toBe(401);
+  });
+
+  it('refuses an action when no refereed match is in progress', async () => {
+    const { port } = await start(TOKEN);
+    const res = await post(port, 'pause', TOKEN);
+    expect(res.status).toBe(409);
+  });
+
+  it('refuses to even start a refereed match with no refereeToken configured', async () => {
+    const { server } = await start(undefined);
+    await expect(server.play({ agents: agents(), halfSeconds: 5, refereed: true })).rejects.toThrow(
+      /refereeToken/,
+    );
+  });
+
+  it('kicks off, pauses, resumes and abandons a refereed match end to end', async () => {
+    const { server, port } = await start(TOKEN);
+    const result = server.play({ agents: agents(), halfSeconds: 5, refereed: true, seed: 1 });
+
+    // Nothing happens until the referee says so.
+    await new Promise((ok) => setTimeout(ok, 30));
+    expect(server.currentMatch!.world.running).toBe(false);
+    expect(server.currentMatch!.world.clock).toBe(0);
+
+    expect((await post(port, 'kickoff', TOKEN, { team: 'cyan' })).status).toBe(200);
+    expect(server.currentMatch!.world.running).toBe(true);
+
+    expect((await post(port, 'pause', TOKEN)).status).toBe(200);
+    expect(server.currentMatch!.world.running).toBe(false);
+
+    expect((await post(port, 'resume', TOKEN)).status).toBe(200);
+    expect(server.currentMatch!.world.running).toBe(true);
+
+    expect((await post(port, 'abandon', TOKEN, { reason: 'testing' })).status).toBe(200);
+
+    const final = await result;
+    expect(final.abandoned).toBe(true);
+    expect(final.abandonReason).toBe('testing');
+    // Abandoning mid-first-half must not play a second half nobody asked for.
+    expect(final.clock).toBeLessThan(5);
+  });
+
+  it('lets the referee correct the score, with a reason recorded against the match', async () => {
+    const { server, port } = await start(TOKEN);
+    const result = server.play({ agents: agents(), halfSeconds: 5, refereed: true, seed: 1 });
+    await post(port, 'kickoff', TOKEN, { team: 'cyan' });
+
+    const corrected = await post(port, 'correct-score', TOKEN, {
+      team: 'cyan',
+      to: 3,
+      reason: 'scoreboard miscount',
+    });
+    expect(corrected.status).toBe(200);
+    expect(server.currentMatch!.world.score.cyan).toBe(3);
+
+    await post(port, 'abandon', TOKEN, { reason: 'done' });
+    const final = await result;
+    expect(final.scoreCorrections).toEqual([
+      { team: 'cyan', from: 0, to: 3, reason: 'scoreboard miscount', at: expect.any(Number) },
+    ]);
+  });
+
+  it('a robot manually removed still returns on its own once its penalty is served', async () => {
+    // autoDamaged defaults true even for a refereed match now - only the
+    // kick-off itself is gated on the referee, per the same default a
+    // self-running match uses.
+    const { server, port } = await start(TOKEN);
+    const result = server.play({ agents: agents(), halfSeconds: 5, refereed: true, seed: 1 });
+    await post(port, 'kickoff', TOKEN, { team: 'cyan' });
+
+    expect(
+      (await post(port, 'remove-robot', TOKEN, { robotId: 'cyan-1', rule: '5.7.1', reason: 'testing' })).status,
+    ).toBe(200);
+    const robot = server.currentMatch!.world.robots.find((r) => r.id === 'cyan-1')!;
+    expect(robot.removed).toBe(true);
+
+    // Serve the penalty out directly rather than waiting real seconds, and
+    // let the server's own loop step past it - no referee action needed.
+    robot.penaltyRemaining = 0;
+    await new Promise((ok) => setTimeout(ok, 30));
+    expect(robot.removed).toBe(false);
+
+    await post(port, 'abandon', TOKEN, { reason: 'done' });
+    await result;
+  });
+
+  it('a referee can still ask for the fully-manual mode, where nothing auto-returns', async () => {
+    const { server, port } = await start(TOKEN);
+    const result = server.play({
+      agents: agents(),
+      halfSeconds: 5,
+      refereed: true,
+      autoResolve: false,
+      autoDamaged: false,
+      seed: 1,
+    });
+    await post(port, 'kickoff', TOKEN, { team: 'cyan' });
+
+    expect(
+      (await post(port, 'remove-robot', TOKEN, { robotId: 'cyan-1', rule: '5.7.1', reason: 'testing' })).status,
+    ).toBe(200);
+    const robot = server.currentMatch!.world.robots.find((r) => r.id === 'cyan-1')!;
+    expect(robot.removed).toBe(true);
+
+    expect((await post(port, 'return-robot', TOKEN, { robotId: 'cyan-1' })).status).toBe(409);
+
+    robot.penaltyRemaining = 0;
+    await new Promise((ok) => setTimeout(ok, 30));
+    expect(robot.removed).toBe(true); // still off - nothing auto-returns it in this mode
+
+    expect((await post(port, 'return-robot', TOKEN, { robotId: 'cyan-1' })).status).toBe(200);
+    expect(robot.removed).toBe(false);
+
+    await post(port, 'abandon', TOKEN, { reason: 'done' });
+    await result;
+  });
+
+  it('end-half moves on to the second half rather than ending the match', async () => {
+    const { server, port } = await start(TOKEN);
+    const result = server.play({ agents: agents(), halfSeconds: 30, refereed: true, seed: 1 });
+    await post(port, 'kickoff', TOKEN, { team: 'cyan' });
+
+    expect((await post(port, 'end-half', TOKEN)).status).toBe(200);
+    await new Promise((ok) => setTimeout(ok, 30));
+    expect(server.currentMatch!.world.half).toBe(2);
+    expect(server.currentMatch!.world.running).toBe(false);
+
+    await post(port, 'abandon', TOKEN, { reason: 'done' });
+    const final = await result;
+    expect(final.abandoned).toBe(true);
+  });
+
+  it('end-match skips the second half entirely', async () => {
+    const { server, port } = await start(TOKEN);
+    const result = server.play({ agents: agents(), halfSeconds: 30, refereed: true, seed: 1 });
+    await post(port, 'kickoff', TOKEN, { team: 'cyan' });
+
+    expect((await post(port, 'end-match', TOKEN)).status).toBe(200);
+    const final = await result;
+    expect(final.abandoned).toBe(false);
+    // Never reached, let alone played, a second half.
+    expect(final.clock).toBeLessThan(30);
+  });
+
+  it('a robot removed in the first half stays off across end-half into the second', async () => {
+    const { server, port } = await start(TOKEN);
+    const result = server.play({ agents: agents(), halfSeconds: 30, refereed: true, seed: 1 });
+    await post(port, 'kickoff', TOKEN, { team: 'cyan' });
+    await post(port, 'remove-robot', TOKEN, { robotId: 'cyan-1', rule: '5.7.1', reason: 'testing' });
+
+    await post(port, 'end-half', TOKEN);
+    await new Promise((ok) => setTimeout(ok, 30));
+    expect(server.currentMatch!.world.half).toBe(2);
+
+    await post(port, 'kickoff', TOKEN, { team: 'yellow' });
+    const robot = server.currentMatch!.world.robots.find((r) => r.id === 'cyan-1')!;
+    expect(robot.removed).toBe(true);
+
+    await post(port, 'abandon', TOKEN, { reason: 'done' });
+    await result;
   });
 });

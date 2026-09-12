@@ -69,13 +69,19 @@ args = parser.parse_args()
 
 robot = Robot(team=args.team, number=args.number, name=args.name, token=args.token)
 
+#: Identity only - radio, name. NOT which goal to shoot at: rule 1.4/5.4 swaps
+#: ends at half-time, so UPFIELD/ATTACK_X/DEFEND_X/FORWARD below are recomputed
+#: from `s.attack_direction` at the top of every tick instead of fixed here.
 TEAM = args.team
-UPFIELD = attack_heading(TEAM)
-ATTACK_X = attack_x(TEAM)
-DEFEND_X = defend_x(TEAM)
-#: +1 if this team attacks towards +x, -1 otherwise. Turns every "is it far
-#: enough up the field" question into one comparison.
-FORWARD = 1.0 if ATTACK_X > 0 else -1.0
+UPFIELD = 0.0
+ATTACK_X = 0.0
+DEFEND_X = 0.0
+#: +1 if this team is currently attacking towards +x, -1 otherwise. Turns
+#: every "is it far enough up the field" question into one comparison.
+FORWARD = 1.0
+#: The camera's names for the goal we're shooting at and the one we defend.
+OUR_GOAL = "cyan"
+THEIR_GOAL = "yellow"
 
 #: Inside the posts by enough that the ball fits and a keeper on the line has
 #: to actually move. The posts are at 225 mm.
@@ -88,6 +94,14 @@ ball = BallTracker()
 
 @robot.tick
 def think(s, me):
+    global UPFIELD, ATTACK_X, DEFEND_X, FORWARD, OUR_GOAL, THEIR_GOAL
+    UPFIELD = attack_heading(s.attack_direction)
+    ATTACK_X = attack_x(s.attack_direction)
+    DEFEND_X = defend_x(s.attack_direction)
+    FORWARD = 1.0 if ATTACK_X > 0 else -1.0
+    OUR_GOAL = our_goal(s.attack_direction)
+    THEIR_GOAL = their_goal(s.attack_direction)
+
     if not s.playing:
         return robot.coast()
 
@@ -187,7 +201,7 @@ def think(s, me):
 
     # Stay out of our own box while the keeper is working it (rule 5.11).
     keeper_active = teammate_is_keeping(s)
-    if keeper_active and in_penalty_box(bx, bz, our_goal(TEAM), slack=60.0) and not holding:
+    if keeper_active and in_penalty_box(bx, bz, OUR_GOAL, slack=60.0) and not holding:
         return cover(s, me, me_x, me_z, bz, heading, spin)
 
     # -- curve round behind it, then drive through it ----------------------
@@ -254,7 +268,7 @@ def think(s, me):
     # robot has just made a save against itself.
     blocker = obstacle_range(s, heading, me_x, me_z)
     lane_clear = blocker is None or blocker > 430.0
-    reach = shot_range(bx, bz, heading, their_goal(TEAM))
+    reach = shot_range(bx, bz, heading, THEIR_GOAL)
     close_enough = reach is not None and reach < (1100.0 if blocker is None else 800.0)
     shot_on = reach is not None and lane_clear and close_enough
     kick = holding and shot_on
@@ -302,7 +316,7 @@ def leave_room_for_the_keeper(travel: float, me_x: float, me_z: float) -> float:
     been there. The detector tests the central corridor, so the corners of the
     box are not the problem; standing on the keeper's toes is.
     """
-    if not in_penalty_box(me_x, me_z, our_goal(TEAM), slack=30.0) or abs(me_z) > 290.0:
+    if not in_penalty_box(me_x, me_z, OUR_GOAL, slack=30.0) or abs(me_z) > 290.0:
         return travel
     # Up the field is always out of our own box, and it is where the striker
     # wants to be anyway.

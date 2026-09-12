@@ -234,6 +234,7 @@ function syntheticFrame(robotNumber: number) {
     wheelSpeeds: [0, 0, 0, 0],
     held: false,
     messages: [],
+    attackDirection: 1,
     dt: 0.02,
   });
 }

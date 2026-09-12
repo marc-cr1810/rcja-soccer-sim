@@ -12,6 +12,8 @@
     "serve": "tsx src/cli.ts",
     "build:viewer": "vite build",
     "dev:viewer": "vite",
+    "build:referee": "vite build --config vite.referee.config.ts",
+    "dev:referee": "vite --config vite.referee.config.ts",
     "bench": "tsx src/cli.ts bench"
   },
   "devDependencies": {

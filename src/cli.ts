@@ -15,6 +15,7 @@ import { ReferenceAgent } from './reference';
 import { botRoster } from './bots';
 import { resolveLineup, spawnLineup, type SpawnedLineup } from './lineup';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { resolve } from 'node:path';
 import { DEFAULT_OPTIONS, formatBench, runBench, type BenchResult } from './bench';
 
@@ -88,6 +89,11 @@ function viewerRoot(): string | undefined {
   return existsSync(built) ? built : undefined;
 }
 
+function refereeRoot(): string | undefined {
+  const built = resolve('dist-referee');
+  return existsSync(built) ? built : undefined;
+}
+
 function pythonLibDir(): string | undefined {
   const dir = resolve('python');
   return existsSync(dir) ? dir : undefined;
@@ -96,9 +102,17 @@ function pythonLibDir(): string | undefined {
 async function serve(flags: Map<string, string>): Promise<void> {
   const root = viewerRoot();
   const idealSensors = flags.get('noisy-sensors') !== 'true';
+  const refereed = flags.get('referee') === 'true';
+  const refRoot = refereeRoot();
+  // Hand-issued, like Phase 1's push token: minted once, printed once, never
+  // stored anywhere the spectator bundle could read it. --referee-token lets
+  // an organiser fix it in advance, for scripting a venue's setup.
+  const refereeToken = refereed ? (flags.get('referee-token') ?? randomBytes(24).toString('base64url')) : undefined;
   const server = new MatchServer({
     port: num(flags, 'port', 8080),
     viewerRoot: root,
+    refereeRoot: refRoot,
+    refereeToken,
     realtime: flags.get('fast') !== 'true',
     viewHz: num(flags, 'view-hz', 60),
     idealSensors,
@@ -111,6 +125,12 @@ async function serve(flags: Map<string, string>): Promise<void> {
   console.log(`  watch at  http://localhost:${port}`);
   if (!root) {
     console.log(`  (no viewer built yet — run: npm run build:viewer)`);
+  }
+  if (refereed) {
+    console.log(`  referee console:  http://localhost:${port}/referee`);
+    console.log(`  referee token:    ${refereeToken}`);
+    console.log(`  (hand this to the referee — it is not shown again)`);
+    if (!refRoot) console.log(`  (no referee console built yet — run: npm run build:referee)`);
   }
   console.log(`  ctrl-c to stop\n`);
 
@@ -169,7 +189,11 @@ async function serve(flags: Map<string, string>): Promise<void> {
       // Whoever connected gets to say who they are; the scoreboard is theirs.
       Object.assign(teams, server.agents.teamNames());
     }
-    console.log(`  kick-off: ${teams.cyan} v ${teams.yellow}  (seed ${seed})`);
+    console.log(
+      refereed
+        ? `  ready: ${teams.cyan} v ${teams.yellow}  (seed ${seed}) — waiting for the referee to kick off`
+        : `  kick-off: ${teams.cyan} v ${teams.yellow}  (seed ${seed})`,
+    );
     const dropouts: string[] = [];
     const result = await server.play({
       agents: agentsFor(flags.get('opponent')),
@@ -178,6 +202,7 @@ async function serve(flags: Map<string, string>): Promise<void> {
       halfSeconds,
       seed,
       idealSensors,
+      refereed,
     });
     console.log(
       `  full time: ${teams.cyan} ${result.score.cyan} — ${result.score.yellow} ${teams.yellow}` +
@@ -343,7 +368,7 @@ function usage(): void {
   console.log(`
   rcja-soccer-sim
 
-    serve     run the match server and keep playing matches   [--port --half --home --away --seed --opponent --agents --fast]
+    serve     run the match server and keep playing matches   [--port --half --home --away --seed --opponent --agents --fast --referee]
     match     play one match headless and print the result    [--half --home --away --seed --opponent]
     ladder    play every bot against every other              [--half --rounds --seed]
     bench     measure your robot program and say what is wrong
@@ -353,6 +378,13 @@ function usage(): void {
 
   --agents waits for four robot programs to connect on /agent before kicking
   off, instead of playing the built-in reference team. See python/README.md.
+
+  --referee waits for a human at /referee to kick off each half, rather than
+  starting on its own; a match plays itself the rest of the way exactly as
+  without the flag, but that human can pause/resume, abandon, award a
+  kick-off, remove/return a robot or correct the score at any time. Prints a
+  one-time token; --referee-token sets it yourself instead of a random one.
+  Needs npm run build:referee. See docs/running-a-server.md.
 
   bench flags:
     --spawn CMD     start your robots with CMD; {url} becomes the address

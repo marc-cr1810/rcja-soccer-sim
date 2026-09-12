@@ -51,6 +51,8 @@ export interface SenseInput {
   held: boolean;
   /** Messages already filtered for age and sender by the radio link. */
   messages: TeamMessage[];
+  /** Rule 1.4/5.4: which goal this robot currently attacks. See protocol.ts. */
+  attackDirection: 1 | -1;
   dt: number;
 }
 
@@ -98,7 +100,7 @@ export class Senses {
   }
 
   read(input: SenseInput): SensorFrame {
-    const { view, self, wheelSpeeds, held, messages, dt } = input;
+    const { view, self, wheelSpeeds, held, messages, attackDirection, dt } = input;
     const ideal = this.idealSensors;
 
     this.compass.step(dt, this.compassNoise, ideal);
@@ -114,6 +116,7 @@ export class Senses {
       clock: view.clock,
       robot: self.number,
       team: self.team,
+      attackDirection,
       playing: view.playing,
       kickoff: {
         pending: view.kickoff.pending,

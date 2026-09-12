@@ -117,7 +117,7 @@ for the rest of the event.
 
 ```
 serve     run the match server and keep playing matches
-          [--port --half --home --away --seed --opponent --agents --fast]
+          [--port --half --home --away --seed --opponent --agents --fast --referee]
 match     play one match headless and print the result
           [--half --home --away --seed --opponent]
 ladder    play every built-in bot against every other  [--half --rounds --seed]
@@ -139,3 +139,55 @@ Open the port `serve` printed. A viewer connects over WebSocket and gets a
 frame ~30 times a second — positions and the score, nothing a program's
 sensors or commands would reveal, since anyone on the venue network can open
 one. Four cameras along the bottom of the screen, or press **C**.
+
+(There's also a camera *mode* called `referee` — the overhead angle, for
+settling arguments about where a robot was. Don't confuse it with the
+referee console below; the camera mode is available to any spectator, and
+controlling a match is not.)
+
+## Refereeing a match
+
+```bash
+npm run build:referee
+npm run serve -- --referee --half 300
+```
+
+`--referee` doesn't change how a match plays itself — a goal still kicks
+straight back off, a robot that trips 5.7 is still taken off and returned on
+its own the moment its penalty clock reaches zero, exactly as without the
+flag. What it adds is a human at the two moments the simulator can't decide
+for itself: nothing plays at all until the referee clicks kick-off for the
+first half, and the second half waits the same way. From there a match runs
+itself end to end unless the referee steps in — pause and resume at will,
+award a kick-off to the other side, remove or return a robot by hand,
+correct the score with a reason, or abandon the match outright.
+
+The server prints a console URL and a token once, the moment `--referee` is
+given:
+
+```
+referee console:  http://localhost:8080/referee
+referee token:    <a long random string>
+(hand this to the referee — it is not shown again)
+```
+
+This is a **separate page from the spectator viewer** — a different build
+(`npm run build:referee`, landing in `dist-referee/` next to `dist-viewer/`),
+served at `/referee` rather than `/`, and sharing no code with it. Opening
+`/` needs nothing at all, the same as always; opening `/referee` shows a
+login prompt for the token, and every action from there — kick off, pause,
+resume, end half, end match, abandon, award a kick-off to the other side,
+remove or return a robot, correct the score — is one authenticated
+`POST /referee-api/<action>` call. Anyone watching the spectator stream
+never sees this page, this token, or these calls; the two bundles are built
+and served independently on purpose, per the trust boundary this league is
+built around — watching is free, refereeing needs the token.
+
+Like a Phase 1 push token, this is hand-issued, not an account: it's minted
+fresh (or fixed with `--referee-token <value>`, for scripting a venue's
+setup ahead of time) each time the server starts with `--referee`, and there
+is nothing to register or sign into.
+
+`--referee` and `--agents`/`--home`/`--away` are independent and combine
+freely — four laptops or a pushed submission can play while a human still
+explicitly kicks each half off, exactly as a real match would.

@@ -23,6 +23,8 @@
   "include": [
     "src",
     "viewer",
-    "vite.config.ts"
+    "referee",
+    "vite.config.ts",
+    "vite.referee.config.ts"
   ]
 }

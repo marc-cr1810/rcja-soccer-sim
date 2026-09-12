@@ -288,7 +288,11 @@ export function escapeLine(frame: SensorFrame): number | null {
 }
 
 export interface ReferenceOptions {
-  /** 'cyan' attacks +x; 'yellow' attacks -x. */
+  /**
+   * Identity only - radio, name, scoreboard. NOT which goal to shoot at: ends
+   * swap at half-time (rule 1.4/5.4), so attack direction is read fresh from
+   * `frame.attackDirection` every tick instead.
+   */
   team: 'cyan' | 'yellow';
   number: 1 | 2;
   role?: Role;
@@ -309,8 +313,10 @@ export class ReferenceAgent implements Agent {
   private lastClock = 0;
   private thinkCredit = 0;
   private lastCommand: ActuatorFrame = { motors: [0, 0, 0, 0] };
+  /** Refreshed every tick from the frame; see `attackX`. */
+  private attackDirection: 1 | -1 = 1;
 
-  constructor(private readonly opts: ReferenceOptions) {
+  constructor(opts: ReferenceOptions) {
     this.drive = opts.drive ?? openDrive();
     this.role = opts.role ?? (opts.number === 2 ? 'goalie' : 'striker');
     this.skill = opts.skill ?? 1;
@@ -340,7 +346,7 @@ export class ReferenceAgent implements Agent {
 
   /** Which way is the opponent's goal, in field radians. */
   private get attackX(): number {
-    return this.opts.team === 'cyan' ? HALF_LENGTH : -HALF_LENGTH;
+    return this.attackDirection > 0 ? HALF_LENGTH : -HALF_LENGTH;
   }
 
   private get defendX(): number {
@@ -348,6 +354,7 @@ export class ReferenceAgent implements Agent {
   }
 
   tick(frame: SensorFrame): ActuatorFrame {
+    this.attackDirection = frame.attackDirection;
     const dt = Math.max(1e-3, frame.clock - this.lastClock);
     this.lastClock = frame.clock;
     this.ball.update(frame, dt);
@@ -534,7 +541,7 @@ export class ReferenceAgent implements Agent {
     // robot does not arrive at the ball still travelling sideways.
     const speed = (aligned ? 1 : clamp(1.15 - Math.abs(swing) * 0.35, 0.6, 1)) * this.skill;
 
-    const goal = frame.camera.goals[this.opts.team === 'cyan' ? 'yellow' : 'cyan'];
+    const goal = frame.camera.goals[this.attackDirection > 0 ? 'yellow' : 'cyan'];
     const lined = goal !== null && Math.abs(goal.bearing) < 0.2;
 
     return {

@@ -59,29 +59,34 @@ WHEEL_RADIUS = 25.0
 MOUNT_RADIUS = 90.0
 
 
-def attack_x(team: str) -> float:
-    """The x of the goal line this team is shooting at."""
-    return HALF_LENGTH if team == "cyan" else -HALF_LENGTH
+def attack_x(direction: float) -> float:
+    """The x of the goal line this attack direction is shooting at.
+
+    Takes ``s.attack_direction`` (+1 or -1), not a team colour: rule 1.4/5.4
+    swaps ends at half-time, so which goal a team shoots at is not fixed for
+    the whole match the way its colour is.
+    """
+    return HALF_LENGTH if direction > 0 else -HALF_LENGTH
 
 
-def defend_x(team: str) -> float:
-    """The x of the goal line this team is defending."""
-    return -attack_x(team)
+def defend_x(direction: float) -> float:
+    """The x of the goal line this attack direction is defending."""
+    return -attack_x(direction)
 
 
-def attack_heading(team: str) -> float:
+def attack_heading(direction: float) -> float:
     """Field heading pointing up the field, towards the opponent's goal."""
-    return 0.0 if team == "cyan" else math.pi
+    return 0.0 if direction > 0 else math.pi
 
 
-def their_goal(team: str) -> str:
-    """The camera's name for the goal this team is shooting at."""
-    return "yellow" if team == "cyan" else "cyan"
+def their_goal(direction: float) -> str:
+    """The camera's name for the goal this attack direction is shooting at."""
+    return "yellow" if direction > 0 else "cyan"
 
 
-def our_goal(team: str) -> str:
-    """The camera's name for the goal this team is defending."""
-    return "cyan" if team == "cyan" else "yellow"
+def our_goal(direction: float) -> str:
+    """The camera's name for the goal this attack direction is defending."""
+    return "cyan" if direction > 0 else "yellow"
 
 
 def goal_centre(side: str) -> tuple[float, float]:
@@ -118,7 +123,7 @@ def shot_range(bx: float, bz: float, heading: float, side: str) -> float | None:
     """
     dx = math.cos(heading)
     dz = math.sin(heading)
-    goal_x = attack_x("cyan" if side == "yellow" else "yellow")
+    goal_x, _ = goal_centre(side)
 
     if dx * goal_x <= 0:
         return None  # pointed away from that goal entirely

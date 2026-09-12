@@ -49,6 +49,7 @@ const frame = (): SensorFrame =>
     wheelSpeeds: [0, 0, 0, 0],
     held: false,
     messages: [],
+    attackDirection: 1,
     dt: 0.02,
   });
 
@@ -195,6 +196,7 @@ describe('perception hands over only what a sensor knows', () => {
     const f = frame();
     expect(Object.keys(f).sort()).toEqual(
       [
+        'attackDirection',
         'ball',
         'ballGate',
         'camera',
@@ -222,6 +224,7 @@ describe('perception hands over only what a sensor knows', () => {
       wheelSpeeds: [0, 0, 0, 0],
       held: false,
       messages: [],
+      attackDirection: 1,
       dt: 0.02,
     });
     const json = JSON.stringify(f);
@@ -244,6 +247,7 @@ describe('perception hands over only what a sensor knows', () => {
       wheelSpeeds: [0, 0, 0, 0],
       held: false,
       messages: [],
+      attackDirection: 1,
       dt: 0.02,
     });
     expect(f.ball).toBeNull();
@@ -257,6 +261,7 @@ describe('perception hands over only what a sensor knows', () => {
       wheelSpeeds: [0, 0, 0, 0],
       held: false,
       messages: [],
+      attackDirection: 1,
       dt: 0.02,
     });
     const two = new Senses(8, MOTORS).read({
@@ -265,6 +270,7 @@ describe('perception hands over only what a sensor knows', () => {
       wheelSpeeds: [0, 0, 0, 0],
       held: false,
       messages: [],
+      attackDirection: 1,
       dt: 0.02,
     });
     expect(one.compass.heading).not.toBe(two.compass.heading);
@@ -282,6 +288,7 @@ describe('perception hands over only what a sensor knows', () => {
             wheelSpeeds: [100, 100, 100, 100],
             held: false,
             messages: [],
+            attackDirection: 1,
             dt: 0.02,
           }),
         );

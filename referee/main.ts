@@ -1,0 +1,322 @@
+/// <reference types="vite/client" />
+/**
+ * The referee console.
+ *
+ * A second, separate client from the spectator viewer — its own HTML entry,
+ * its own Vite build (`vite.referee.config.ts`, output to `dist-referee/`),
+ * and no import of anything under `viewer/`. PHASES.md is explicit that this
+ * has to be a genuinely different surface, authenticated and never reachable
+ * from the untrusted spectator bundle, not the same page with buttons added.
+ *
+ * It watches the match exactly the way any spectator does — the same
+ * unauthenticated WebSocket, the same `hello`/`frame` messages — because
+ * *receiving* a frame is not a privilege boundary; only *acting* on one is.
+ * Every control here calls `POST /referee-api/<action>` with a bearer token
+ * the referee types in once, matching Phase 1's hand-issued credential: there
+ * is no account, and the token is never embedded in this bundle.
+ */
+
+import { FieldRenderer } from '../src/renderer';
+import type { League } from '../src/leagues';
+import type { ViewFrame, ViewMessage } from '../src/view';
+
+const TOKEN_KEY = 'rcja-referee-token';
+
+const login = document.getElementById('login') as HTMLDivElement;
+const loginForm = document.getElementById('login-form') as HTMLFormElement;
+const tokenInput = document.getElementById('token-input') as HTMLInputElement;
+const app = document.getElementById('app') as HTMLDivElement;
+
+const canvas = document.getElementById('field') as HTMLCanvasElement;
+const call = document.getElementById('call')!;
+const standdown = document.getElementById('standdown')!;
+const log = document.getElementById('log')!;
+
+const board = {
+  cyanName: document.getElementById('cyan-name')!,
+  yellowName: document.getElementById('yellow-name')!,
+  cyanScore: document.getElementById('cyan-score')!,
+  yellowScore: document.getElementById('yellow-score')!,
+  clock: document.getElementById('clock')!,
+  half: document.getElementById('half')!,
+};
+
+const abandonReason = document.getElementById('abandon-reason') as HTMLInputElement;
+const correctTeam = document.getElementById('correct-team') as HTMLSelectElement;
+const correctTo = document.getElementById('correct-to') as HTMLInputElement;
+const correctReason = document.getElementById('correct-reason') as HTMLInputElement;
+const removeRobotSelect = document.getElementById('remove-robot') as HTMLSelectElement;
+const removeRule = document.getElementById('remove-rule') as HTMLInputElement;
+const removeReason = document.getElementById('remove-reason') as HTMLInputElement;
+
+let token: string | null = sessionStorage.getItem(TOKEN_KEY);
+let renderer: FieldRenderer | null = null;
+let league: League | null = null;
+let halfSeconds = 300;
+
+/** Same interpolation as the spectator viewer. Kept as a small, separate copy — see the header note. */
+let previous: ViewFrame | null = null;
+let latest: ViewFrame | null = null;
+let previousAt = 0;
+let latestAt = 0;
+
+function lerp(a: number, b: number, t: number): number {
+  return a + (b - a) * t;
+}
+
+function lerpAngle(a: number, b: number, t: number): number {
+  let d = b - a;
+  while (d > Math.PI) d -= 2 * Math.PI;
+  while (d < -Math.PI) d += 2 * Math.PI;
+  return a + d * t;
+}
+
+function blend(from: ViewFrame, to: ViewFrame, t: number): ViewFrame {
+  const byId = new Map(from.robots.map((r) => [r.id, r]));
+  return {
+    ...to,
+    ball: {
+      ...to.ball,
+      x: lerp(from.ball.x, to.ball.x, t),
+      z: lerp(from.ball.z, to.ball.z, t),
+      y: to.ball.y === undefined ? undefined : lerp(from.ball.y ?? 0, to.ball.y, t),
+    },
+    robots: to.robots.map((r) => {
+      const was = byId.get(r.id);
+      if (!was) return r;
+      return { ...r, x: lerp(was.x, r.x, t), z: lerp(was.z, r.z, t), heading: lerpAngle(was.heading, r.heading, t) };
+    }),
+  };
+}
+
+function formatClock(seconds: number, half: number): string {
+  const into = Math.max(0, seconds - (half - 1) * halfSeconds);
+  const m = Math.floor(into / 60);
+  const s = Math.floor(into % 60);
+  return `${m}:${String(s).padStart(2, '0')}`;
+}
+
+function logLine(text: string): void {
+  const line = document.createElement('div');
+  line.textContent = `${new Date().toLocaleTimeString()} — ${text}`;
+  log.prepend(line);
+  while (log.childNodes.length > 20) log.lastChild?.remove();
+}
+
+/** Call a referee action. The token is never sent anywhere except this server's own /referee-api. */
+async function act(action: string, body?: unknown): Promise<boolean> {
+  if (!token) return false;
+  try {
+    const res = await fetch(`/referee-api/${action}`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+    if (res.ok) {
+      logLine(action);
+      return true;
+    }
+    const err = (await res.json().catch(() => ({}))) as { reason?: string };
+    logLine(`${action} refused: ${err.reason ?? res.status}`);
+    return false;
+  } catch (err) {
+    logLine(`${action} failed: ${(err as Error).message}`);
+    return false;
+  }
+}
+
+function updateBoard(frame: ViewFrame): void {
+  board.cyanName.textContent = frame.teams.cyan;
+  board.yellowName.textContent = frame.teams.yellow;
+  board.cyanScore.textContent = String(frame.score.cyan);
+  board.yellowScore.textContent = String(frame.score.yellow);
+  board.clock.textContent = formatClock(frame.clock, frame.half);
+  board.half.textContent = frame.running
+    ? frame.half === 1
+      ? '1st half'
+      : '2nd half'
+    : frame.clock === 0
+      ? 'pre-match'
+      : 'stopped';
+
+  const last = frame.events[frame.events.length - 1];
+  if (last) {
+    call.hidden = false;
+    call.textContent = `Rule ${last.rule} — ${last.message}`;
+  } else {
+    call.hidden = true;
+  }
+
+  // The "remove a robot" list tracks who is actually on the field, rebuilt
+  // only when it has actually changed rather than every frame.
+  const onField = frame.robots.filter((r) => !r.removed);
+  const ids = onField.map((r) => r.id).join(',');
+  if (removeRobotSelect.dataset['ids'] !== ids) {
+    removeRobotSelect.dataset['ids'] = ids;
+    removeRobotSelect.replaceChildren(
+      ...onField.map((r) => {
+        const opt = document.createElement('option');
+        opt.value = r.id;
+        opt.textContent = r.id;
+        return opt;
+      }),
+    );
+  }
+}
+
+/** Rule 5.7: off the field, with a Return button that only works once the referee agrees it is ready (5.7.4). */
+function updateStandDown(frame: ViewFrame): void {
+  const out = frame.robots.filter((r) => r.removed);
+  if (out.length === 0) {
+    standdown.hidden = true;
+    standdown.replaceChildren();
+    return;
+  }
+
+  standdown.hidden = false;
+  const cards = out.map((robot) => {
+    const seconds = robot.penaltyRemaining;
+    const known = Number.isFinite(seconds);
+    const left = known ? Math.ceil(seconds) : 0;
+    const ready = known && left <= 0;
+
+    const card = document.createElement('div');
+    card.className = `sd-card ${robot.team}`;
+
+    const who = document.createElement('span');
+    who.className = 'who';
+    const [teamName = '', number = ''] = robot.id.split('-');
+    who.textContent = `${teamName.charAt(0).toUpperCase()}${teamName.slice(1)} ${number}`;
+
+    const rule = document.createElement('span');
+    rule.className = 'rule';
+    rule.textContent = `§${robot.removalRule ?? '5.7'}`;
+    if (robot.removalReason) card.title = robot.removalReason;
+
+    const timer = document.createElement('span');
+    timer.className = ready ? 'timer ready' : 'timer';
+    timer.textContent = !known ? '—' : ready ? 'Ready' : `${left}s`;
+
+    const returnButton = document.createElement('button');
+    returnButton.type = 'button';
+    returnButton.textContent = 'Return';
+    returnButton.disabled = !ready;
+    returnButton.addEventListener('click', () => void act('return-robot', { robotId: robot.id }));
+
+    card.append(who, rule, timer, returnButton);
+    return card;
+  });
+  standdown.replaceChildren(...cards);
+}
+
+function draw(): void {
+  requestAnimationFrame(draw);
+  if (!renderer || !latest) return;
+
+  let frame = latest;
+  if (previous && latestAt > previousAt) {
+    const span = latestAt - previousAt;
+    const t = Math.min(1, (performance.now() - latestAt) / span);
+    frame = blend(previous, latest, t);
+  }
+  renderer.render(frame, 1 / 60);
+  updateBoard(latest);
+  updateStandDown(latest);
+}
+
+function receive(message: ViewMessage): void {
+  if (message.type === 'hello') {
+    league = message.league;
+    halfSeconds = message.halfSeconds;
+    if (!renderer) {
+      renderer = new FieldRenderer(canvas, league);
+      // Overhead, not broadcast: this view exists to settle exactly where a
+      // robot was, which a broadcast angle hides and an overhead one does not.
+      renderer.cameraMode = 'referee';
+      renderer.resize();
+      new ResizeObserver(() => renderer?.resize()).observe(canvas);
+    } else {
+      renderer.setLeague(league);
+    }
+    return;
+  }
+  previous = latest;
+  previousAt = latestAt;
+  latest = message.frame;
+  latestAt = performance.now();
+}
+
+function connect(): void {
+  const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`;
+  const socket = new WebSocket(url);
+  socket.addEventListener('message', (event) => {
+    receive(JSON.parse(String(event.data)) as ViewMessage);
+  });
+  socket.addEventListener('close', () => setTimeout(connect, 1000));
+  socket.addEventListener('error', () => socket.close());
+}
+
+function numberInputValue(input: HTMLInputElement): number {
+  return Number(input.value);
+}
+
+document.querySelectorAll<HTMLButtonElement>('button[data-action]').forEach((button) => {
+  button.addEventListener('click', () => {
+    const action = button.dataset['action']!;
+    switch (action) {
+      case 'kickoff':
+        void act('kickoff', { team: button.dataset['team'] });
+        break;
+      case 'abandon': {
+        const reason = abandonReason.value.trim();
+        if (!reason) {
+          logLine('abandon needs a reason');
+          return;
+        }
+        void act('abandon', { reason });
+        break;
+      }
+      case 'correct-score': {
+        const to = numberInputValue(correctTo);
+        const reason = correctReason.value.trim();
+        if (!Number.isInteger(to) || to < 0 || !reason) {
+          logLine('a score correction needs a whole number and a reason');
+          return;
+        }
+        void act('correct-score', { team: correctTeam.value, to, reason });
+        break;
+      }
+      case 'remove-robot': {
+        const robotId = removeRobotSelect.value;
+        const rule = removeRule.value.trim();
+        const reason = removeReason.value.trim();
+        if (!robotId || !rule || !reason) {
+          logLine('removing a robot needs a rule and a reason');
+          return;
+        }
+        void act('remove-robot', { robotId, rule, reason });
+        break;
+      }
+      default:
+        void act(action);
+    }
+  });
+});
+
+function enterConsole(): void {
+  login.hidden = true;
+  app.hidden = false;
+  connect();
+  draw();
+}
+
+loginForm.addEventListener('submit', (event) => {
+  event.preventDefault();
+  const value = tokenInput.value.trim();
+  if (!value) return;
+  token = value;
+  sessionStorage.setItem(TOKEN_KEY, value);
+  enterConsole();
+});
+
+if (token) enterConsole();

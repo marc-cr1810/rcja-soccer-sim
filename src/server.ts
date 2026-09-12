@@ -39,6 +39,17 @@ export interface ServerOptions {
   pythonLibDir?: string;
   /** Where validated pushes are kept, as <team>/<robot>. Defaults to ./submissions. */
   submissionsDir?: string;
+  /** Built referee console to serve, on its own path. Nothing is served without one. */
+  refereeRoot?: string;
+  /**
+   * Hand-issued credential for the referee console, same style as a Phase 1
+   * push token: minted once, handed out of band, checked on every referee
+   * request. Absent — the default — means referee mode does not exist on
+   * this server at all: `/referee-api/*` always answers 404 and `play()`
+   * refuses a `refereed` match, so nothing about today's `bench`, `--agents`
+   * or plain `serve` behaviour changes unless this is set.
+   */
+  refereeToken?: string;
 }
 
 const MAX_SUBMIT_BYTES = 2 * 1024 * 1024;
@@ -76,12 +87,16 @@ export class MatchServer {
   private agentScratchDir: string | null = null;
   private current: Match | null = null;
   private readonly viewerRoot: string | null;
+  private readonly refereeRoot: string | null;
+  private readonly refereeToken: string | null;
   private readonly realtime: boolean;
   private readonly pythonLibDir: string | null;
   private readonly submissionsDir: string;
 
   constructor(private readonly opts: ServerOptions = {}) {
     this.viewerRoot = opts.viewerRoot ? resolve(opts.viewerRoot) : null;
+    this.refereeRoot = opts.refereeRoot ? resolve(opts.refereeRoot) : null;
+    this.refereeToken = opts.refereeToken ?? null;
     this.realtime = opts.realtime ?? true;
     this.pythonLibDir = opts.pythonLibDir ? resolve(opts.pythonLibDir) : null;
     this.submissionsDir = resolve(opts.submissionsDir ?? 'submissions');
@@ -224,6 +239,11 @@ export class MatchServer {
    * cheap — a 100 Hz setInterval is not something to rely on.
    */
   async play(options: MatchOptions): Promise<MatchResult> {
+    if (options.refereed && !this.refereeToken) {
+      throw new Error(
+        'a refereed match needs a refereeToken configured on the server — otherwise nothing could ever kick it off',
+      );
+    }
     const match = new Match({
       idealSensors: this.opts.idealSensors ?? true,
       ...options,
@@ -239,6 +259,12 @@ export class MatchServer {
       teams: match.teams,
       halfSeconds: match.halfLength,
     });
+
+    if (match.refereed) {
+      const result = await this.playRefereed(match);
+      this.broadcast({ type: 'frame', frame: match.snapshot() });
+      return result;
+    }
 
     // Programs over a socket need the event loop, and `match.run()` never
     // gives it up. See playFast.
@@ -322,21 +348,106 @@ export class MatchServer {
     return match.result();
   }
 
-  /** Serve the built viewer, or a push to /submit, if there is one. */
+  /**
+   * Play a match one half at a time, doing nothing until a referee says to.
+   *
+   * Every other loop in this file decides for itself when to kick off and
+   * when a half ends. This one decides nothing: it waits for
+   * `match.world.running` to go true (set by the referee's `kickoff` call,
+   * via `Match.kickOff`'s wrapper) before it steps any physics at all, and it
+   * stops stepping the moment `running` goes false again — a pause, or a
+   * goal `autoResolve: false` left stopped for the referee to act on — rather
+   * than treating that as the half being over. Only three things end the
+   * half's loop: its own time budget, `match.endHalf()`/`endMatch()`/
+   * `abandon()` (all surfaced through `consumeHalfEndRequest()`), or the
+   * match already being ended. `match.isEnded` breaks out of both halves
+   * entirely, so `endMatch()`/`abandon()` mid-first-half never plays a
+   * second half nobody asked for.
+   */
+  private async playRefereed(match: Match): Promise<MatchResult> {
+    const dt = 1 / PHYSICS_HZ;
+    const viewHz = Math.max(10, Math.min(100, this.opts.viewHz ?? VIEW_HZ));
+    const framePeriod = 1000 / viewHz;
+    const perControl = Math.max(1, Math.round(PHYSICS_HZ / CONTROL_HZ));
+
+    for (const half of [1, 2] as const) {
+      if (match.isEnded) break;
+      match.world.half = half;
+      match.resetAgents();
+
+      const until = match.world.clock + match.halfLength;
+      let owed = 0;
+      let last = Date.now();
+
+      while (match.world.clock < until) {
+        if (match.consumeHalfEndRequest() || match.isEnded) break;
+
+        if (this.realtime) {
+          await sleep(framePeriod);
+          const now = Date.now();
+          owed += (now - last) / 1000;
+          last = now;
+          // Same starvation guard as the self-running loop: never try to make
+          // up more than a moment of missed wall-clock time at once.
+          owed = Math.min(owed, 0.25);
+        } else {
+          await sleep(0);
+          owed = dt * perControl;
+        }
+
+        if (match.world.running) {
+          while (owed >= dt && match.world.clock < until) {
+            match.step(dt);
+            owed -= dt;
+          }
+        }
+        this.broadcast({ type: 'frame', frame: match.snapshot() });
+      }
+      match.world.running = false;
+      this.broadcast({ type: 'frame', frame: match.snapshot() });
+      if (match.isEnded) break;
+    }
+
+    return match.result();
+  }
+
+  /** Serve the built viewer or referee console, or a push/referee action, if there is one. */
   private async serve(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = (req.url ?? '/').split('?')[0] ?? '/';
     if (req.method === 'POST' && url === '/submit') {
       await this.handleSubmit(req, res);
       return;
     }
-    if (!this.viewerRoot) {
-      res.writeHead(404).end('no viewer built; run: npm run build:viewer');
+    if (req.method === 'POST' && url.startsWith('/referee-api/')) {
+      await this.handleRefereeAction(req, res, url.slice('/referee-api/'.length));
+      return;
+    }
+    // A separate root and a separate path from the spectator bundle — never
+    // one page with a referee panel bolted on. The static files themselves
+    // need no auth (a login screen has to be fetchable to log in from); only
+    // the actions under /referee-api do.
+    if (url === '/referee' || url.startsWith('/referee/')) {
+      const sub = url === '/referee' ? '/' : url.slice('/referee'.length);
+      await this.serveStatic(res, this.refereeRoot, sub, 'no referee console built; run: npm run build:referee');
+      return;
+    }
+    await this.serveStatic(res, this.viewerRoot, url, 'no viewer built; run: npm run build:viewer');
+  }
+
+  private async serveStatic(
+    res: ServerResponse,
+    root: string | null,
+    url: string,
+    missingMessage: string,
+  ): Promise<void> {
+    if (!root) {
+      res.writeHead(404).end(missingMessage);
       return;
     }
     const wanted = url === '/' ? 'index.html' : url.slice(1);
-    // Normalise before joining, so a path cannot climb out of the viewer root.
-    const file = join(this.viewerRoot, normalize(wanted));
-    if (!file.startsWith(this.viewerRoot)) {
+    // Normalise before joining, so a path cannot climb out of the root.
+    const file = join(root, normalize(wanted));
+    if (!file.startsWith(root)) {
       res.writeHead(403).end('no');
       return;
     }
@@ -347,6 +458,131 @@ export class MatchServer {
     } catch {
       res.writeHead(404).end('not found');
     }
+  }
+
+  /**
+   * One referee action, over `POST /referee-api/<action>`.
+   *
+   * Same shape as `handleSubmit`: a hand-issued bearer token checked before
+   * anything else, a small JSON body validated field-by-field, and a
+   * `{ ok, reason }` response. Absent `refereeToken` (the default) makes this
+   * whole surface 404 regardless of path or body — a server started without
+   * `--referee` exposes nothing new at all.
+   */
+  private async handleRefereeAction(req: IncomingMessage, res: ServerResponse, action: string): Promise<void> {
+    if (!this.refereeToken) {
+      this.respondJson(res, 404, { ok: false, reason: 'referee mode is not enabled on this server' });
+      return;
+    }
+    const auth = req.headers.authorization ?? '';
+    const presented = auth.startsWith('Bearer ') ? auth.slice('Bearer '.length) : '';
+    if (presented !== this.refereeToken) {
+      this.respondJson(res, 401, { ok: false, reason: 'invalid or missing referee token' });
+      return;
+    }
+    const match = this.current;
+    if (!match || !match.refereed) {
+      this.respondJson(res, 409, { ok: false, reason: 'no refereed match in progress' });
+      return;
+    }
+
+    const body = await this.readBody(req, 4096);
+    if (body === null) {
+      this.respondJson(res, 413, { ok: false, reason: 'request body too large' });
+      return;
+    }
+    let payload: Record<string, unknown> = {};
+    if (body.length > 0) {
+      try {
+        payload = JSON.parse(body.toString('utf8')) as Record<string, unknown>;
+      } catch {
+        this.respondJson(res, 400, { ok: false, reason: 'body is not valid JSON' });
+        return;
+      }
+    }
+
+    switch (action) {
+      case 'kickoff': {
+        const { team } = payload;
+        if (team !== 'cyan' && team !== 'yellow') {
+          this.respondJson(res, 400, { ok: false, reason: '"team" must be "cyan" or "yellow"' });
+          return;
+        }
+        match.kickOff(team);
+        break;
+      }
+      case 'award-kickoff':
+        match.awardKickOffToOther();
+        break;
+      case 'pause':
+        match.pause();
+        break;
+      case 'resume':
+        match.resume();
+        break;
+      case 'end-half':
+        match.endHalf();
+        break;
+      case 'end-match':
+        match.endMatch();
+        break;
+      case 'abandon': {
+        const { reason } = payload;
+        if (typeof reason !== 'string' || reason.trim() === '') {
+          this.respondJson(res, 400, { ok: false, reason: '"reason" is required' });
+          return;
+        }
+        match.abandon(reason);
+        break;
+      }
+      case 'remove-robot': {
+        const { robotId, rule, reason } = payload;
+        if (typeof robotId !== 'string' || typeof rule !== 'string' || typeof reason !== 'string') {
+          this.respondJson(res, 400, {
+            ok: false,
+            reason: '"robotId", "rule" and "reason" are required strings',
+          });
+          return;
+        }
+        match.removeRobot(robotId, rule, reason);
+        break;
+      }
+      case 'return-robot': {
+        const { robotId } = payload;
+        if (typeof robotId !== 'string') {
+          this.respondJson(res, 400, { ok: false, reason: '"robotId" is required' });
+          return;
+        }
+        if (!match.returnRobot(robotId)) {
+          this.respondJson(res, 409, { ok: false, reason: 'robot is not ready to return yet' });
+          return;
+        }
+        break;
+      }
+      case 'correct-score': {
+        const { team, to, reason } = payload;
+        if (team !== 'cyan' && team !== 'yellow') {
+          this.respondJson(res, 400, { ok: false, reason: '"team" must be "cyan" or "yellow"' });
+          return;
+        }
+        if (typeof to !== 'number' || typeof reason !== 'string' || reason.trim() === '') {
+          this.respondJson(res, 400, { ok: false, reason: '"to" (number) and "reason" (string) are required' });
+          return;
+        }
+        try {
+          match.correctScore(team, to, reason);
+        } catch (err) {
+          this.respondJson(res, 400, { ok: false, reason: (err as Error).message });
+          return;
+        }
+        break;
+      }
+      default:
+        this.respondJson(res, 404, { ok: false, reason: `unknown referee action "${action}"` });
+        return;
+    }
+
+    this.respondJson(res, 200, { ok: true });
   }
 
   private respondJson(res: ServerResponse, status: number, body: unknown): void {
