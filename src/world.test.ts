@@ -415,7 +415,40 @@ describe('lack of progress (5.6)', () => {
     expect(w.events.some((e) => e.kind === 'lack-of-progress')).toBe(false);
   });
 
-  it('does NOT call lack of progress when the ball is actively moving', () => {
+  it('does NOT call lack of progress when the ball is going somewhere', () => {
+    // Down the field at a walking pace, with robots in the neighbourhood. The
+    // ball leaves its own circle again and again, which is what progress is.
+    const w = world('open');
+    w.running = true;
+    const [c1, c2, y1, y2] = w.robots;
+    c2!.x = -800; y2!.x = 850;
+
+    for (let t = 0; t < 8; t += 1 / 60) {
+      w.ball.x = -700 + t * 175;
+      w.ball.z = 0;
+      w.ball.vx = 175;
+      c1!.x = w.ball.x - 140; c1!.z = 0;
+      y1!.x = w.ball.x + 160; y1!.z = 0;
+      w.step(1 / 60);
+    }
+    // Specifically 5.6.1.1. Two robots escorting a ball down the field into a
+    // penalty box is forcing under 5.6.1.3, which is a different offence that
+    // happens to share an event kind, and not what this test is about.
+    expect(w.events.some((e) => e.rule === '5.6.1.1')).toBe(false);
+  });
+
+  it('calls it on a jostled ball that is not stationary and not going anywhere', () => {
+    /*
+     * This is the case the describe block above is about, and for a long time
+     * it was the case that got away.
+     *
+     * The ball rattles between two robots, crossing the old sixty-millimetre
+     * speed threshold several times a second, and never leaves a region a
+     * robot could stand in. A detector that reset its window whenever the ball
+     * twitched could never finish a window here, so the call came at nearly
+     * ten seconds instead of five, or not at all - and a spectator had already
+     * decided nobody was refereeing.
+     */
     const w = world('open');
     w.running = true;
     const [c1, c2, y1, y2] = w.robots;
@@ -423,13 +456,24 @@ describe('lack of progress (5.6)', () => {
     c1!.x = -80; c1!.z = 0;
     y1!.x = 80; y1!.z = 0;
 
-    for (let t = 0; t < 8; t += 1 / 60) {
-      w.ball.x = Math.sin(t * 4) * 200;
+    let calledAt: number | null = null;
+    let peakSpeed = 0;
+    for (let t = 0; t < 12; t += 1 / 60) {
+      w.ball.x = Math.sin(t * 4) * 120;
       w.ball.z = 0;
-      w.ball.vx = 200;
+      // Genuinely moving: this is not a test about a stationary ball.
+      w.ball.vx = Math.cos(t * 4) * 480;
+      peakSpeed = Math.max(peakSpeed, Math.abs(w.ball.vx));
       w.step(1 / 60);
+      if (calledAt === null && w.events.some((e) => e.kind === 'lack-of-progress')) {
+        calledAt = t;
+      }
     }
-    expect(w.events.some((e) => e.kind === 'lack-of-progress')).toBe(false);
+
+    expect(peakSpeed).toBeGreaterThan(60);
+    expect(calledAt).not.toBeNull();
+    // Within the window the rule actually sets, not twice it.
+    expect(calledAt!).toBeLessThan(7);
   });
 
 

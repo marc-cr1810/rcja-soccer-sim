@@ -590,14 +590,24 @@ export class World {
   private detectStall(dt: number): void {
     const ballSpd = speed(this.ball);
 
-    // If the ball is rolling/moving at speed, it is in active play.
-    if (ballSpd > 60) {
-      this.stalledFor = Math.max(0, this.stalledFor - dt * 2);
-      this.sinceProgressMark = 0;
-      this.progressMark = { x: this.ball.x, z: this.ball.z };
-      return;
-    }
-
+    /*
+     * There is deliberately no "the ball is moving, so play is fine" shortcut
+     * here any more, and removing it is the whole point of this function.
+     *
+     * It used to reset the progress window whenever the ball briefly went
+     * faster than 60 mm/s, which is a contradiction: a displacement test
+     * exists precisely to catch a ball that is moving and going nowhere. A
+     * ball being jostled in a scrum crosses 60 mm/s every second or so, so the
+     * five-second window restarted before it could ever complete, and then had
+     * to run a further five from scratch. Measured, the ball could sit inside
+     * a 320 mm circle for 9.8 seconds before the referee said anything -
+     * twice the time this rule believes it is enforcing, and long enough that
+     * anyone watching has already decided the referee is asleep.
+     *
+     * Speed needs no special case. A ball that is genuinely going somewhere
+     * leaves the circle on its own, which moves the mark, which resets the
+     * window. The test regulates itself.
+     */
     const contesting = this.active().filter(
       (r) => distance(r, this.ball) < r.radius + this.ball.radius + 25,
     );
@@ -626,24 +636,52 @@ export class World {
       this.stalledFor = Math.max(0, this.stalledFor - dt * 2);
     }
 
-    // Rule 5.6.1.1: Ball has not progressed in PROGRESS_WINDOW seconds (whether contested, pinned, or stranded)
-    this.sinceProgressMark += dt;
-    if (this.sinceProgressMark >= PROGRESS_WINDOW) {
-      const moved = distance(this.ball, this.progressMark);
+    /*
+     * Rule 5.6.1.1, asked continuously rather than on a timetable: has the
+     * ball left a PROGRESS_DISTANCE circle in the last PROGRESS_WINDOW
+     * seconds?
+     *
+     * Progress resets the clock the moment it happens, instead of at the end
+     * of whatever fixed window the ball happened to be in. A window that only
+     * looks at its own two endpoints cannot tell a ball that crossed the field
+     * from one that went out and came back, and it reads the wrong answer for
+     * a ball that was somewhere else when the window opened.
+     */
+    if (distance(this.ball, this.progressMark) > PROGRESS_DISTANCE) {
       this.progressMark = { x: this.ball.x, z: this.ball.z };
       this.sinceProgressMark = 0;
-      if (moved < PROGRESS_DISTANCE) {
-        if (this.autoResolve) {
-          this.callLackOfProgress();
-        } else {
-          this.emit({
-            kind: 'lack-of-progress',
-            rule: '5.6.1.1',
-            message: `Ball has not progressed in ${PROGRESS_WINDOW} seconds. Lack of Progress is available to the referee.`,
-          });
-        }
-        return;
+    } else {
+      this.sinceProgressMark += dt;
+    }
+
+    /*
+     * A ball sitting in a penalty box while that team's keeper ignores it is
+     * the keeper's offence, not a neutral one.
+     *
+     * Both rules describe this, and they cannot both happen: 5.6.1.1 moves the
+     * ball after five seconds, and 5.8.3 takes the keeper off after eight - so
+     * whichever fires first makes the other unreachable. The referee watching
+     * a keeper let a ball sit at its feet calls the keeper, so 5.8.3 is given
+     * its full window and the progress clock waits. If the keeper comes out,
+     * its timer clears and this resumes on the next tick.
+     */
+    if (this.active().some((r) => r.isGoalie && (r.inactiveGoalieFor ?? 0) > 0)) {
+      return;
+    }
+
+    if (this.sinceProgressMark >= PROGRESS_WINDOW) {
+      this.progressMark = { x: this.ball.x, z: this.ball.z };
+      this.sinceProgressMark = 0;
+      if (this.autoResolve) {
+        this.callLackOfProgress();
+      } else {
+        this.emit({
+          kind: 'lack-of-progress',
+          rule: '5.6.1.1',
+          message: `Ball has not progressed in ${PROGRESS_WINDOW} seconds. Lack of Progress is available to the referee.`,
+        });
       }
+      return;
     }
   }
 
