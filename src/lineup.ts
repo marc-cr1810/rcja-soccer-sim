@@ -18,7 +18,7 @@ import { join } from 'node:path';
 
 import type { Transport } from './agent';
 import { waitForSeats } from './bench';
-import { parseManifest, slugifyTeam, type Manifest } from './manifest';
+import { parseManifest, slugifyTeam, TOKEN_FILENAME, type Manifest } from './manifest';
 import { spawnSandboxed } from './sandbox';
 import type { MatchServer } from './server';
 
@@ -26,6 +26,8 @@ export interface LineupEntry {
   manifest: Manifest;
   /** The robot's own folder under the submissions tree. */
   dir: string;
+  /** Server-issued at submit time; what proves this spawn's join to the gateway. */
+  token: string;
 }
 
 /** Which of the four seats have a validated submission to load, and where it lives. */
@@ -56,7 +58,19 @@ export async function resolveLineup(
       // disagrees with the slot it was found in is not trusted rather than
       // guessed at.
       if (!result.ok || result.value.robot !== robot) continue;
-      out[`${side}-${robot}`] = { manifest: result.value, dir };
+
+      // No token file means this folder pre-dates server-issued tokens, or
+      // was tampered with outside a real push — skipped for this seat the
+      // same way a bad manifest already is, and the built-in agent fills it.
+      let token: string;
+      try {
+        token = (await readFile(join(dir, TOKEN_FILENAME), 'utf8')).trim();
+      } catch {
+        continue;
+      }
+      if (!token) continue;
+
+      out[`${side}-${robot}`] = { manifest: result.value, dir, token };
     }
   }
 
@@ -119,6 +133,12 @@ export async function spawnLineup(
     if (stopped) return;
     const [side, robotText] = id.split('-') as [string, string];
 
+    // Registered before the child can possibly connect (spawning below is
+    // the earliest anything could reach the gateway), and re-registered
+    // identically on every respawn — harmless, since it's always the same
+    // token for this resolved seat.
+    server.agents.expectToken(id, entry.token);
+
     const child = spawnSandboxed({
       entry: join(entry.dir, entry.manifest.entry),
       cwd: entry.dir,
@@ -139,6 +159,8 @@ export async function spawnLineup(
         entry.manifest.team,
         '--url',
         server.agentSocketUrl,
+        '--token',
+        entry.token,
       ],
     });
     children.set(id, child);

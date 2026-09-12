@@ -26,6 +26,8 @@ export interface JoinMessage {
   robot: number;
   /** The team's name, for the scoreboard. */
   name?: string;
+  /** Server-issued at submit time. Required only for a seat that has one registered — see `expectToken`. */
+  token?: string;
 }
 
 export interface WelcomeMessage {
@@ -197,6 +199,13 @@ export interface Seat {
  */
 export class AgentGateway {
   private readonly seats = new Map<string, Seat>();
+  /**
+   * Seats a validated submission was issued a token for — set by whoever
+   * spawns it (`lineup.ts`), checked at join. A seat absent from this map
+   * requires no token at all, which is what keeps `--agents` mode, `npm run
+   * bench`, and local dev working exactly as they did before this existed.
+   */
+  private readonly expectedTokens = new Map<string, string>();
   private waiters: (() => void)[] = [];
   /**
    * Asked whether a seat is still serving a penalty, and for how long.
@@ -232,6 +241,16 @@ export class AgentGateway {
     const out: Partial<Record<string, Transport>> = {};
     for (const [id, seat] of this.seats) out[id] = seat.transport;
     return out;
+  }
+
+  /** From here on, a join claiming this seat must present exactly this token. */
+  expectToken(seatId: string, token: string): void {
+    this.expectedTokens.set(seatId, token);
+  }
+
+  /** This seat no longer requires a token — back to self-declared joins. */
+  clearToken(seatId: string): void {
+    this.expectedTokens.delete(seatId);
   }
 
   /** Handle a new connection on the agent path. */
@@ -270,6 +289,18 @@ export class AgentGateway {
       }
 
       const id = `${join.team}-${join.robot}`;
+
+      // Checked before any seat-state branching below, so a connection with
+      // the wrong (or no) token learns nothing about that seat beyond "you
+      // don't have what it takes" — not whether it's held, standing down, or
+      // free. A seat nobody ever called `expectToken` for (no submission
+      // spawned it) skips this entirely: self-declared joins, same as ever.
+      const expectedToken = this.expectedTokens.get(id);
+      if (expectedToken !== undefined && join.token !== expectedToken) {
+        reject(`${id} requires a valid token`);
+        return;
+      }
+
       const held = this.seats.get(id);
 
       if (held?.transport.connected) {
@@ -367,5 +398,6 @@ export class AgentGateway {
   closeAll(): void {
     for (const seat of this.seats.values()) seat.transport.close();
     this.seats.clear();
+    this.expectedTokens.clear();
   }
 }

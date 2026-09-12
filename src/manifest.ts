@@ -38,6 +38,14 @@ const TEAM_NAME = /^[A-Za-z0-9 _-]{1,40}$/;
 const ENTRY_FILENAME = /^[A-Za-z0-9_-]+\.py$/;
 
 /**
+ * Name of the server-issued token file written alongside a validated
+ * submission — proves a join for this seat came from the platform, not just
+ * a program's own say-so. Shared between the writer (`server.ts`) and the
+ * reader (`lineup.ts`) so the name can't drift between them.
+ */
+export const TOKEN_FILENAME = 'token';
+
+/**
  * Parse and validate `manifest.json`.
  *
  * Takes the raw bytes (or `undefined` if no such file was pushed) and the set

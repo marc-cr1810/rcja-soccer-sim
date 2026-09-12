@@ -14,6 +14,7 @@
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { cp, mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { extname, join, normalize, resolve } from 'node:path';
 import { WebSocketServer, type WebSocket } from 'ws';
@@ -21,7 +22,7 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import { Match, CONTROL_HZ, PHYSICS_HZ, type MatchOptions, type MatchResult } from './match';
 import { VIEW_HZ, type ViewMessage } from './view';
 import { AGENT_PATH, AgentGateway } from './gateway';
-import { slugifyTeam } from './manifest';
+import { slugifyTeam, TOKEN_FILENAME } from './manifest';
 import { validateSubmission } from './submission';
 
 export interface ServerOptions {
@@ -475,7 +476,17 @@ export class MatchServer {
         // (a tmpfs /tmp is common), which a plain rename cannot cross.
         await cp(scratch, target, { recursive: true });
       }
-      this.respondJson(res, 200, { ok: true, team: manifest.team, robot: manifest.robot });
+
+      // Minted after the move, into the real submissions tree rather than
+      // scratch — validation above never sees it, and never needs to: no
+      // token exists yet at the point a push is only being checked, just
+      // stored. A fresh token every successful push, whether or not the code
+      // itself changed — it authenticates this validated copy, not a
+      // standing account.
+      const token = randomBytes(24).toString('base64url');
+      await writeFile(join(target, TOKEN_FILENAME), token);
+
+      this.respondJson(res, 200, { ok: true, team: manifest.team, robot: manifest.robot, token });
     } finally {
       await rm(scratch, { recursive: true, force: true }).catch(() => {});
     }

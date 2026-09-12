@@ -136,6 +136,7 @@ class Robot:
         name: str | None = None,
         *,
         motors: int = 4,
+        token: str | None = None,
     ) -> None:
         if team not in ("cyan", "yellow"):
             raise ValueError(f'team must be "cyan" or "yellow", not {team!r}')
@@ -145,6 +146,11 @@ class Robot:
         self.number = number
         self.name = name or team.capitalize()
         self.motor_count = motors
+        #: Server-issued when this robot was pushed and validated. A robot
+        #: run without one (any --agents/local-dev use) joins exactly as it
+        #: always has — a seat only requires a token if the server was told
+        #: to expect one for it.
+        self.token = token
         self._tick: TickFunction | None = None
         self._memory = Memory()
         self._last_kickoff = False
@@ -217,17 +223,16 @@ class Robot:
 
     def _play(self, url: str, quiet: bool) -> None:
         with WebSocket(url) as socket:
-            socket.send(
-                json.dumps(
-                    {
-                        "type": "join",
-                        "protocol": PROTOCOL_VERSION,
-                        "team": self.team,
-                        "robot": self.number,
-                        "name": self.name,
-                    }
-                )
-            )
+            join_message: dict[str, Any] = {
+                "type": "join",
+                "protocol": PROTOCOL_VERSION,
+                "team": self.team,
+                "robot": self.number,
+                "name": self.name,
+            }
+            if self.token is not None:
+                join_message["token"] = self.token
+            socket.send(json.dumps(join_message))
 
             hello = json.loads(socket.recv())
             if hello.get("type") == "reject":

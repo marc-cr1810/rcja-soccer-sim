@@ -60,6 +60,9 @@ except urllib.error.URLError as error:
 
 if result.get("ok"):
     print(f"accepted: {result['team']} robot {result['robot']}", file=sys.stderr)
+    if result.get("token"):
+        print(f"token: {result['token']}", file=sys.stderr)
+        print("keep this - it's what lets a program join as this robot", file=sys.stderr)
 else:
     print(f"rejected: {result.get('reason', 'unknown reason')}", file=sys.stderr)
     sys.exit(1)

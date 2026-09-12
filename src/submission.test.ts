@@ -17,6 +17,7 @@ parser.add_argument("--team", default="cyan")
 parser.add_argument("--number", type=int, default=1)
 parser.add_argument("--name", default=None)
 parser.add_argument("--url", default="ws://localhost:8080/agent")
+parser.add_argument("--token", default=None)
 args = parser.parse_args()
 `;
 
@@ -41,7 +42,7 @@ describe.skipIf(!ready)('validateSubmission', () => {
         `
 from rcja_soccer import Robot
 
-robot = Robot(team=args.team, number=args.number, name=args.name)
+robot = Robot(team=args.team, number=args.number, name=args.name, token=args.token)
 
 @robot.tick
 def think(s, me):
@@ -88,7 +89,7 @@ robot.run(args.url)
 from helpers import steady
 from rcja_soccer import Robot
 
-robot = Robot(team=args.team, number=args.number, name=args.name)
+robot = Robot(team=args.team, number=args.number, name=args.name, token=args.token)
 
 @robot.tick
 def think(s, me):
@@ -122,7 +123,7 @@ robot.run(args.url)
 import time
 from rcja_soccer import Robot
 
-robot = Robot(team=args.team, number=args.number, name=args.name)
+robot = Robot(team=args.team, number=args.number, name=args.name, token=args.token)
 
 @robot.tick
 def think(s, me):
@@ -137,5 +138,38 @@ robot.run(args.url)
       tickTimeoutMs: 800,
     });
     expect(result).toMatchObject({ ok: false, reason: expect.stringContaining('never answered') });
+  }, 15000);
+
+  it('rejects an entry script whose argparse has no --token', async () => {
+    // Every lineup-spawned seat is given --token at match time; catching an
+    // entry script that doesn't accept it here, at push time, beats finding
+    // out only once it's actually spawned for a real match.
+    const dir = await folder({
+      'manifest.json': manifest('robot.py'),
+      'robot.py': `
+import argparse
+parser = argparse.ArgumentParser()
+parser.add_argument("--team", default="cyan")
+parser.add_argument("--number", type=int, default=1)
+parser.add_argument("--name", default=None)
+parser.add_argument("--url", default="ws://localhost:8080/agent")
+args = parser.parse_args()
+
+from rcja_soccer import Robot
+
+robot = Robot(team=args.team, number=args.number, name=args.name)
+
+@robot.tick
+def think(s, me):
+    return robot.coast()
+
+robot.run(args.url)
+`,
+    });
+    const result = await validateSubmission(dir, {
+      pythonLibDir: PYTHON_LIB_DIR,
+      connectTimeoutMs: 800,
+    });
+    expect(result).toMatchObject({ ok: false, reason: expect.stringContaining('did not connect') });
   }, 15000);
 });

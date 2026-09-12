@@ -21,11 +21,12 @@ parser.add_argument("--team", default="cyan")
 parser.add_argument("--number", type=int, default=1)
 parser.add_argument("--name", default=None)
 parser.add_argument("--url", default="ws://localhost:8080/agent")
+parser.add_argument("--token", default=None)
 args = parser.parse_args()
 
 from rcja_soccer import Robot
 
-robot = Robot(team=args.team, number=args.number, name=args.name)
+robot = Robot(team=args.team, number=args.number, name=args.name, token=args.token)
 
 @robot.tick
 def think(s, me):
@@ -57,10 +58,22 @@ describe('resolveLineup', () => {
     await putSubmission(root, 'test-team', 1, {
       'manifest.json': JSON.stringify({ team: 'Test Team', robot: 1, entry: 'robot.py' }),
       'robot.py': COAST_ROBOT,
+      token: 'test-token',
     });
     const resolved = await resolveLineup(root, { cyan: 'Test Team', yellow: 'Yellow' });
     expect(Object.keys(resolved)).toEqual(['cyan-1']);
     expect(resolved['cyan-1']?.manifest.entry).toBe('robot.py');
+    expect(resolved['cyan-1']?.token).toBe('test-token');
+  });
+
+  it('skips a submission with no token file, same as a bad manifest', async () => {
+    const root = await submissionsRoot();
+    await putSubmission(root, 'test-team', 1, {
+      'manifest.json': JSON.stringify({ team: 'Test Team', robot: 1, entry: 'robot.py' }),
+      'robot.py': COAST_ROBOT,
+    });
+    const resolved = await resolveLineup(root, { cyan: 'Test Team', yellow: 'Yellow' });
+    expect(resolved).toEqual({});
   });
 
   it('leaves a slot unresolved when nothing was pushed for it', async () => {
@@ -108,10 +121,12 @@ describe.skipIf(!ready)('spawnLineup', () => {
     await putSubmission(root, 'test-team', 1, {
       'manifest.json': JSON.stringify({ team: 'Test Team', robot: 1, entry: 'robot.py' }),
       'robot.py': COAST_ROBOT,
+      token: 'test-token-1',
     });
     await putSubmission(root, 'test-team', 2, {
       'manifest.json': JSON.stringify({ team: 'Test Team', robot: 2, entry: 'robot.py' }),
       'robot.py': COAST_ROBOT,
+      token: 'test-token-2',
     });
 
     const resolved = await resolveLineup(root, { cyan: 'Test Team', yellow: 'Yellow' });
@@ -146,6 +161,7 @@ describe.skipIf(!ready)('spawnLineup', () => {
     await putSubmission(root, 'crashy', 1, {
       'manifest.json': JSON.stringify({ team: 'Crashy', robot: 1, entry: 'robot.py' }),
       'robot.py': 'import sys\nsys.exit(1)\n',
+      token: 'test-token',
     });
     const resolved = await resolveLineup(root, { cyan: 'Crashy', yellow: 'Yellow' });
 

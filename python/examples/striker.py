@@ -63,10 +63,11 @@ parser.add_argument("--team", default="cyan", choices=["cyan", "yellow"])
 parser.add_argument("--number", type=int, default=1, choices=[1, 2])
 parser.add_argument("--name", default=None)
 parser.add_argument("--url", default="ws://localhost:8080/agent")
+parser.add_argument("--token", default=None, help="server-issued at submit time")
 parser.add_argument("--debug", action="store_true", help="print telemetry")
 args = parser.parse_args()
 
-robot = Robot(team=args.team, number=args.number, name=args.name)
+robot = Robot(team=args.team, number=args.number, name=args.name, token=args.token)
 
 TEAM = args.team
 UPFIELD = attack_heading(TEAM)

@@ -10,6 +10,12 @@ and have it validated and sandboxed on arrival, and `npm run serve` loads and
 plays whatever has been pushed under the names given to `--home`/`--away`,
 falling back to the reference agent for any robot nobody has pushed yet.
 
+**Documentation:** this file is the pitch — what this is and why it's built
+the way it is. For the manual, see [docs/](docs/): [writing a
+robot](docs/writing-a-robot.md), [running a server](docs/running-a-server.md),
+and the full sensor/actuator reference in
+[python/README.md](python/README.md).
+
 ## What this is not
 
 It is not [RCJA Soccer Lab](../rcja-soccer-lab). That is a rules reference and
@@ -64,7 +70,7 @@ npm run serve            # then open http://localhost:8080
 | `viewer/` | **New.** The spectator client, using the lab's renderer. |
 | `python/` | **New.** The client library teams write against, and examples. |
 
-`npm test` runs 242 tests.
+`npm test` runs 249 tests.
 
 ### Python robots
 
@@ -102,6 +108,17 @@ folder. Requires `bwrap` and a delegated user cgroup (true of an ordinary
 login session on any reasonably modern Linux distro) on the machine running
 the server.
 
+A successful push gets back a token, printed by `submit.py` — proof this
+program is the one the platform validated for this team's *this* robot, not
+just whatever a connecting process claims to be. It rotates on every push, so
+the value to keep is always whatever the last one printed. Server-spawned
+play (below) reads it off disk automatically and hands it to the program
+itself; a team running its own copy by hand for a scrimmage passes it the
+same way its own script already takes `--team`/`--number`. A per-*robot*
+token, not a per-team one — the two robots on a side are independent
+programs on independent connections, and one should not be able to speak for
+the other.
+
 ```bash
 npm run serve -- --home "Your Team Name" --away "Their Team Name"
 ```
@@ -123,9 +140,13 @@ to its share of one core for as long as it keeps running, rather than the
 match losing that robot at an arbitrary cutoff unrelated to whether the game
 is still going. A memory ceiling still ends a process that blows through it,
 same as before, just measured against what it is actually using rather than
-how much address space it reserved. Not yet built: server-issued identity at
-the join, so a submission's credentials come from the platform rather than
-its own say-so.
+how much address space it reserved.
+
+A seat's join is checked against the token its submission was issued, not
+just the team/robot it claims — the last piece of "run it sandboxed" that
+was still just self-declared. A robot run with no token at all (`--agents`
+mode, a bench run, local dev against `examples/play.py`) is unaffected: a
+seat only requires one if the server was told to expect it.
 
 ### Watching a match
 
@@ -255,13 +276,10 @@ which is what makes it usable in a loop.
 
 ## Next
 
-1. Server-issued identity at the join — a submission's credentials (which
-   seat it is, which team it belongs to) come from the platform, replacing
-   the join message's own self-declared say-so it still relies on today.
-2. Pyodide in the browser, for teams who cannot install Python at all.
-3. A referee console: start, pause, resume, and the calls `World` already has
+1. Pyodide in the browser, for teams who cannot install Python at all.
+2. A referee console: start, pause, resume, and the calls `World` already has
    methods for.
-4. Tournament running — a draw, a table, and results that persist.
+3. Tournament running — a draw, a table, and results that persist.
 
 Known and recorded as tests rather than hidden: the reference agent still scores
 the occasional own goal against a motionless opponent (0–5 a match, down from

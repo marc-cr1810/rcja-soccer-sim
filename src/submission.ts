@@ -147,7 +147,24 @@ async function checkSyntheticTick(
     cwd: dir,
     pythonLibDir: opts.pythonLibDir,
     controlDir,
-    args: ['--team', 'cyan', '--number', String(manifest.robot), '--name', manifest.team, '--url', url],
+    // No real token exists yet at validation time (one is only minted once a
+    // push has passed every check, including this one) — the placeholder
+    // value here is checked against nothing, since this scratch gateway
+    // never calls `expectToken`. It exists purely so an entry script whose
+    // argparse forgot `--token` fails here, at push time, instead of only
+    // once it's actually spawned for a match.
+    args: [
+      '--team',
+      'cyan',
+      '--number',
+      String(manifest.robot),
+      '--name',
+      manifest.team,
+      '--url',
+      url,
+      '--token',
+      'validation',
+    ],
   });
 
   let stderr = '';

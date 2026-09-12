@@ -309,11 +309,12 @@ parser.add_argument("--team", default="cyan")
 parser.add_argument("--number", type=int, default=1)
 parser.add_argument("--name", default=None)
 parser.add_argument("--url", default="ws://localhost:8080/agent")
+parser.add_argument("--token", default=None)
 args = parser.parse_args()
 
 from rcja_soccer import Robot
 
-robot = Robot(team=args.team, number=args.number, name=args.name)
+robot = Robot(team=args.team, number=args.number, name=args.name, token=args.token)
 
 @robot.tick
 def think(s, me):
@@ -341,11 +342,13 @@ robot.run(args.url)
       }),
     });
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { ok: boolean; team: string; robot: number };
-    expect(body).toEqual({ ok: true, team: 'Test Team', robot: 1 });
+    const body = (await res.json()) as { ok: boolean; team: string; robot: number; token: string };
+    expect(body).toMatchObject({ ok: true, team: 'Test Team', robot: 1 });
+    expect(body.token).toEqual(expect.any(String));
+    expect(body.token.length).toBeGreaterThan(0);
 
     const landed = await readdir(join(submissionsDir, 'test-team', '1'));
-    expect(landed.sort()).toEqual(['manifest.json', 'robot.py']);
+    expect(landed.sort()).toEqual(['manifest.json', 'robot.py', 'token']);
   }, 15000);
 
   it('rejects a bad manifest and writes nothing', async () => {
@@ -416,11 +419,12 @@ describe('a robot program that goes away', () => {
     port: number,
     team: 'cyan' | 'yellow',
     robot: 1 | 2,
+    token?: string,
   ): Promise<{ socket: WebSocket; rejected: string | null }> {
     return new Promise((ok, fail) => {
       const socket = new WebSocket(`ws://127.0.0.1:${port}/agent`);
       socket.addEventListener('open', () => {
-        socket.send(JSON.stringify({ type: 'join', protocol: 1, team, robot, name: team }));
+        socket.send(JSON.stringify({ type: 'join', protocol: 1, team, robot, name: team, token }));
       });
       socket.addEventListener('message', (e) => {
         const message = JSON.parse(String(e.data)) as {
@@ -532,6 +536,72 @@ describe('a robot program that goes away', () => {
     expect(slot.worstRun).toBeLessThan(25);
     one.socket.close();
   }, 20000);
+
+  describe('a seat with a server-issued token', () => {
+    it('rejects a join with no token', async () => {
+      const server = new MatchServer({ port: 0, realtime: false, idealSensors: true });
+      servers.push(server);
+      const port = await server.listen();
+      server.agents.expectToken('cyan-1', 'the-real-token');
+
+      const attempt = await join(port, 'cyan', 1);
+      expect(attempt.rejected).toContain('cyan-1');
+      attempt.socket.close();
+    });
+
+    it('rejects a join with the wrong token', async () => {
+      const server = new MatchServer({ port: 0, realtime: false, idealSensors: true });
+      servers.push(server);
+      const port = await server.listen();
+      server.agents.expectToken('cyan-1', 'the-real-token');
+
+      const attempt = await join(port, 'cyan', 1, 'not-it');
+      expect(attempt.rejected).not.toBeNull();
+      attempt.socket.close();
+    });
+
+    it('accepts a join with the right token', async () => {
+      const server = new MatchServer({ port: 0, realtime: false, idealSensors: true });
+      servers.push(server);
+      const port = await server.listen();
+      server.agents.expectToken('cyan-1', 'the-real-token');
+
+      const attempt = await join(port, 'cyan', 1, 'the-real-token');
+      expect(attempt.rejected).toBeNull();
+      attempt.socket.close();
+    });
+
+    it('still requires the token on reconnect', async () => {
+      const server = new MatchServer({ port: 0, realtime: false, idealSensors: true });
+      servers.push(server);
+      const port = await server.listen();
+      server.agents.expectToken('cyan-1', 'the-real-token');
+
+      const first = await join(port, 'cyan', 1, 'the-real-token');
+      first.socket.close();
+      await new Promise((ok) => setTimeout(ok, 50));
+
+      const wrong = await join(port, 'cyan', 1, 'not-it');
+      expect(wrong.rejected).not.toBeNull();
+      wrong.socket.close();
+
+      const right = await join(port, 'cyan', 1, 'the-real-token');
+      expect(right.rejected).toBeNull();
+      right.socket.close();
+    });
+
+    it('leaves a seat with no expected token joining exactly as before', async () => {
+      // The regression guard: --agents mode, npm run bench, and local dev
+      // never register a token for any seat, and must keep working unchanged.
+      const server = new MatchServer({ port: 0, realtime: false, idealSensors: true });
+      servers.push(server);
+      const port = await server.listen();
+
+      const attempt = await join(port, 'cyan', 1);
+      expect(attempt.rejected).toBeNull();
+      attempt.socket.close();
+    });
+  });
 });
 
 describe('the frame rate', () => {
