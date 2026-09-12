@@ -66,6 +66,11 @@ the program rather than trusting a socket.
   whatever a client claims — team, robot number, name. Anyone on the venue wifi
   can be cyan 1. A submitted program gets its slot from the match, not from its
   own say-so.
+- **Identity is a hand-issued token, not an account system yet.** Ahead of Phase
+  6, a team's credential is whatever the admin running the venue hands them —
+  a secret created by hand per team, enough to bind a push to a team name and
+  mint a match's join tokens. Registration, roles, and self-service accounts are
+  Phase 6's job, not a prerequisite here.
 
 **The laptop path does not go away.** Connecting a live program over
 [`AGENT_PATH`](src/gateway.ts) stays, as the practice and scrimmage loop — it is
@@ -92,6 +97,8 @@ person can stop it.
 - Correct the score, with a reason recorded against the match.
 - Authenticated, on its own path, and never reachable from the spectator
   bundle. The viewer stream is untrusted by design and stays that way.
+- Same hand-issued credential as Phase 1 for now — a real referee account
+  is Phase 6's job.
 
 ---
 
@@ -114,7 +121,35 @@ other, both ways round. What it lacks is everything around the football.
 
 ---
 
-## Phase 4 — Write it anywhere
+## Phase 4 — A team rehearses on its own
+
+*Gate: a team configures a scenario — a striker alone, a goalie against a
+striker, the robot or the ball placed by hand — and watches its real
+submission play it, through the same pipeline a scored match uses.*
+
+This sits after Phase 3 on purpose: rehearsing against your own submission
+only means something once a real submission and sandbox exist to rehearse
+with, rather than a simulator-only stand-in.
+
+- **Reuses Phase 3's harness, not a new one.** Running an isolated scenario is
+  the same shape as a headless qualifying match — spin up `World`, feed it
+  agents, run ticks — just with a different starting arrangement and no result
+  written to a ladder table.
+- **`World` needs to accept a scenario spec.** Today it assumes a standard
+  four-robot kickoff. A scenario needs a partial roster (one robot instead of
+  four) and arbitrary starting positions for robots and the ball, not just the
+  kickoff layout.
+- **Runs the real submission, sandboxed, same as a match.** The point is a team
+  watching what their actual pushed code does under the actual constraints it
+  will play under — not a separate simulator-only debug mode that could drift
+  from what the venue server actually runs.
+- **Not scored, not persisted.** A rehearsal produces no fixture, no result,
+  nothing in the table Phase 3 builds. It is explicitly a practice path, kept
+  distinct from a real match the way the laptop/`AGENT_PATH` loop in Phase 1 is.
+
+---
+
+## Phase 5 — Write it anywhere
 
 *Gate: a student with a locked-down school laptop and no Python writes a robot,
 watches it play, and submits it.*
@@ -137,12 +172,42 @@ which is why they are here and not at the front.
 
 ---
 
+## Phase 6 — Anyone can find the game
+
+*Gate: a visitor with no venue access opens the site and sees what's upcoming,
+what's in progress, and what already happened; a team or referee registers
+themselves instead of getting a token by hand.*
+
+Phases 1 and 2 got here first, on purpose, with a credential an admin hands
+out — that was enough to prove identity mattered without building the whole
+system around it up front. This is where it becomes real.
+
+- **Team registration, referee registration, an admin role.** Replaces the
+  hand-issued tokens from Phase 1 and 2 with actual accounts and a real sign-up
+  flow, without changing what those tokens were *for* — the join-token and
+  push-credential mechanics stay, only where they come from changes.
+- **Visitors need no account at all.** Consistent with Phase 2's stance that
+  the viewer stream is untrusted by design — watching stays open, only
+  registering a team, refereeing, or administering needs a login.
+- **A front page.** Upcoming fixtures, matches in progress (linking through to
+  the live viewer), and past results — built on the match records and fixture
+  list Phase 3 already persists, which is why this comes after it rather than
+  before.
+- **Optional, not load-bearing.** A team spinning up the server locally for a
+  single match still gets today's behaviour — no login, no front page, nothing
+  to opt into. Accounts and the front page are a layer above `MatchServer`, not
+  a path threaded through it, so running one game alone stays exactly as cheap
+  as [the destination](#the-destination) demands.
+
+---
+
 ## Not yet placed
 
-- **Season and venue management** — who is registered, which division, carrying
-  a team's code between events.
-- **Spectator polish** — a scoreboard overlay, replays, a results screen for the
-  hall.
+- **Spectator polish** — a scoreboard overlay and replays for the screen in
+  the venue hall itself. Distinct from Phase 6's front page, which is for
+  anyone browsing from outside the venue.
+- **Multi-season structure** — which division a team is in, carrying a team's
+  code and history between separate events, if the league runs more than once.
 - **The reference agent's own goals.** Seed 5 against a motionless opponent
   still produces them. Recorded as a test rather than asserted away.
 
