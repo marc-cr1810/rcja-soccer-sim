@@ -101,7 +101,7 @@ function pythonLibDir(): string | undefined {
 
 async function serve(flags: Map<string, string>): Promise<void> {
   const root = viewerRoot();
-  const idealSensors = flags.get('noisy-sensors') !== 'true';
+  const idealSensors = flags.get('ideal-sensors') === 'true';
   const refereed = flags.get('referee') === 'true';
   const refRoot = refereeRoot();
   // Hand-issued, like Phase 1's push token: minted once, printed once, never
@@ -121,7 +121,7 @@ async function serve(flags: Map<string, string>): Promise<void> {
   const port = await server.listen();
 
   console.log(`\n  RCJA Soccer Simulation — match server`);
-  console.log(`  sensors:   ${idealSensors ? 'ideal (noise-free, 24 IR, 360° camera)' : 'noisy (legacy)'}`);
+  console.log(`  sensors:   ${idealSensors ? 'ideal — noise-free, and not a mode to read a result from' : 'realistic (noise, drift, camera latency)'}`);
   console.log(`  watch at  http://localhost:${port}`);
   if (!root) {
     console.log(`  (no viewer built yet — run: npm run build:viewer)`);
@@ -230,7 +230,7 @@ function once(flags: Map<string, string>): void {
     cyan: flags.get('home') ?? 'Cyan',
     yellow: flags.get('away') ?? flags.get('opponent') ?? 'Yellow',
   };
-  const idealSensors = flags.get('noisy-sensors') !== 'true';
+  const idealSensors = flags.get('ideal-sensors') === 'true';
   const started = Date.now();
   const match = new Match({
     agents: agentsFor(flags.get('opponent')),
@@ -316,7 +316,7 @@ async function bench(flags: Map<string, string>): Promise<void> {
         opponent: flags.get('opponent') ?? DEFAULT_OPTIONS.opponent,
         seeds,
         halfSeconds: num(flags, 'half', 90),
-        idealSensors: flags.get('noisy-sensors') !== 'true',
+        idealSensors: flags.get('ideal-sensors') === 'true',
         port: num(flags, 'port', 0),
         spawn: flags.get('spawn'),
         connectTimeout: num(flags, 'wait', 30),
@@ -392,7 +392,10 @@ function usage(): void {
     --opponent      reference (default) or a bot name, as above
     --seeds 1-5     which matches to play: a range, a list, or one
     --half 90       seconds per half
-    --noisy-sensors noise, drift and camera latency on
+    --ideal-sensors noise-free sensors. A diagnostic mode, not a fair one:
+                    the reference team cannot score at all against a keeper
+                    with exact ball data, and a seed varies a noise-free match
+                    far less than a noisy one
     --json FILE     write the full numbers as JSON (- for stdout)
     --baseline FILE compare against a JSON written earlier
 

@@ -245,7 +245,7 @@ export class MatchServer {
       );
     }
     const match = new Match({
-      idealSensors: this.opts.idealSensors ?? true,
+      idealSensors: this.opts.idealSensors ?? false,
       ...options,
     });
     this.current = match;

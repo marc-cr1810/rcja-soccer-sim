@@ -113,6 +113,20 @@ export interface MatchConfig {
   league: League;
   /** Rule 5.2.1: two 5-minute halves, or 10-minute halves by TOC discretion. */
   halfLengthSeconds: number;
+  /**
+   * Varies the legal freedom in where robots stand at a restart.
+   *
+   * Rule 5.4.2 lets the kicking team stand anywhere on its own half and 5.4.5
+   * only asks that part of each non-kicking robot is in the box, so exactly
+   * where they go is the referee's and the team's business, not a constant.
+   * Using it matters more than it looks: without it every restart is identical,
+   * and with noise off that made every MATCH identical - the seed reached only
+   * the noise streams, so a seeded run was one match repeated, and a bench or
+   * ladder averaging over seeds was averaging over a single sample.
+   *
+   * Omit for the fixed, exactly-on-the-marks placement.
+   */
+  placementSeed?: number;
   /** Rule 2.1.2: whether the out area is inclined, which changes 5.9.1. */
   inclined: boolean;
   /**
@@ -194,6 +208,52 @@ function ballMass(league: League): number {
   return league.ball === 'ir-74' ? 140 : 46;
 }
 
+/**
+ * Push any two robots that start inside each other apart, along the field.
+ *
+ * Along x rather than the line between them, because at a restart the pair
+ * that can collide is a keeper and its own striker, both on the goal axis, and
+ * the striker is the one with somewhere to go: back up the field, where its
+ * own half continues. Moving them sideways would take the striker off the box
+ * front that rule 5.4.5 wants part of it on.
+ */
+function separateAtRestart(robots: Robot[]): void {
+  for (let i = 0; i < robots.length; i++) {
+    for (let j = i + 1; j < robots.length; j++) {
+      const a = robots[i]!;
+      const b = robots[j]!;
+      const need = a.radius + b.radius;
+      const gap = Math.hypot(a.x - b.x, a.z - b.z);
+      if (gap >= need) continue;
+      // The one nearer its own goal stays; the other backs up the field.
+      const [keep, move] = Math.abs(a.x) > Math.abs(b.x) ? [a, b] : [b, a];
+      const dz = move.z - keep.z;
+      const room = Math.sqrt(Math.max(0, need * need - dz * dz));
+      move.x = keep.x - Math.sign(keep.x || 1) * room;
+    }
+  }
+}
+
+/**
+ * A small deterministic source of -1..1, for restart placement.
+ *
+ * Returns 0 for ever when no seed is given, which is the old exactly-on-the-
+ * marks behaviour, so nothing that does not ask for variation gets any.
+ */
+function makePlacementRandom(seed: number | undefined): () => number {
+  if (seed === undefined) return () => 0;
+  // mulberry32: tiny, well-distributed, and the same on every machine, which
+  // a result somebody is expected to reproduce needs.
+  let a = (seed ^ 0x9e3779b9) >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return (((t ^ (t >>> 14)) >>> 0) / 4294967296) * 2 - 1;
+  };
+}
+
 
 export class World {
   readonly config: MatchConfig;
@@ -259,8 +319,18 @@ export class World {
    */
   private reportedOutOfPlay = false;
 
+  /**
+   * Where the legal slack in a restart placement comes from.
+   *
+   * Its own stream, advanced only by `resetRobots`, so adding placement
+   * variation does not shift any other seeded stream and a match with it off
+   * is exactly the match it always was.
+   */
+  private placement: () => number;
+
   constructor(config: MatchConfig) {
     this.config = config;
+    this.placement = makePlacementRandom(config.placementSeed);
     this.commsEnabled = config.commsEnabled ?? config.league.commsAllowed;
     const r = ballDiameter(config.league) / 2;
     this.ball = { x: 0, z: 0, vx: 0, vz: 0, radius: r, mass: ballMass(config.league) };
@@ -374,15 +444,59 @@ export class World {
     // overlaps the box line at `boxEdge`, which is what the rule asks for -
     // part of each non-kicking robot inside the box, not all of it.
     const waiting = Math.min(boxEdge - 45, goalieX - 2 * ROBOT_RADIUS);
-    const cyanStriker = cyanSign * (kickingOff === 'cyan' ? kickoffX : waiting);
-    const yellowStriker = yellowSign * (kickingOff === 'yellow' ? kickoffX : waiting);
+
+    // The legal slack, rule by rule.
+    //
+    // 5.4.2 lets the kicking team stand anywhere on its own half, and 5.4.5
+    // only asks that part of each non-kicking robot is in the box - so none of
+    // these positions is prescribed to the millimetre, and pretending they are
+    // is what made every restart, and with noise off every match, identical.
+    //
+    // Each robot draws its own offsets, so the variation has no direction of
+    // its own: over many restarts both ends see the same distribution. The
+    // amounts are deliberately small - enough that no two restarts play out
+    // the same, not so much that a team's opening is a different problem each
+    // time.
+    const jitter = (mm: number): number => this.placement() * mm;
+    // The striker taking the kick-off keeps its standoff: 5.4.7 is decided by
+    // the gap to the ball, so that is the one number not to move. Across the
+    // ball is free.
+    const kickerZ = jitter(35);
+    // The waiting striker has the whole width of the box front to wait on, and
+    // room to stand off the line, as long as its body still overlaps the box.
+    const waitingZ = jitter(220);
+    const waitingBack = jitter(30);
+    const strikerFor = (team: TeamId, sign: 1 | -1): { x: number; z: number } =>
+      kickingOff === team
+        ? { x: sign * kickoffX, z: kickerZ }
+        : { x: sign * (waiting - Math.abs(waitingBack)), z: waitingZ };
+
+    // A keeper may stand anywhere in front of its goal; off-centre is normal.
+    // Drawn per keeper rather than once for both, or the two ends start as
+    // exact reflections of each other every time - which is a symmetry real
+    // play does not have, and quietly makes the two halves of the field less
+    // independent than the variation was added to make them.
+    const keeperFor = (sign: 1 | -1): { x: number; z: number } => ({
+      x: sign * (goalieX + Math.abs(jitter(25))),
+      z: jitter(60),
+    });
+
+    const cyanS = strikerFor('cyan', cyanSign);
+    const cyanK = keeperFor(cyanSign);
+    const yellowS = strikerFor('yellow', yellowSign);
+    const yellowK = keeperFor(yellowSign);
 
     this.robots = [
-      make('cyan-1', 'cyan', cyanStriker, 0, false),
-      make('cyan-2', 'cyan', cyanSign * goalieX, 0, true),
-      make('yellow-1', 'yellow', yellowStriker, 0, false),
-      make('yellow-2', 'yellow', yellowSign * goalieX, 0, true),
+      make('cyan-1', 'cyan', cyanS.x, cyanS.z, false),
+      make('cyan-2', 'cyan', cyanK.x, cyanK.z, true),
+      make('yellow-1', 'yellow', yellowS.x, yellowS.z, false),
+      make('yellow-2', 'yellow', yellowK.x, yellowK.z, true),
     ];
+    // Whatever the draw, nobody starts inside anybody: the separation pass
+    // would otherwise shove them apart before the whistle and the restart
+    // would not be the one that was set. Only ever the two of a non-kicking
+    // team are close enough for this to bite.
+    separateAtRestart(this.robots);
     for (const robot of this.robots) {
       const was = stillRemoved.get(robot.id);
       if (!was) continue;

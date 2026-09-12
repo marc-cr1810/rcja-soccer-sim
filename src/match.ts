@@ -205,6 +205,11 @@ export class Match {
     this.world = new World({
       league,
       halfLengthSeconds: this.halfSeconds,
+      // The seed has to reach the restart placement, not only the noise.
+      // Nothing draws from the noise streams at all with ideal sensors, so a
+      // seed that went no further left every seeded match identical - and a
+      // bench or ladder iterating seeds averaging over a single sample.
+      placementSeed: opts.seed ?? 1,
       inclined: opts.inclined ?? false,
       commsEnabled: league.commsAllowed,
       autoResolve: opts.autoResolve,
