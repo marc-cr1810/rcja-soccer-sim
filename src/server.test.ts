@@ -6,12 +6,20 @@
  * more than the audience can see would be a way to leak a match.
  */
 
+import { mkdtemp, readdir } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { WebSocket } from 'ws';
 import { Match, type MatchAgents } from './match';
+import { PROTOCOL_VERSION } from './protocol';
 import { referenceTeam } from './reference';
 import { waller } from './bots';
 import { MatchServer } from './server';
+import { sandboxAvailable } from './sandbox';
 import { VIEW_HZ, type ViewMessage } from './view';
+
+const PYTHON_LIB_DIR = resolve(import.meta.dirname, '../python');
 
 function agents(): MatchAgents {
   return {
@@ -228,6 +236,172 @@ describe('the match server', () => {
     expect([403, 404]).toContain(res.status);
     expect(await res.text()).not.toContain('rcja-soccer-sim');
   });
+});
+
+describe('the private agent socket', () => {
+  const servers: MatchServer[] = [];
+
+  afterEach(async () => {
+    for (const s of servers.splice(0)) await s.close();
+  });
+
+  async function start(): Promise<MatchServer> {
+    const server = new MatchServer({ port: 0, realtime: false });
+    servers.push(server);
+    await server.listen();
+    return server;
+  }
+
+  /** `unix://<path>?path=<encoded>` (this project's own convention) to `ws+unix://<path>:<path>` (ws's). */
+  function wsUnixUrl(agentSocketUrl: string): string {
+    const match = /^unix:\/\/(.+)\?path=(.+)$/.exec(agentSocketUrl);
+    if (!match) throw new Error(`unexpected agentSocketUrl shape: ${agentSocketUrl}`);
+    return `ws+unix://${match[1]}:${decodeURIComponent(match[2]!)}`;
+  }
+
+  it('feeds the same gateway as the public /agent path', async () => {
+    const server = await start();
+    const ws = new WebSocket(wsUnixUrl(server.agentSocketUrl));
+    await new Promise<void>((ok, fail) => {
+      ws.once('open', () => ok());
+      ws.once('error', fail);
+    });
+    ws.send(JSON.stringify({ type: 'join', protocol: PROTOCOL_VERSION, team: 'cyan', robot: 1 }));
+    const message = await new Promise<{ type: string }>((ok) => {
+      ws.once('message', (data) => ok(JSON.parse(String(data)) as { type: string }));
+    });
+    expect(message.type).toBe('welcome');
+    expect(server.agents.filled).toBe(1);
+    ws.close();
+  });
+
+  it('is separate from the public port — no path can reach it from outside', async () => {
+    const server = await start();
+    // The whole point is that this is a filesystem path, not something with a
+    // port a network client could be pointed at instead.
+    expect(server.agentSocketUrl.startsWith('unix://')).toBe(true);
+  });
+});
+
+describe.skipIf(!sandboxAvailable())('POST /submit', () => {
+  const servers: MatchServer[] = [];
+
+  afterEach(async () => {
+    for (const s of servers.splice(0)) await s.close();
+  });
+
+  async function start(): Promise<{ port: number; submissionsDir: string }> {
+    const submissionsDir = await mkdtemp(join(tmpdir(), 'rcja-server-submit-test-'));
+    const server = new MatchServer({
+      port: 0,
+      realtime: false,
+      pythonLibDir: PYTHON_LIB_DIR,
+      submissionsDir,
+    });
+    servers.push(server);
+    return { port: await server.listen(), submissionsDir };
+  }
+
+  const ROBOT_PY = `
+import argparse
+parser = argparse.ArgumentParser()
+parser.add_argument("--team", default="cyan")
+parser.add_argument("--number", type=int, default=1)
+parser.add_argument("--name", default=None)
+parser.add_argument("--url", default="ws://localhost:8080/agent")
+args = parser.parse_args()
+
+from rcja_soccer import Robot
+
+robot = Robot(team=args.team, number=args.number, name=args.name)
+
+@robot.tick
+def think(s, me):
+    return robot.coast()
+
+robot.run(args.url)
+`;
+
+  function push(manifest: Record<string, unknown>, files: Record<string, string> = {}): Record<string, string> {
+    const encoded: Record<string, string> = { 'manifest.json': b64(JSON.stringify(manifest)) };
+    for (const [name, content] of Object.entries(files)) encoded[name] = b64(content);
+    return encoded;
+  }
+
+  function b64(text: string): string {
+    return Buffer.from(text).toString('base64');
+  }
+
+  it('accepts a valid robot folder and stores it under <team>/<robot>', async () => {
+    const { port, submissionsDir } = await start();
+    const res = await fetch(`http://127.0.0.1:${port}/submit`, {
+      method: 'POST',
+      body: JSON.stringify({
+        files: push({ team: 'Test Team', robot: 1, entry: 'robot.py' }, { 'robot.py': ROBOT_PY }),
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { ok: boolean; team: string; robot: number };
+    expect(body).toEqual({ ok: true, team: 'Test Team', robot: 1 });
+
+    const landed = await readdir(join(submissionsDir, 'test-team', '1'));
+    expect(landed.sort()).toEqual(['manifest.json', 'robot.py']);
+  }, 15000);
+
+  it('rejects a bad manifest and writes nothing', async () => {
+    const { port, submissionsDir } = await start();
+    const res = await fetch(`http://127.0.0.1:${port}/submit`, {
+      method: 'POST',
+      body: JSON.stringify({ files: push({ team: 'Test Team', robot: 9, entry: 'robot.py' }, { 'robot.py': ROBOT_PY }) }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { ok: boolean; reason: string };
+    expect(body.ok).toBe(false);
+    expect(body.reason).toContain('robot');
+    await expect(readdir(submissionsDir)).resolves.toEqual([]);
+  });
+
+  it('rejects a path that is not a flat, safe filename', async () => {
+    const { port } = await start();
+    const res = await fetch(`http://127.0.0.1:${port}/submit`, {
+      method: 'POST',
+      body: JSON.stringify({ files: { '../../etc/passwd': b64('x'), 'manifest.json': b64('{}') } }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { ok: boolean; reason: string };
+    expect(body.ok).toBe(false);
+    expect(body.reason).toContain('safe filename');
+  });
+
+  it('rejects an oversized push', async () => {
+    const { port } = await start();
+    const res = await fetch(`http://127.0.0.1:${port}/submit`, {
+      method: 'POST',
+      body: JSON.stringify({ files: { 'robot.py': b64('x'.repeat(3 * 1024 * 1024)) } }),
+    });
+    expect(res.status).toBe(413);
+  });
+
+  it("does not touch the other robot's slot when one is repushed", async () => {
+    const { port, submissionsDir } = await start();
+    const submit = (robot: number): Promise<Response> =>
+      fetch(`http://127.0.0.1:${port}/submit`, {
+        method: 'POST',
+        body: JSON.stringify({
+          files: push({ team: 'Test Team', robot, entry: 'robot.py' }, { 'robot.py': ROBOT_PY }),
+        }),
+      });
+
+    expect((await submit(1)).status).toBe(200);
+    expect((await submit(2)).status).toBe(200);
+    // Re-push robot 1 with a manifest that fails validation; robot 2 must survive untouched.
+    await fetch(`http://127.0.0.1:${port}/submit`, {
+      method: 'POST',
+      body: JSON.stringify({ files: push({ team: 'Test Team', robot: 1, entry: 'missing.py' }) }),
+    });
+
+    await expect(readdir(join(submissionsDir, 'test-team', '2'))).resolves.toContain('robot.py');
+  }, 15000);
 });
 
 describe('a robot program that goes away', () => {

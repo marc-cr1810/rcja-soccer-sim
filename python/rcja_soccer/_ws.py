@@ -18,7 +18,7 @@ import os
 import socket
 import ssl
 import struct
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 _OP_CONTINUATION = 0x0
 _OP_TEXT = 0x1
@@ -39,6 +39,23 @@ class WebSocket:
 
     def __init__(self, url: str, timeout: float | None = 10.0) -> None:
         parsed = urlparse(url)
+
+        if parsed.scheme == "unix":
+            # A filesystem socket instead of a network one. Nothing a robot
+            # program writes against ever needs this directly - it exists so
+            # a submission being validated inside a sandboxed, network-less
+            # process can still reach the one local endpoint that is meant
+            # to check it, without opening a network hole to do it.
+            self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            if timeout is not None:
+                self._sock.settimeout(timeout)
+            self._sock.connect(parsed.path)
+            request_path = (parse_qs(parsed.query).get("path") or ["/"])[0]
+            self._buffer = b""
+            self._closed = False
+            self._handshake("localhost", 80, request_path, secure=False)
+            return
+
         secure = parsed.scheme in ("wss", "https")
         host = parsed.hostname or "localhost"
         port = parsed.port or (443 if secure else 80)

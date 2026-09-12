@@ -5,9 +5,10 @@ Simulation** league: two robots a side on the RCJA field, under the RCJA rules,
 driven by student Python instead of hand-built hardware.
 
 **Status: it plays, and you can watch it.** Matches run headless at about 400×
-real time, or live on a screen at the venue. What is missing is the part where
-a team's own program is the thing playing — right now both sides are the
-reference agent.
+real time, or live on a screen at the venue. A team can push a robot folder
+and have it validated and sandboxed on arrival, and `npm run serve` loads and
+plays whatever has been pushed under the names given to `--home`/`--away`,
+falling back to the reference agent for any robot nobody has pushed yet.
 
 ## What this is not
 
@@ -57,10 +58,13 @@ npm run serve            # then open http://localhost:8080
 | `src/server.ts` | **New.** The match server: runs matches, streams them. |
 | `src/gateway.ts` | **New.** Where robot programs connect, on the same port. |
 | `src/bench.ts` | **New.** Measures a robot program and says what is wrong with it. |
+| `src/manifest.ts` `src/submission.ts` | **New.** A team folder's manifest, and validating a push on arrival. |
+| `src/sandbox.ts` | **New.** Running a submission with no network and no filesystem outside its own folder. |
+| `src/lineup.ts` | **New.** Turning `--home`/`--away` into the submissions to spawn and play. |
 | `viewer/` | **New.** The spectator client, using the lab's renderer. |
 | `python/` | **New.** The client library teams write against, and examples. |
 
-`npm test` runs 177 tests.
+`npm test` runs 242 tests.
 
 ### Python robots
 
@@ -74,6 +78,54 @@ cd python && PYTHONPATH=. python3 examples/play.py
 The library has **no dependencies**, including its WebSocket client, because
 the schools this league exists to reach are the ones where pip is behind a
 proxy or offline, and a dependency is a reason a team cannot enter.
+
+### Pushing a robot
+
+A team folder is one robot: `manifest.json` naming the team, the robot
+number, and which `.py` file to run, plus that file and anything it imports
+locally. The two robots on a side are pushed independently — typically from
+two different laptops, since they are routinely written by two different
+students who should not have to merge their code together first.
+
+```bash
+python python/submit.py --dir path/to/your/robot --url http://venue:8080/submit
+```
+
+The server validates on arrival — the manifest parses, the entry point is
+valid Python, everything it imports is the standard library or `rcja_soccer`
+(a venue has no internet and no pip), and it answers one sensor frame — and
+rejects a bad push with a specific reason, before it ever replaces a team's
+last-good folder for that robot. The one check that runs the submission's own
+code does it sandboxed (`src/sandbox.ts`, via `bwrap`): no network, and no
+filesystem visible beyond the platform's library and the submission's own
+folder. Requires `bwrap` and a delegated user cgroup (true of an ordinary
+login session on any reasonably modern Linux distro) on the machine running
+the server.
+
+```bash
+npm run serve -- --home "Your Team Name" --away "Their Team Name"
+```
+
+Whichever of the four seats has a validated submission under that name plays
+it — spawned sandboxed by the server itself, reached over the same kind of
+network-less Unix socket the validation check uses, held open for the whole
+match rather than one tick (`src/lineup.ts`). Any seat nobody has pushed
+falls back to the reference agent, so a team with one robot pushed and one
+still being written, or a lone submission scrimmaging the reference team,
+both just work. A submission that crashes mid-tournament is respawned (up to
+five times) rather than leaving that seat empty for the rest of the event.
+
+Each spawned robot runs inside its own `systemd-run --user --scope` cgroup, on
+top of the same `bwrap` sandbox validation uses — a CPU quota and a memory
+ceiling, enforced by the kernel rather than a `ulimit` inside the sandbox.
+The CPU one *throttles* rather than kills: a runaway busy-loop is slowed down
+to its share of one core for as long as it keeps running, rather than the
+match losing that robot at an arbitrary cutoff unrelated to whether the game
+is still going. A memory ceiling still ends a process that blows through it,
+same as before, just measured against what it is actually using rather than
+how much address space it reserved. Not yet built: server-issued identity at
+the join, so a submission's credentials come from the platform rather than
+its own say-so.
 
 ### Watching a match
 
@@ -203,11 +255,13 @@ which is what makes it usable in a loop.
 
 ## Next
 
-1. Pyodide in the browser, for teams who cannot install Python at all.
-2. A referee console: start, pause, resume, and the calls `World` already has
+1. Server-issued identity at the join — a submission's credentials (which
+   seat it is, which team it belongs to) come from the platform, replacing
+   the join message's own self-declared say-so it still relies on today.
+2. Pyodide in the browser, for teams who cannot install Python at all.
+3. A referee console: start, pause, resume, and the calls `World` already has
    methods for.
-3. Tournament running — a draw, a table, and results that persist.
-4. Submission: a team folder, pushed to a venue server and validated on arrival.
+4. Tournament running — a draw, a table, and results that persist.
 
 Known and recorded as tests rather than hidden: the reference agent still scores
 the occasional own goal against a motionless opponent (0–5 a match, down from

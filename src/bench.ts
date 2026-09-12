@@ -531,7 +531,8 @@ export async function runBench(
   }
 }
 
-function waitForSeats(server: MatchServer, seats: string[], timeout: number): Promise<void> {
+/** Wait for exactly these seat ids to connect — not necessarily all four. */
+export function waitForSeats(server: MatchServer, seats: string[], timeout: number): Promise<void> {
   const deadline = Date.now() + timeout * 1000;
   return new Promise((ok, fail) => {
     const poll = (): void => {

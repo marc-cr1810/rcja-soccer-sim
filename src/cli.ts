@@ -13,6 +13,7 @@ import { referenceTeam } from './reference';
 import { runLadder, formatLadder, type Entry } from './ladder';
 import { ReferenceAgent } from './reference';
 import { botRoster } from './bots';
+import { resolveLineup, spawnLineup, type SpawnedLineup } from './lineup';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { DEFAULT_OPTIONS, formatBench, runBench, type BenchResult } from './bench';
@@ -87,6 +88,11 @@ function viewerRoot(): string | undefined {
   return existsSync(built) ? built : undefined;
 }
 
+function pythonLibDir(): string | undefined {
+  const dir = resolve('python');
+  return existsSync(dir) ? dir : undefined;
+}
+
 async function serve(flags: Map<string, string>): Promise<void> {
   const root = viewerRoot();
   const idealSensors = flags.get('noisy-sensors') !== 'true';
@@ -96,6 +102,7 @@ async function serve(flags: Map<string, string>): Promise<void> {
     realtime: flags.get('fast') !== 'true',
     viewHz: num(flags, 'view-hz', 60),
     idealSensors,
+    pythonLibDir: pythonLibDir(),
   });
   const port = await server.listen();
 
@@ -119,6 +126,40 @@ async function serve(flags: Map<string, string>): Promise<void> {
     console.log(`  waiting for all four…\n`);
   }
 
+  /*
+   * `--home`/`--away` double as a lookup: whichever of the four seats has a
+   * validated submission under that team's name plays it, sandboxed; any
+   * seat that does not falls back to the built-in agent `agentsFor` already
+   * supplies for every seat regardless. Not attempted in `--agents` mode,
+   * which already means "wait for four laptops" — the two are not something
+   * a match needs at once.
+   */
+  let lineup: SpawnedLineup | null = null;
+  if (!waitForAgents && pythonLibDir()) {
+    const libDir = pythonLibDir()!;
+    const resolved = await resolveLineup(server.submissionsDirectory, teams);
+    const slots = ['cyan-1', 'cyan-2', 'yellow-1', 'yellow-2'] as const;
+    const origin = (id: string): string =>
+      resolved[id] ? `${teams[id.startsWith('cyan') ? 'cyan' : 'yellow']} (submission)` : 'built-in';
+    console.log(`  lineup:    ${slots.map((id) => `${id}=${origin(id)}`).join('  ')}`);
+
+    const ids = Object.keys(resolved);
+    if (ids.length > 0) {
+      lineup = await spawnLineup(server, resolved, { pythonLibDir: libDir }, (line) =>
+        console.log(`  ${line}`),
+      );
+      const missing = ids.filter((id) => !lineup!.transports[id]);
+      if (missing.length > 0) {
+        console.log(`  did not connect in time, playing built-in instead: ${missing.join(', ')}`);
+      }
+    }
+    console.log();
+  }
+  process.on('SIGINT', () => {
+    lineup?.stop();
+    process.exit(0);
+  });
+
   // Keep playing. A screen in a hall should never be showing nothing, and an
   // organiser should not have to restart anything between matches.
   let seed = num(flags, 'seed', 1);
@@ -132,7 +173,7 @@ async function serve(flags: Map<string, string>): Promise<void> {
     const dropouts: string[] = [];
     const result = await server.play({
       agents: agentsFor(flags.get('opponent')),
-      transports: waitForAgents ? server.agents.transports() : undefined,
+      transports: waitForAgents ? server.agents.transports() : lineup?.transports,
       teams,
       halfSeconds,
       seed,

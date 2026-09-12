@@ -13,13 +13,16 @@
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { readFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { extname, join, normalize, resolve } from 'node:path';
 import { WebSocketServer, type WebSocket } from 'ws';
 
 import { Match, CONTROL_HZ, PHYSICS_HZ, type MatchOptions, type MatchResult } from './match';
 import { VIEW_HZ, type ViewMessage } from './view';
 import { AGENT_PATH, AgentGateway } from './gateway';
+import { slugifyTeam } from './manifest';
+import { validateSubmission } from './submission';
 
 export interface ServerOptions {
   port?: number;
@@ -31,7 +34,16 @@ export interface ServerOptions {
   viewHz?: number;
   /** Whether sensors operate without noise/drift/latency. Defaults to true. */
   idealSensors?: boolean;
+  /** The repo's python/ directory, for validating a push. No /submit without one. */
+  pythonLibDir?: string;
+  /** Where validated pushes are kept, as <team>/<robot>. Defaults to ./submissions. */
+  submissionsDir?: string;
 }
+
+const MAX_SUBMIT_BYTES = 2 * 1024 * 1024;
+const MAX_SUBMIT_FILES = 50;
+/** Flat filenames only — no subdirectories, this slice's whole team folder is one level. */
+const SAFE_SUBMIT_PATH = /^[A-Za-z0-9_.-]+$/;
 
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -48,13 +60,30 @@ export class MatchServer {
   private readonly viewers = new Set<WebSocket>();
   /** Where robot programs connect, on the same port as the viewers. */
   readonly agents = new AgentGateway();
+  /**
+   * A second, private door to the same gateway, on a Unix socket rather than
+   * the public port.
+   *
+   * A sandboxed submission has no network — that is the point of sandboxing
+   * it — so it cannot reach the public `/agent` path over TCP even on
+   * loopback. This is the same escape hatch `submission.ts` uses for its
+   * one-tick check, held open for the server's whole lifetime instead of one
+   * validation: a filesystem path bound into the sandbox, not a network hole.
+   */
+  private readonly agentSocket = createServer();
+  private agentSocketPath: string | null = null;
+  private agentScratchDir: string | null = null;
   private current: Match | null = null;
   private readonly viewerRoot: string | null;
   private readonly realtime: boolean;
+  private readonly pythonLibDir: string | null;
+  private readonly submissionsDir: string;
 
   constructor(private readonly opts: ServerOptions = {}) {
     this.viewerRoot = opts.viewerRoot ? resolve(opts.viewerRoot) : null;
     this.realtime = opts.realtime ?? true;
+    this.pythonLibDir = opts.pythonLibDir ? resolve(opts.pythonLibDir) : null;
+    this.submissionsDir = resolve(opts.submissionsDir ?? 'submissions');
 
     this.http.on('upgrade', (req, socket, head) => {
       // One port for both, split by path: a venue has enough to configure
@@ -64,6 +93,10 @@ export class MatchServer {
         if (agent) this.agents.accept(ws);
         else this.join(ws);
       });
+    });
+    this.agentSocket.on('upgrade', (req, socket, head) => {
+      // No path split here: this door only ever speaks the agent protocol.
+      this.wss.handleUpgrade(req, socket, head, (ws) => this.agents.accept(ws));
     });
   }
 
@@ -76,6 +109,10 @@ export class MatchServer {
    * pointed at port 0 and nothing could connect.
    */
   async listen(): Promise<number> {
+    this.agentScratchDir = await mkdtemp(join(tmpdir(), 'rcja-agent-socket-'));
+    this.agentSocketPath = join(this.agentScratchDir, 'agents.sock');
+    await new Promise<void>((ok) => this.agentSocket.listen(this.agentSocketPath, ok));
+
     await new Promise<void>((ok) => this.http.listen(this.opts.port ?? 8080, ok));
     const address = this.http.address();
     if (address === null || typeof address === 'string') {
@@ -84,12 +121,42 @@ export class MatchServer {
     return address.port;
   }
 
+  /**
+   * Where a sandboxed, network-less submission connects for a whole match —
+   * a Unix socket, with the request path baked into the query string since
+   * there is no host/port half of the URL to carry it. Matches the `unix://`
+   * convention `python/rcja_soccer/_ws.py` already understands.
+   */
+  get agentSocketUrl(): string {
+    if (!this.agentSocketPath) {
+      throw new Error('server is not listening yet — call listen() first');
+    }
+    return `unix://${this.agentSocketPath}?path=${encodeURIComponent(AGENT_PATH)}`;
+  }
+
+  /**
+   * The directory the agent socket lives in.
+   *
+   * A caller sandboxing its own connection to `agentSocketUrl` (`lineup.ts`
+   * does, for a match-time submission) has to bind this in — the socket path
+   * is otherwise just as invisible to a sandboxed process as everything else
+   * on the host is.
+   */
+  get agentSocketDir(): string {
+    if (!this.agentScratchDir) {
+      throw new Error('server is not listening yet — call listen() first');
+    }
+    return this.agentScratchDir;
+  }
+
   async close(): Promise<void> {
     this.agents.closeAll();
     for (const ws of this.viewers) ws.close();
     this.viewers.clear();
     await new Promise<void>((ok) => this.wss.close(() => ok()));
     await new Promise<void>((ok) => this.http.close(() => ok()));
+    await new Promise<void>((ok) => this.agentSocket.close(() => ok()));
+    if (this.agentScratchDir) await rm(this.agentScratchDir, { recursive: true, force: true }).catch(() => {});
   }
 
   /** How many screens are watching. */
@@ -100,6 +167,11 @@ export class MatchServer {
   /** The match in progress, for a caller that needs to ask it something. */
   get currentMatch(): Match | null {
     return this.current;
+  }
+
+  /** Where a validated push lands, as `<slugified team>/<robot>`. */
+  get submissionsDirectory(): string {
+    return this.submissionsDir;
   }
 
   private join(ws: WebSocket): void {
@@ -249,13 +321,17 @@ export class MatchServer {
     return match.result();
   }
 
-  /** Serve the built viewer, if there is one. */
+  /** Serve the built viewer, or a push to /submit, if there is one. */
   private async serve(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const url = (req.url ?? '/').split('?')[0] ?? '/';
+    if (req.method === 'POST' && url === '/submit') {
+      await this.handleSubmit(req, res);
+      return;
+    }
     if (!this.viewerRoot) {
       res.writeHead(404).end('no viewer built; run: npm run build:viewer');
       return;
     }
-    const url = (req.url ?? '/').split('?')[0] ?? '/';
     const wanted = url === '/' ? 'index.html' : url.slice(1);
     // Normalise before joining, so a path cannot climb out of the viewer root.
     const file = join(this.viewerRoot, normalize(wanted));
@@ -269,6 +345,139 @@ export class MatchServer {
       res.end(body);
     } catch {
       res.writeHead(404).end('not found');
+    }
+  }
+
+  private respondJson(res: ServerResponse, status: number, body: unknown): void {
+    res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify(body));
+  }
+
+  /**
+   * Read the request body, or `null` if it is over `limit`.
+   *
+   * An oversized body is drained rather than the connection being cut: a
+   * destroyed socket answers a client with a reset rather than the 413 this
+   * is trying to send, which is a worse failure than the one being guarded
+   * against.
+   */
+  private readBody(req: IncomingMessage, limit: number): Promise<Buffer | null> {
+    return new Promise((resolveBody) => {
+      const chunks: Buffer[] = [];
+      let total = 0;
+      let over = false;
+      req.on('data', (chunk: Buffer) => {
+        total += chunk.length;
+        if (total > limit) {
+          over = true;
+          return;
+        }
+        chunks.push(chunk);
+      });
+      req.on('end', () => {
+        resolveBody(over ? null : Buffer.concat(chunks));
+      });
+      req.on('error', () => {
+        resolveBody(null);
+      });
+    });
+  }
+
+  /**
+   * One robot's folder, pushed as `{ files: { path: base64 } }`.
+   *
+   * Written to a scratch directory and validated there first; only a pass
+   * gets moved into the real submissions tree, so a rejected push can never
+   * clobber a team's last-good one for that robot.
+   */
+  private async handleSubmit(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (!this.pythonLibDir) {
+      this.respondJson(res, 400, {
+        ok: false,
+        reason: 'this server has no python library configured; nothing can be validated',
+      });
+      return;
+    }
+
+    const body = await this.readBody(req, MAX_SUBMIT_BYTES);
+    if (body === null) {
+      this.respondJson(res, 413, { ok: false, reason: 'push too large' });
+      return;
+    }
+
+    let payload: { files?: unknown };
+    try {
+      payload = JSON.parse(body.toString('utf8')) as { files?: unknown };
+    } catch {
+      this.respondJson(res, 400, { ok: false, reason: 'body is not valid JSON' });
+      return;
+    }
+
+    const rawFiles = payload.files;
+    if (!rawFiles || typeof rawFiles !== 'object' || Array.isArray(rawFiles)) {
+      this.respondJson(res, 400, {
+        ok: false,
+        reason: '"files" must be an object of path -> base64 content',
+      });
+      return;
+    }
+
+    const entries = Object.entries(rawFiles as Record<string, unknown>);
+    if (entries.length === 0) {
+      this.respondJson(res, 400, { ok: false, reason: 'no files in the push' });
+      return;
+    }
+    if (entries.length > MAX_SUBMIT_FILES) {
+      this.respondJson(res, 400, {
+        ok: false,
+        reason: `too many files (${entries.length}, limit ${MAX_SUBMIT_FILES})`,
+      });
+      return;
+    }
+
+    const decoded = new Map<string, Buffer>();
+    for (const [path, value] of entries) {
+      if (!SAFE_SUBMIT_PATH.test(path)) {
+        this.respondJson(res, 400, {
+          ok: false,
+          reason: `"${path}" is not a safe filename — no subdirectories, only letters, digits, ".", "_", "-"`,
+        });
+        return;
+      }
+      if (typeof value !== 'string') {
+        this.respondJson(res, 400, { ok: false, reason: `"${path}" must be base64 text` });
+        return;
+      }
+      decoded.set(path, Buffer.from(value, 'base64'));
+    }
+
+    const scratch = await mkdtemp(join(tmpdir(), 'rcja-submit-'));
+    try {
+      for (const [path, buf] of decoded) {
+        await writeFile(join(scratch, path), buf);
+      }
+
+      const result = await validateSubmission(scratch, { pythonLibDir: this.pythonLibDir });
+      if (!result.ok) {
+        this.respondJson(res, 400, { ok: false, reason: result.reason });
+        return;
+      }
+
+      const manifest = result.value;
+      const teamDir = join(this.submissionsDir, slugifyTeam(manifest.team));
+      const target = join(teamDir, String(manifest.robot));
+      await mkdir(teamDir, { recursive: true });
+      await rm(target, { recursive: true, force: true });
+      try {
+        await rename(scratch, target);
+      } catch {
+        // Scratch and the submissions tree can be on different filesystems
+        // (a tmpfs /tmp is common), which a plain rename cannot cross.
+        await cp(scratch, target, { recursive: true });
+      }
+      this.respondJson(res, 200, { ok: true, team: manifest.team, robot: manifest.robot });
+    } finally {
+      await rm(scratch, { recursive: true, force: true }).catch(() => {});
     }
   }
 }
