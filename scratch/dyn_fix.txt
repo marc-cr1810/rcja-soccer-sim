@@ -1,0 +1,43 @@
+
+python-vs-python  ideal  over 10 seeds x 45s halves
+SCORE   cyan 16 - 9 yellow   (goals 25, 0 from a detected kick)
+
+-- possession / field position (per robot, per half, % of live steps) --
+  cyan-1   h1: poss 15.8% near 32.1% att 4.9% own 34.7%   h2: poss 11.1% near 30.1% att 43.2% own 10.5%
+  yellow-1 h1: poss 12.2% near 33.4% att 8.9% own 44.2%   h2: poss 15.2% near 30.8% att 32.7% own 8.7%
+  cyan-2   h1: poss 0.1% near 1.3% att 0% own 100%   h2: poss 0.7% near 4.6% att 100% own 0%
+  yellow-2 h1: poss 0.6% near 5% att 0% own 100%   h2: poss 0.2% near 2.7% att 100% own 0%
+
+-- ball in attacking third, per half (% of live steps) --
+  h1: cyan attacking 14.5%   yellow attacking 9.1%
+  h2: cyan attacking 16.9%   yellow attacking 11.3%
+
+-- restarts won (first touch after a goal/kickoff), per half --
+  h1: cyan 14   yellow 15
+  h2: cyan 5   yellow 11
+
+-- kicks (per robot, per half)  [per match avg] --
+  cyan-1    h1  tot 7.80 | goals 0.00 | intMouth 1.80 | blkOut 3.30 | offTarget 2.20 | svd/held 0.50 | meanRange 862mm
+  cyan-1    h2  tot 4.10 | goals 0.00 | intMouth 0.30 | blkOut 1.60 | offTarget 1.20 | svd/held 1.00 | meanRange 889mm
+  yellow-1  h1  tot 3.10 | goals 0.00 | intMouth 0.50 | blkOut 1.30 | offTarget 0.90 | svd/held 0.40 | meanRange 914mm
+  yellow-1  h2  tot 7.00 | goals 0.00 | intMouth 1.10 | blkOut 2.80 | offTarget 1.80 | svd/held 1.30 | meanRange 853mm
+  cyan-2    h1  tot 0.10 | goals 0.00 | intMouth 0.10 | blkOut 0.00 | offTarget 0.00 | svd/held 0.00 | meanRange 1709mm
+  cyan-2    h2  tot 0.20 | goals 0.00 | intMouth 0.00 | blkOut 0.00 | offTarget 0.00 | svd/held 0.20 | meanRange 1455mm
+  yellow-2  h1  tot 0.10 | goals 0.00 | intMouth 0.00 | blkOut 0.00 | offTarget 0.00 | svd/held 0.10 | meanRange 1436mm
+  yellow-2  h2  tot 0.10 | goals 0.00 | intMouth 0.10 | blkOut 0.00 | offTarget 0.00 | svd/held 0.00 | meanRange 0mm
+
+-- ball out of play: last toucher team & where, per half --
+  h1: cyan 32  yellow 80  untouched 0   (out at +x end 27, -x end 16)
+  h2: cyan 52  yellow 48  untouched 0   (out at +x end 25, -x end 16)
+
+-- removals (per robot, total over seeds) --
+  cyan-1    none
+  yellow-1  none
+  cyan-2    none
+  yellow-2  none
+
+-- goals per half --
+  h1: cyan 15  yellow 4   at +x 15 / -x 4   byown-touch 11/3   leaked-through-opp 5
+        toucher: cyan-1 x12 yellow-1 x5 yellow-2 x2   mean-gap-after-restart 10.1s, goals<15s 16
+  h2: cyan 1  yellow 5   at +x 5 / -x 1   byown-touch 1/3   leaked-through-opp 2
+        toucher: yellow-1 x3 cyan-1 x1 cyan-2 x2   mean-gap-after-restart 19.5s, goals<15s 1
