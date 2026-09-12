@@ -9,6 +9,7 @@
  */
 import { spawn, type ChildProcess } from 'node:child_process';
 import { MatchServer } from '../src/server';
+import { playLockstep } from '../src/lockstep';
 import { referenceTeam } from '../src/reference';
 import { World } from '../src/world';
 
@@ -48,6 +49,9 @@ const WHO = process.argv.find((a) => a.startsWith('--who='))?.split('=')[1] ?? '
 // Realistic sensors by default. With idealSensors the reference keeper is never
 // beaten and a match ends 0-0, which is not a regime any bias can be read from.
 const IDEAL = process.argv.includes('--ideal');
+// --lockstep: wait for every program every cycle. Removes the poll-order
+// latency asymmetry entirely, and makes each seed reproducible.
+const LOCKSTEP = process.argv.includes('--lockstep');
 /*
  * Break the kick-off/ends confound.
  *
@@ -124,7 +128,7 @@ async function waitForSeats(server: MatchServer, ids: string[]): Promise<void> {
   }
 }
 
-async function playSeed(seed: number): Promise<{ goals: Goal[]; meanX: Record<string, [number, number]>; slots: any; ball: [number, number, number] }> {
+async function playSeed(seed: number): Promise<{ goals: Goal[]; meanX: Record<string, [number, number]>; slots: any; ball: [number, number, number]; hist: number[]; parked: number }> {
   const server = new MatchServer({ port: 0, realtime: false, idealSensors: IDEAL });
   const port = await server.listen();
   const url = `ws://localhost:${port}/agent`;
@@ -156,6 +160,8 @@ async function playSeed(seed: number): Promise<{ goals: Goal[]; meanX: Record<st
     let ballSum = 0;
     let ballN = 0;
     let ballPlus = 0;
+    const hist: number[] = new Array(12).fill(0);
+    let parked = 0;
     let lastKickedOff: string | null = null;
     const observe = (match: any): void => {
       const w = match.world;
@@ -177,6 +183,17 @@ async function playSeed(seed: number): Promise<{ goals: Goal[]; meanX: Record<st
         ballSum += w.ball.x;
         ballN += 1;
         if (w.ball.x > 0) ballPlus += 1;
+        // Histogram in 200 mm bins from -1200 to +1200: a mean can be moved by
+        // a tail, and "where does the ball actually sit" is the question.
+        // The ball parked on the centre spot is a third of all samples and is
+        // not "on the +x side" - count it separately or it swamps the bin that
+        // happens to contain zero.
+        if (Math.abs(w.ball.x) < 1) parked += 1;
+        else {
+          const band = Math.min(5, Math.floor(Math.abs(w.ball.x) / 200));
+          if (w.ball.x > 0) hist[6 + band] = (hist[6 + band] ?? 0) + 1;
+          else hist[5 - band] = (hist[5 - band] ?? 0) + 1;
+        }
         for (const r of w.robots) {
           const key = `${r.id}-h${w.half}`;
           const a = acc[key] ?? (acc[key] = [0, 0]);
@@ -186,15 +203,16 @@ async function playSeed(seed: number): Promise<{ goals: Goal[]; meanX: Record<st
       }
     };
 
-    const result = await server.play({
+    const common = {
       agents: agents as never,
       transports,
       halfSeconds: HALF,
       seed,
       idealSensors: IDEAL,
       observe: observe as never,
-    });
-    return { goals, meanX: acc, slots: result.slots, ball: [ballSum, ballN, ballPlus] as [number, number, number] };
+    };
+    const result = LOCKSTEP ? await playLockstep(common) : await server.play(common);
+    return { goals, meanX: acc, slots: result.slots, ball: [ballSum, ballN, ballPlus] as [number, number, number], hist, parked };
   } finally {
     for (const k of kids) {
       if (!k.pid) continue;
@@ -214,6 +232,8 @@ async function main(): Promise<void> {
   const meanX: Record<string, [number, number]> = {};
   const miss: Record<string, [number, number]> = {};
   const ball: [number, number, number] = [0, 0, 0];
+  const hist: number[] = new Array(12).fill(0);
+  let parked = 0;
   for (let seed = 1; seed <= SEEDS; seed++) {
     const r = await playSeed(seed);
     all.push(...r.goals);
@@ -228,6 +248,8 @@ async function main(): Promise<void> {
       a[1] += v.worstRun;
     }
     ball[0] += r.ball[0]; ball[1] += r.ball[1]; ball[2] += r.ball[2];
+    r.hist.forEach((v, i) => { hist[i] = (hist[i] ?? 0) + v; });
+    parked += r.parked;
     const p = r.goals.filter((g) => g.end === 'plus').length;
     console.log(`seed ${seed}: +x ${p}  -x ${r.goals.length - p}   ${r.goals.map((g) => `h${g.half}:${g.scorer}->${g.end}`).join(' ')}`);
   }
@@ -254,7 +276,7 @@ async function main(): Promise<void> {
     const s = all.filter(f);
     return `+x ${s.filter((g) => g.end === 'plus').length} / -x ${s.filter((g) => g.end === 'minus').length}`;
   };
-  console.log(`\n[${WHO}${IDEAL ? ' ideal' : ' noisy'}${SWAP_KICKOFF ? ' swapped-kickoff' : ''}] TOTAL goals ${all.length}:  ${at(() => true)}`);
+  console.log(`\n[${WHO}${IDEAL ? ' ideal' : ' noisy'}${LOCKSTEP ? ' lockstep' : ''}${SWAP_KICKOFF ? ' swapped-kickoff' : ''}] TOTAL goals ${all.length}:  ${at(() => true)}`);
   console.log(`  half 1: ${at((g) => g.half === 1)}      half 2: ${at((g) => g.half === 2)}`);
   console.log(`  by scorer: cyan ${all.filter((g) => g.scorer === 'cyan').length}  yellow ${all.filter((g) => g.scorer === 'yellow').length}`);
   console.log(`\n-- mean robot x, per half --`);
@@ -267,6 +289,19 @@ async function main(): Promise<void> {
   console.log(`  scored BY the team that kicked off: ${ko}   against it: ${all.length - ko}`);
   console.log(`\n-- ball position over all live steps --`);
   console.log(`  mean ball x ${(ball[0] / Math.max(1, ball[1])).toFixed(1)} mm     time with ball at +x: ${(100 * ball[2] / Math.max(1, ball[1])).toFixed(1)}%`);
+  const total = (hist.reduce((a, b) => a + b, 0) + parked) || 1;
+  console.log(`\n-- where the ball sits, 200mm bins (paired -x vs +x) --`);
+  console.log(`  parked on the centre spot: ${((100 * parked) / total).toFixed(2)}%`);
+  for (let i = 0; i < 6; i++) {
+    const lo = i * 200;
+    const minus = hist[5 - i] ?? 0;
+    const plus = hist[6 + i] ?? 0;
+    const pm = (100 * minus) / total;
+    const pp = (100 * plus) / total;
+    console.log(
+      `  |x| ${String(lo).padStart(4)}-${String(lo + 200).padStart(4)}mm   -x ${pm.toFixed(2).padStart(6)}%   +x ${pp.toFixed(2).padStart(6)}%   diff ${(pp - pm >= 0 ? '+' : '') + (pp - pm).toFixed(2)}%`,
+    );
+  }
   console.log(`\n-- missed control cycles per slot (sum over seeds) --`);
   for (const k of Object.keys(miss).sort()) console.log(`  ${k.padEnd(10)} missed ${String(miss[k][0]).padStart(7)}   worstRun ${miss[k][1]}`);
   process.exit(0);

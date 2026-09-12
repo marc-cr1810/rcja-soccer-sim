@@ -11,3 +11,4 @@ dist-referee/
 scratch/*.jsonl
 scratch/frames/
 scratch/rotframes/
+scratch/locframes.json

@@ -363,8 +363,19 @@ export class World {
     const kickoffX = ROBOT_RADIUS + bRadius + standoff;
     const cyanSign = sideSign('cyan');
     const yellowSign = sideSign('yellow');
-    const cyanStriker = cyanSign * (kickingOff === 'cyan' ? kickoffX : boxEdge - 45);
-    const yellowStriker = yellowSign * (kickingOff === 'yellow' ? kickoffX : boxEdge - 45);
+    // The waiting striker has to clear its own keeper as well as overlap the
+    // box. At `boxEdge - 45` it sat 195 mm from the keeper on `goalieX`, and
+    // two 110 mm robots need 220 - so the separation pass shoved them apart on
+    // the first step and the restart was never the one the referee set. Only
+    // the non-kicking team was ever affected, because it is the only one with
+    // two robots placed near each other.
+    //
+    // Backing off to a clear 220 keeps rule 5.4.5 satisfied: the body still
+    // overlaps the box line at `boxEdge`, which is what the rule asks for -
+    // part of each non-kicking robot inside the box, not all of it.
+    const waiting = Math.min(boxEdge - 45, goalieX - 2 * ROBOT_RADIUS);
+    const cyanStriker = cyanSign * (kickingOff === 'cyan' ? kickoffX : waiting);
+    const yellowStriker = yellowSign * (kickingOff === 'yellow' ? kickoffX : waiting);
 
     this.robots = [
       make('cyan-1', 'cyan', cyanStriker, 0, false),

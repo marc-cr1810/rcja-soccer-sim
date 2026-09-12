@@ -47,6 +47,18 @@ export interface Transport {
    * is a robot that has stopped, and rule 5.7 has a word for that.
    */
   readonly connected?: boolean;
+
+  /**
+   * Whether an answer to the last frame is already in hand.
+   *
+   * Optional, and only meaningful for a program that answers when it answers.
+   * A match does not consult this - the rule that the last command stands is
+   * what makes the simulation honest about a hung robot, and waiting would
+   * break it. It exists so a HARNESS can choose to wait: a run that steps only
+   * once every program has answered is reproducible, and an irreproducible
+   * match cannot be bisected, only counted. See `playLockstep`.
+   */
+  readonly answered?: boolean;
 }
 
 /**

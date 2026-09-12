@@ -69,6 +69,12 @@ export const AGENT_PATH = '/agent';
  */
 export class RemoteTransport implements Transport {
   private pending: ActuatorFrame | null = null;
+
+  /** Whether the reply to the last frame has arrived. See `Transport.answered`. */
+  get answered(): boolean {
+    return this.pending !== null;
+  }
+
   private closed = false;
   private socket: WebSocket;
   /** Commands that arrived and were superseded before the next poll. */
