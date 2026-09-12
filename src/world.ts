@@ -627,7 +627,10 @@ export class World {
       }
     }
 
-    const goalBound = withinGoalMouth(this.ball.z, this.ball.radius);
+    // Allow entry with the physics' own margin (half a radius), not the full
+    // post plane: only a ball that could actually get inside the goal opens
+    // the mouth.
+    const goalBound = Math.abs(this.ball.z) <= HALF_GOAL_WIDTH - this.ball.radius * 0.5;
     const hit = collideWithPerimeter(this.ball, goalBound);
 
     this.detectGoal(hit);
@@ -693,7 +696,7 @@ export class World {
    */
   private detectBallOutOfPlay(): void {
     const b = this.ball;
-    if (withinGoalMouth(b.z, b.radius) && Math.abs(b.x) > HALF_LENGTH) return;
+    if (withinGoalMouth(b.z) && Math.abs(b.x) > HALF_LENGTH) return;
 
     const league = this.config.league;
     const mode =
@@ -754,7 +757,7 @@ export class World {
     // out, so this is not a matter of waiting longer - it will never be
     // reached, and the only question is how long to be sure it has stopped.
     const inGoal =
-      Math.abs(this.ball.x) > HALF_LENGTH && withinGoalMouth(this.ball.z, this.ball.radius);
+      Math.abs(this.ball.x) > HALF_LENGTH && withinGoalMouth(this.ball.z);
 
     let nearest = Infinity;
     for (const robot of this.active()) {

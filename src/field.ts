@@ -140,7 +140,16 @@ export const GOAL_MOUTH_X = HALF_LENGTH + LINE_THICKNESS; // 965
 export const GOAL_BACK_X = GOAL_MOUTH_X + GOAL_DEPTH; // 1039
 export const HALF_GOAL_WIDTH = GOAL_WIDTH / 2; // 225
 
-/** True if a ball crossing the end of the playing area is on target for a goal. */
-export function withinGoalMouth(z: number, ballRadius: number): boolean {
-  return Math.abs(z) <= HALF_GOAL_WIDTH - ballRadius * 0.25;
+/**
+ * True if a ball centre lies between the posts, i.e. over the mouth opening
+ * (rule 2.3: goal is 450 mm wide internally). This is the referee's question
+ * "is the ball over the goal", and it deliberately tests the whole opening
+ * rather than a ball-radius-shortened one: whether the ball actually gets in
+ * and scores is decided separately, by the radius margin in
+ * `collideWithPerimeter`, and a ball that clips the mouth edge and rebounds
+ * back onto the field must not be called out of play (5.9.1) for coming to
+ * rest over the line between the posts.
+ */
+export function withinGoalMouth(z: number): boolean {
+  return Math.abs(z) <= HALF_GOAL_WIDTH;
 }

@@ -89,6 +89,62 @@ describe('ball out of play (5.9.1)', () => {
     expect(w.events.some((e) => e.kind === 'ball-out-of-play')).toBe(false);
     expect(w.score.cyan).toBe(1);
   });
+
+  it('keeps a shot that clips the mouth edge in play, not out of play', () => {
+    // Centre just wide enough to clip the post (225 - r < |z| <= 225): the
+    // mouth wall rebounds it, and a live rebound is never 'out of play'.
+    const w = world('open');
+    // Park the robots clear of the shot corridor: with autoResolve on they
+    // would otherwise be returned to a penalty-box corner and get clipped.
+    w.robots.forEach((r, i) => {
+      r.x = i % 2 === 0 ? -400 : 400;
+      r.z = i < 2 ? 520 : -520;
+    });
+    w.ball.x = 600;
+    w.ball.z = 220;
+    w.ball.vx = 1800;
+    run(w, 2.5);
+
+    expect(w.events.some((e) => e.kind === 'ball-out-of-play')).toBe(false);
+    expect(w.score.cyan).toBe(0);
+    // It stayed on the field at its own z, not teleported to a neutral point.
+    expect(w.ball.z).toBeCloseTo(220, 3);
+    expect(Math.abs(w.ball.x)).toBeLessThan(HALF_LENGTH);
+  });
+
+  it('keeps a shot at the very edge of the mouth in play', () => {
+    const w = world('open');
+    w.robots.forEach((r, i) => {
+      r.x = i % 2 === 0 ? -400 : 400;
+      r.z = i < 2 ? 520 : -520;
+    });
+    w.ball.x = 600;
+    w.ball.z = 224;
+    w.ball.vx = 1800;
+    run(w, 2.5);
+
+    expect(w.events.some((e) => e.kind === 'ball-out-of-play')).toBe(false);
+    expect(w.score.cyan).toBe(0);
+    expect(w.ball.z).toBeCloseTo(224, 3);
+  });
+
+  it('calls out a ball that crosses the line wide of the mouth', () => {
+    // One millimetre past the post: it leaves the playing area over the line.
+    const w = world('open');
+    w.robots.forEach((r, i) => {
+      r.x = i % 2 === 0 ? -400 : 400;
+      r.z = i < 2 ? 520 : -520;
+    });
+    w.ball.x = 600;
+    w.ball.z = 226;
+    w.ball.vx = 1800;
+    run(w, 1);
+
+    expect(w.events.some((e) => e.kind === 'ball-out-of-play')).toBe(true);
+    // 5.9.2: moved to the nearest neutral point.
+    expect(Math.abs(w.ball.x)).toBeLessThan(1);
+    expect(Math.abs(w.ball.z)).toBeLessThanOrEqual(300);
+  });
 });
 
 describe('multiple defence (5.11.2)', () => {
