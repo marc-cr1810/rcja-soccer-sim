@@ -77,6 +77,43 @@ if (SWAP_KICKOFF) {
 
 type Goal = { half: 1 | 2; scorer: 'cyan' | 'yellow'; end: 'plus' | 'minus'; kickedOff: boolean };
 
+/*
+ * Every detached child group this process has started.
+ *
+ * `finally` is not enough on its own. The robots are spawned detached, so that
+ * killing the group gets play.py AND the four robots it starts; the cost is
+ * that they do not die with this process. And `finally` does not run when this
+ * process is killed rather than asked to stop - `timeout`, ctrl-c, a
+ * supervisor - which is exactly how a probe run usually ends. So reap on the
+ * way out of every exit that CAN be observed, and let rcja_soccer's bounded
+ * reconnect cover the one that cannot (SIGKILL here).
+ */
+const groups = new Set<number>();
+
+function reap(): void {
+  for (const pid of groups) {
+    try {
+      process.kill(-pid, 'SIGKILL');
+    } catch {
+      /* already gone */
+    }
+  }
+  groups.clear();
+}
+
+process.on('exit', reap);
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
+  process.on(signal, () => {
+    reap();
+    process.exit(128);
+  });
+}
+process.on('uncaughtException', (err) => {
+  reap();
+  console.error(err);
+  process.exit(1);
+});
+
 async function waitForSeats(server: MatchServer, ids: string[]): Promise<void> {
   const deadline = Date.now() + 30000;
   for (;;) {
@@ -93,7 +130,13 @@ async function playSeed(seed: number): Promise<{ goals: Goal[]; meanX: Record<st
   const url = `ws://localhost:${port}/agent`;
   const kids: ChildProcess[] = [];
   if (WHO === 'python') {
-    kids.push(spawn(`python3 python/examples/play.py --url ${url}`, { shell: true, stdio: 'ignore', detached: true }));
+    const kid = spawn(`python3 python/examples/play.py --url ${url}`, {
+      shell: true,
+      stdio: 'ignore',
+      detached: true,
+    });
+    kids.push(kid);
+    if (kid.pid) groups.add(kid.pid);
   }
   try {
     let transports = {};
@@ -154,7 +197,13 @@ async function playSeed(seed: number): Promise<{ goals: Goal[]; meanX: Record<st
     return { goals, meanX: acc, slots: result.slots, ball: [ballSum, ballN, ballPlus] as [number, number, number] };
   } finally {
     for (const k of kids) {
-      try { if (k.pid) process.kill(-k.pid, 'SIGKILL'); } catch { /* gone */ }
+      if (!k.pid) continue;
+      try {
+        process.kill(-k.pid, 'SIGKILL');
+      } catch {
+        /* gone */
+      }
+      groups.delete(k.pid);
     }
     await server.close();
   }

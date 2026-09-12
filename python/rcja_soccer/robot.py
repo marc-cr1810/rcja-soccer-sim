@@ -154,6 +154,10 @@ class Robot:
         self._tick: TickFunction | None = None
         self._memory = Memory()
         self._last_kickoff = False
+        #: When this robot was last actually in a match. Reconnecting is
+        #: measured from here, so any number of server restarts is fine as
+        #: long as the robot gets back in between them.
+        self._last_connected = time.monotonic()
 
     # -- writing a program -------------------------------------------------
 
@@ -196,6 +200,7 @@ class Robot:
         url: str = DEFAULT_URL,
         *,
         reconnect: bool = True,
+        reconnect_for: float = 120.0,
         quiet: bool = False,
     ) -> None:
         """Connect to a match server and play until it stops.
@@ -203,18 +208,42 @@ class Robot:
         Reconnects by default, because a practice session should survive the
         server being restarted and because a team debugging should not have to
         restart four programs every time.
+
+        :param reconnect_for: How long to keep retrying with nothing answering,
+            in seconds. The clock restarts every time the robot actually gets
+            into a match, so a session survives as many restarts as you like;
+            what it will not do is retry a port that is never coming back.
+
+            That is not a tidiness preference. A harness that spawns robots
+            detached - which is how you stop them dying with the shell that
+            started them - cannot clean up if it is itself killed rather than
+            asked to stop, and ``timeout``, ctrl-c and a supervisor all kill.
+            A robot that retries for ever then sits on the machine until it is
+            noticed, and the next measurement is taken against whatever those
+            leftovers are doing to the load. Give up eventually and the leak
+            has no way to happen, whatever became of the parent.
         """
         if self._tick is None:
             raise RuntimeError(
                 "no tick function. Decorate one with @robot.tick before run()."
             )
 
+        self._last_connected = time.monotonic()
         while True:
             try:
                 self._play(url, quiet)
             except (WebSocketError, OSError) as error:
                 if not reconnect:
                     raise
+                idle = time.monotonic() - self._last_connected
+                if idle > reconnect_for:
+                    if not quiet:
+                        print(
+                            f"[{self.name}/{self.number}] nothing answering at {url} "
+                            f"for {idle:.0f}s; stopping",
+                            file=sys.stderr,
+                        )
+                    return
                 if not quiet:
                     print(f"[{self.name}/{self.number}] {error}; retrying", file=sys.stderr)
                 time.sleep(1.0)
@@ -243,6 +272,9 @@ class Robot:
             if not quiet:
                 print(f"[{self.name}] {hello['robot']} connected to {url}", file=sys.stderr)
 
+            # In a match: whatever went wrong before does not count against
+            # the reconnect budget any more.
+            self._last_connected = time.monotonic()
             self._memory.clear()
             self._last_kickoff = False
 
