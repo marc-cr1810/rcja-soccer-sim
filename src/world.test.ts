@@ -4,6 +4,7 @@ import { getLeague } from './leagues';
 import {
   GOAL_BACK_X,
   GOAL_MOUTH_X,
+  HALF_GOAL_WIDTH,
   HALF_LENGTH,
   HALF_WIDTH,
   PENALTY_DEPTH,
@@ -126,8 +127,10 @@ describe('ball out of play (5.9.1)', () => {
     expect(w.ball.z).toBeCloseTo(224, 3);
   });
 
-  it('calls out a ball that crosses the line wide of the mouth', () => {
-    // One millimetre past the post: it leaves the playing area over the line.
+  it('rebounds a shot that clips the post rather than letting it through', () => {
+    // A millimetre outside the mouth, so half the ball is on the post's front
+    // face. The goal stands on the goal line now, so this never leaves the
+    // playing area - it comes back off the woodwork.
     const w = world('open');
     w.robots.forEach((r, i) => {
       r.x = i % 2 === 0 ? -400 : 400;
@@ -135,6 +138,25 @@ describe('ball out of play (5.9.1)', () => {
     });
     w.ball.x = 600;
     w.ball.z = 226;
+    w.ball.vx = 1800;
+    run(w, 1);
+
+    expect(w.events.some((e) => e.kind === 'ball-out-of-play')).toBe(false);
+    expect(w.score.violet).toBe(0);
+    expect(Math.abs(w.ball.x)).toBeLessThan(HALF_LENGTH);
+    expect(w.ball.z).toBeGreaterThan(HALF_GOAL_WIDTH);
+  });
+
+  it('calls out a ball that crosses the line wide of the mouth', () => {
+    // Clear of the whole goal structure, walls included, so nothing is in the
+    // way: it crosses the goal line into the out area beside the goal.
+    const w = world('open');
+    w.robots.forEach((r, i) => {
+      r.x = i % 2 === 0 ? -400 : 400;
+      r.z = i < 2 ? 520 : -520;
+    });
+    w.ball.x = 600;
+    w.ball.z = 300;
     w.ball.vx = 1800;
     run(w, 1);
 
@@ -322,20 +344,28 @@ describe('forcing (5.6.1.3 and 5.6.1.4)', () => {
     // Lime defenders in box
     y1!.x = HALF_LENGTH - PENALTY_DEPTH + 40;
     y1!.z = -50;
-    y2!.x = HALF_LENGTH - 60;
-    y2!.z = 0;
+    // Off to one side, clear of its team-mate: two defenders overlapping each
+    // other would shove one back out of the box and there would be no
+    // multiple defence left for 5.6.1.4 to take priority over.
+    y2!.x = HALF_LENGTH - 110;
+    y2!.z = 200;
 
     // Violet striker contacting defender with ball between them, driving in
     for (let t = 0; t <= 1.1; t += 1 / 120) {
       c1!.x = y1!.x - 220;
       c1!.z = -50;
       c1!.vx = 500;
+      // Held between them, not just placed there: without pinning the
+      // velocity the separation solver squirts it out of the pinch and the
+      // scenario stops being the one the rule is about.
       w.ball.x = y1!.x - 110;
       w.ball.z = -50;
+      w.ball.vx = 0;
+      w.ball.vz = 0;
       y1!.x = HALF_LENGTH - PENALTY_DEPTH + 40;
       y1!.z = -50;
-      y2!.x = HALF_LENGTH - 60;
-      y2!.z = 0;
+      y2!.x = HALF_LENGTH - 110;
+      y2!.z = 200;
       w.step(1 / 120);
     }
 

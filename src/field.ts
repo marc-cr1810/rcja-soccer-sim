@@ -38,6 +38,13 @@ export const HALF_WIDTH = PLAY_WIDTH / 2; // 610
 
 /** Rule 2.3: goal is 450 mm wide internally, 74 mm deep, crossbar at 140 mm. */
 export const GOAL_WIDTH = 450;
+/**
+ * How thick the goal's own walls are. The rules dimension the goal internally
+ * and say nothing about the panels, so this matches the perimeter walls. It is
+ * the difference between the 450 mm opening a ball has to fit through and the
+ * outside of the structure a robot bumps into, which is 40 mm wider.
+ */
+export const GOAL_WALL_THICKNESS = 20;
 export const GOAL_DEPTH = 74;
 export const CROSSBAR_HEIGHT = 140;
 export const CROSSBAR_DEPTH = 20;
@@ -123,22 +130,24 @@ export function nearestNeutralPoint(p: Point, occupied: readonly Point[] = []): 
 /**
  * Longitudinal placement of the goals.
  *
- * The prose of section 2.3 gives the goal's width, depth and crossbar height
- * but never says where along the field the mouth sits. That comes from the
- * scale drawing in section 2, measured against the penalty box (900 mm wide,
- * a dimension the drawing labels) to fix the scale: the goal mouth is flush
- * with the OUTER edge of the white line, i.e. 250 mm in from the end wall,
- * and the goal interior runs 74 mm further outward from there. Rule 2.3.6
- * then walls off the remainder behind the goal.
+ * The field diagram in section 2 puts the goal mouth on the INNER edge of the
+ * white line - the goal line proper - so the mouth is flush with the edge of
+ * the playing area and the goal itself stands in the out area, its 74 mm of
+ * depth eating into the 250 mm band between the line and the end wall.
  *
- * Flagged explicitly because it is derived, not quoted. If RCJA publishes a
- * dimensioned goal detail, check this first.
+ * That leaves 226 mm of out area behind the goal. Rule 2.3.6 closes it off by
+ * carrying the goal's side walls back to the end wall, so the goal and those
+ * walls together are one solid block running from the goal line to the wall;
+ * `collideWithPerimeter` treats them as exactly that. The out area either side
+ * of the block stays open carpet, reachable like the out area at the touchlines.
  */
 export const WALL_X = OUTER_LENGTH / 2; // 1215
 export const WALL_Z = OUTER_WIDTH / 2; // 910
-export const GOAL_MOUTH_X = HALF_LENGTH + LINE_THICKNESS; // 965
-export const GOAL_BACK_X = GOAL_MOUTH_X + GOAL_DEPTH; // 1039
+export const GOAL_MOUTH_X = HALF_LENGTH; // 915
+export const GOAL_BACK_X = GOAL_MOUTH_X + GOAL_DEPTH; // 989
 export const HALF_GOAL_WIDTH = GOAL_WIDTH / 2; // 225
+/** Half the outside of the goal structure, walls included. */
+export const HALF_GOAL_SHELL = HALF_GOAL_WIDTH + GOAL_WALL_THICKNESS; // 245
 
 /**
  * True if a ball centre lies between the posts, i.e. over the mouth opening

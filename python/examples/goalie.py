@@ -106,7 +106,7 @@ frame = GoalFrame(TEAM)
 PASS_PATIENCE = 75
 
 #: How far off the goal line to guard. Far enough forward to cut the angle down
-#: and to keep clear of rule 5.7.1.2's goal area, which starts at 965 mm; close
+#: and to keep clear of rule 5.7.1.2's goal area, which starts at 915 mm; close
 #: enough that a shot cannot simply be rolled round behind.
 GUARD_DIST = 175.0
 #: The posts are at 225 mm. Staying inside them means a keeper on the correct

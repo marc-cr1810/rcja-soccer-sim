@@ -17,16 +17,18 @@ import {
   CROSSBAR_HEIGHT,
   GOAL_BACK_X,
   GOAL_MOUTH_X,
+  GOAL_WALL_THICKNESS,
   GOAL_WIDTH,
   HALF_LENGTH,
-  HALF_WIDTH,
   LINE_THICKNESS,
   MARKING_THICKNESS,
   NEUTRAL_POINTS,
+  OUT_BAND,
   OUTER_LENGTH,
   OUTER_WIDTH,
   PENALTY_DEPTH,
   PENALTY_WIDTH,
+  WALL_HEIGHT_NATIONALS,
   WALL_X,
   WALL_Z,
 } from './field';
@@ -59,7 +61,15 @@ const COLOURS = {
   ballOpen: 0xff7a1a,
 };
 
-/** Rounded-rectangle outline drawn flat on the carpet. */
+/**
+ * Rectangular outline drawn flat on the carpet.
+ *
+ * `length` and `width` are the OUTER extents of the marking and the band is
+ * drawn inside them, which is how a field is actually marked out: the penalty
+ * box's black line runs up to the white line and stops, rather than straddling
+ * it. Centring each band on the nominal rectangle put half of every line on the
+ * wrong side of the dimension it was supposed to be showing.
+ */
 function stripe(
   parent: THREE.Object3D,
   cx: number,
@@ -69,16 +79,20 @@ function stripe(
   thickness: number,
   colour: number,
   y: number,
+  /** Leave the end at this side of `cx` unmarked, for an outline open at one end. */
+  openEnd: -1 | 0 | 1 = 0,
 ): void {
   const material = new THREE.MeshBasicMaterial({ color: colour });
-  const halfL = length / 2;
-  const halfW = width / 2;
+  const halfL = length / 2 - thickness / 2;
+  const halfW = width / 2 - thickness / 2;
+  // The long sides run the full outer length, so they cover the corners and
+  // the ends only have to span what is left between them.
   const segments: [number, number, number, number][] = [
     [cx, cz - halfW, length, thickness],
     [cx, cz + halfW, length, thickness],
-    [cx - halfL, cz, thickness, width + thickness],
-    [cx + halfL, cz, thickness, width + thickness],
   ];
+  if (openEnd !== -1) segments.push([cx - halfL, cz, thickness, width - 2 * thickness]);
+  if (openEnd !== 1) segments.push([cx + halfL, cz, thickness, width - 2 * thickness]);
   for (const [x, z, l, w] of segments) {
     const geo = new THREE.PlaneGeometry(l * MM, w * MM);
     const mesh = new THREE.Mesh(geo, material);
@@ -88,32 +102,75 @@ function stripe(
   }
 }
 
+/**
+ * A goal, and the walls rule 2.3.6 carries back from it.
+ *
+ * The goal is a low black box - 160 mm to the top of the crossbar, nowhere
+ * near the 220 mm of the perimeter walls - whose 450 x 140 mouth sits on the
+ * goal line, painted inside in the goal's colour so the opening is what a
+ * camera picks out. Its side walls do not stop at the back of the goal: rule
+ * 2.3.6 runs them on to the end wall, closing off the out area behind it.
+ *
+ * Every panel is drawn outside the planes `pushOutOfGoalBlock` bounces off, so
+ * a robot shoving against a wall stops exactly where the wall is drawn.
+ */
 function buildGoal(parent: THREE.Object3D, sign: -1 | 1, colour: number): void {
   const group = new THREE.Group();
-  const mat = new THREE.MeshStandardMaterial({ color: colour, roughness: 0.85 });
-  const depth = (GOAL_BACK_X - GOAL_MOUTH_X) * MM;
-  const width = GOAL_WIDTH * MM;
-  const height = CROSSBAR_HEIGHT * MM;
+  const paint = new THREE.MeshStandardMaterial({ color: colour, roughness: 0.85 });
+  const black = new THREE.MeshStandardMaterial({ color: COLOURS.wall, roughness: 0.9 });
 
-  // Back wall of the goal - the surface rule 5.5.1 hangs on.
-  const back = new THREE.Mesh(new THREE.BoxGeometry(0.02, height, width), mat);
-  back.position.set(sign * GOAL_BACK_X * MM, height / 2, 0);
-  group.add(back);
+  const mouthX = GOAL_MOUTH_X * MM;
+  const backX = GOAL_BACK_X * MM;
+  const t = GOAL_WALL_THICKNESS * MM;
+  const half = (GOAL_WIDTH / 2) * MM;
+  const depth = backX - mouthX;
+  const opening = CROSSBAR_HEIGHT * MM;
+  const bar = CROSSBAR_DEPTH * MM;
+  const height = opening + bar;
+  const midX = sign * (mouthX + backX) / 2;
+  // A whisker, to keep the painted liners off the black they are painted on.
+  const skin = 0.0015;
 
-  // Side walls, which rule 2.3.6 extends to the end wall.
+  const box = (
+    l: number,
+    h: number,
+    w: number,
+    x: number,
+    y: number,
+    z: number,
+    mat: THREE.Material,
+  ): void => {
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(l, h, w), mat);
+    mesh.position.set(x, y, z);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    group.add(mesh);
+  };
+
+  // Side walls, from the goal line all the way to the end wall (rule 2.3.6).
+  const run = WALL_X * MM - mouthX;
   for (const zSign of [-1, 1] as const) {
-    const side = new THREE.Mesh(new THREE.BoxGeometry(depth, height, 0.02), mat);
-    side.position.set(sign * (GOAL_MOUTH_X + GOAL_BACK_X) * 0.5 * MM, height / 2, zSign * width / 2);
-    group.add(side);
+    box(run, height, t, sign * (mouthX + run / 2), height / 2, zSign * (half + t / 2), black);
   }
 
-  // Crossbar, 140 mm up and at most 20 mm deep (rule 2.3.3).
-  const bar = new THREE.Mesh(
-    new THREE.BoxGeometry(CROSSBAR_DEPTH * MM, CROSSBAR_DEPTH * MM, width),
-    mat,
-  );
-  bar.position.set(sign * GOAL_MOUTH_X * MM, height, 0);
-  group.add(bar);
+  // Back wall of the goal - the surface rule 5.5.1 hangs a goal on.
+  box(t, height, half * 2 + 2 * t, sign * (backX + t / 2), height / 2, 0, black);
+
+  // Crossbar across the mouth, 140 mm up and 20 mm deep (rule 2.3.3), sitting
+  // inside the mouth rather than overhanging the playing area. Painted: it is
+  // the top edge of the coloured opening, not part of the black shell.
+  box(bar, bar, half * 2, sign * (mouthX + bar / 2), opening + bar / 2, 0, paint);
+
+  /*
+   * Painted inside: the back and the two cheeks, and nothing else. The floor
+   * of a goal is not painted - it is the carpet and the white line, which run
+   * straight under the goal - so laying colour across it put the goal's paint
+   * over the line the goal is standing on.
+   */
+  box(skin, opening, half * 2, sign * (backX - skin / 2), opening / 2, 0, paint);
+  for (const zSign of [-1, 1] as const) {
+    box(depth, opening, skin, midX, opening / 2, zSign * (half - skin / 2), paint);
+  }
 
   parent.add(group);
 }
@@ -217,19 +274,26 @@ export class FieldRenderer {
     carpet.receiveShadow = true;
     this.scene.add(carpet);
 
-    // The white out-area boundary: 50 mm thick, 250 mm in from the walls.
+    // The white out-area boundary: 50 mm thick, its outer edge 250 mm in from
+    // the walls, its inner edge the edge of the playing area.
     stripe(
       this.scene,
       0,
       0,
-      HALF_LENGTH * 2 + LINE_THICKNESS,
-      HALF_WIDTH * 2 + LINE_THICKNESS,
+      OUTER_LENGTH - 2 * OUT_BAND,
+      OUTER_WIDTH - 2 * OUT_BAND,
       LINE_THICKNESS,
       COLOURS.line,
       0.0015,
     );
 
-    // Penalty boxes, 25 mm black marking (rule 2.1.1).
+    /*
+     * Penalty boxes, 25 mm black marking (rule 2.1.1): 300 mm deep, 900 mm
+     * wide, and open at the goal line. The field diagram draws three sides
+     * only - the white line is already the fourth, and a black line along it
+     * would be marking the same edge twice. The marking lies INSIDE the
+     * 300 x 900, so the two long sides run up to the white line and stop.
+     */
     for (const sign of [-1, 1] as const) {
       stripe(
         this.scene,
@@ -240,6 +304,7 @@ export class FieldRenderer {
         MARKING_THICKNESS,
         COLOURS.marking,
         0.002,
+        sign,
       );
     }
 
@@ -256,13 +321,17 @@ export class FieldRenderer {
 
     // Perimeter walls. Height is league-dependent (rule 2.2), but the
     // simulator draws the nationals height so the enclosure reads clearly.
-    const wallHeight = 0.22;
+    // 2430 x 1820 is the size of the field, so WALL_X and WALL_Z are the INNER
+    // faces - the planes bodies bounce off - and the panels stand outside them.
+    const wallHeight = WALL_HEIGHT_NATIONALS * MM;
+    const t = GOAL_WALL_THICKNESS * MM;
     const wallMat = new THREE.MeshStandardMaterial({ color: COLOURS.wall, roughness: 0.9 });
+    const outerL = OUTER_LENGTH * MM + 2 * t;
     const spans: [number, number, number, number][] = [
-      [0, -WALL_Z * MM, OUTER_LENGTH * MM, 0.02],
-      [0, WALL_Z * MM, OUTER_LENGTH * MM, 0.02],
-      [-WALL_X * MM, 0, 0.02, OUTER_WIDTH * MM],
-      [WALL_X * MM, 0, 0.02, OUTER_WIDTH * MM],
+      [0, -(WALL_Z * MM + t / 2), outerL, t],
+      [0, WALL_Z * MM + t / 2, outerL, t],
+      [-(WALL_X * MM + t / 2), 0, t, OUTER_WIDTH * MM],
+      [WALL_X * MM + t / 2, 0, t, OUTER_WIDTH * MM],
     ];
     for (const [x, z, l, w] of spans) {
       const wall = new THREE.Mesh(new THREE.BoxGeometry(l, wallHeight, w), wallMat);

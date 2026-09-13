@@ -503,10 +503,9 @@ function arcBetween(a: number, b: number): Arc {
  * which fall straight out of the two bearings.
  *
  * The posts sit on the goal plane at `GOAL_MOUTH_X`, which is where
- * `physics.ts`, `world.ts` and the renderer all agree the goal is. (The
- * `Sighting` below still ranges to `goalMouth()`, 50 mm nearer, because moving
- * it is a change to what every existing robot is told and belongs with the
- * slice that reworks that reading rather than with this one.)
+ * `physics.ts`, `world.ts` and the renderer all agree the goal is - and, now
+ * that the mouth is on the goal line, the same plane `goalMouth()` returns, so
+ * the arc and the `Sighting` below finally range to the same place.
  */
 export function goalArc(pose: Pose, side: 'cyan' | 'yellow'): Arc | null {
   const gx = side === 'cyan' ? -GOAL_MOUTH_X : GOAL_MOUTH_X;

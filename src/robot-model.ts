@@ -17,7 +17,7 @@
  */
 
 import * as THREE from 'three';
-import type { League } from './leagues';
+import { ballDiameter, type League } from './leagues';
 import type { ViewRobot } from './view';
 
 const MM = 0.001;
@@ -28,7 +28,6 @@ const MM = 0.001;
  * the teams run violet and lime.
  */
 export const TEAM_COLOUR = { violet: 0x8b5cf6, lime: 0x3fce5a } as const;
-const DARK = 0x11161c;
 const METAL = 0xb9c2cc;
 const RUBBER = 0x1b1f24;
 
@@ -85,36 +84,72 @@ function addWheels(group: THREE.Group, radius: number): void {
 }
 
 /**
- * The dribbler, and the gap it leaves in front of the robot, which is literally
- * the ball capture zone rule 4.1.1 limits to 30 mm, or 15 mm in Open.
+ * The dribbler, placed where the ball it holds actually is.
+ *
+ * `dribblerRecess` in world.ts lets a captured ball sink into the robot by
+ * half the league's capture limit and no further - 7.5 mm in Open - so the
+ * ball sits very nearly ON the 220 mm envelope, not inside it. A bay cut back
+ * into the shell was therefore a hole nothing ever entered: the ball hung in
+ * front of an empty recess. The roller instead sits as far forward as rule
+ * 4.1.2 allows, hard against where the ball comes to rest, and the shell keeps
+ * its round silhouette.
  */
-function addDribbler(group: THREE.Group, league: League, deckTop: number): void {
-  const capture = league.ballCaptureMm * MM;
+function addDribbler(group: THREE.Group, league: League, envelope: number, shell: number): void {
+  const ballRadius = (ballDiameter(league) / 2) * MM;
+  const recess = (Math.min(league.ballCaptureMm, ballDiameter(league) / 2) / 2) * MM;
+  /** Centre of a ball the dribbler is holding, in the robot's own frame. */
+  const heldX = envelope + ballRadius - recess;
+
   const rollerRadius = 12 * MM;
-  const rollerLength = 70 * MM;
-  const mouthFace = 98 * MM;
-  const cheekDepth = capture + rollerRadius * 2;
+  const rollerHalf = 22 * MM;
+
+  /*
+   * The roller goes as far forward as rule 4.1.2 allows and no further. The
+   * constraint is its front rim CORNER, not its centre line - the cylinder
+   * does not care which part of the roller reaches it first - so the corner is
+   * what gets solved for. Its height then follows: high enough above the
+   * carpet to rest on the ball it is holding, which is where a dribbler grips.
+   */
+  const reach = ballRadius + rollerRadius;
+  const rollerX = Math.sqrt(envelope * envelope - rollerHalf * rollerHalf) - rollerRadius;
+  const standoff = heldX - rollerX;
+  const rollerY = ballRadius + Math.sqrt(Math.max(reach * reach - standoff * standoff, 0));
 
   const roller = new THREE.Mesh(
-    new THREE.CylinderGeometry(rollerRadius, rollerRadius, rollerLength, 16),
-    mat(RUBBER, 0.95),
+    new THREE.CylinderGeometry(rollerRadius, rollerRadius, rollerHalf * 2, 18),
+    mat(0x99a2ad, 0.8),
   );
   roller.rotation.x = Math.PI / 2;
-  roller.position.set(mouthFace - capture - rollerRadius, deckTop * 0.42, 0);
+  roller.position.set(rollerX, rollerY, 0);
+  roller.castShadow = true;
   group.add(roller);
 
-  // Cheek plates either side of the roller form the capture zone, and read as
-  // a notch in the outline from directly overhead.
   for (const side of [-1, 1] as const) {
+    // Bearing caps, which is what says the roller is driven.
+    const cap = new THREE.Mesh(
+      new THREE.CylinderGeometry(rollerRadius * 0.5, rollerRadius * 0.5, 6 * MM, 12),
+      mat(METAL, 0.25, 0.6),
+    );
+    cap.rotation.x = Math.PI / 2;
+    cap.position.set(rollerX, rollerY, side * (rollerHalf + 3 * MM));
+    group.add(cap);
+
+    /*
+     * Cheek plates carrying the roller. They run from the shell out to the
+     * roller so the ball is framed by them rather than hanging off a bare bar,
+     * and they stop where rule 4.1.2's cylinder crosses their outer face -
+     * further out from the axis than the roller's ends, so they stop sooner.
+     */
+    const cheekZ = side * (rollerHalf + 6 * MM);
+    // Measured at the plate's OUTER face, so the whole plate clears 4.1.2.
+    const tip = Math.sqrt(envelope * envelope - (Math.abs(cheekZ) + 2.5 * MM) ** 2);
+    const root = Math.sqrt(Math.max(shell * shell - cheekZ * cheekZ, 0)) - 8 * MM;
     const cheek = new THREE.Mesh(
-      new THREE.BoxGeometry(cheekDepth, deckTop * 0.52, 8 * MM),
-      mat(DARK, 0.5),
+      new THREE.BoxGeometry(tip - root, rollerY + rollerRadius, 5 * MM),
+      mat(0x272d35, 0.5),
     );
-    cheek.position.set(
-      mouthFace - cheekDepth / 2,
-      deckTop * 0.4,
-      side * (rollerLength / 2 + 4 * MM),
-    );
+    cheek.position.set((tip + root) / 2, (rollerY + rollerRadius) / 2, cheekZ);
+    cheek.castShadow = true;
     group.add(cheek);
 
     // Optical ball gate sensors (IR beam-break) mounted on the inner cheek
@@ -126,89 +161,178 @@ function addDribbler(group: THREE.Group, league: League, deckTop: number): void 
       mat(0x5a636e, 0.2, 0.9),
     );
     gateOptic.rotation.x = Math.PI / 2;
-    gateOptic.position.set(
-      mouthFace - capture * 0.6,
-      deckTop * 0.32,
-      side * (rollerLength / 2 - 1 * MM),
-    );
+    gateOptic.position.set(tip - 5 * MM, rollerY * 0.55, cheekZ - side * 3 * MM);
     group.add(gateOptic);
   }
 }
 
-/** Rule 4.7: kickers exist only in Lightweight and Open. */
-function addKicker(group: THREE.Group, league: League): void {
+/**
+ * Rule 4.7: kickers exist only in Lightweight and Open. The plate sits on the
+ * front of the shell, below the roller, where it can reach a held ball.
+ */
+function addKicker(group: THREE.Group, league: League, shell: number): void {
   const plate = new THREE.Mesh(
-    new THREE.BoxGeometry(7 * MM, 28 * MM, 62 * MM),
+    new THREE.BoxGeometry(7 * MM, 22 * MM, 56 * MM),
     mat(METAL, 0.3, 0.75),
   );
-  plate.position.set(84 * MM, 22 * MM, 0);
+  plate.position.set(shell - 5 * MM, 14 * MM, 0);
   group.add(plate);
 
   // Angled chip-kicker wedge beneath the main solenoid plate for lofted kicks.
   if (league.chipKickerAllowed) {
     const chipRamp = new THREE.Mesh(
-      new THREE.BoxGeometry(14 * MM, 4 * MM, 54 * MM),
+      new THREE.BoxGeometry(12 * MM, 4 * MM, 48 * MM),
       mat(0xd4af37, 0.3, 0.8),
     );
-    chipRamp.position.set(86 * MM, 8 * MM, 0);
+    // Tilted, so its far corner reaches further forward than its centre does;
+    // seated back far enough that the corner still clears rule 4.1.2.
+    chipRamp.position.set(shell - 4 * MM, 4 * MM, 0);
     chipRamp.rotation.z = 0.48; // ~27.5 degree loft ramp
     group.add(chipRamp);
   }
 }
 
 /**
- * Rule 4.5 allows any number of cameras in Lightweight and Open. A short post
- * with a housing on top reads as a robot; a bare spike does not.
+ * The camera, which is the one part of the robot that has to match how it
+ * behaves. `CAMERA_FOV` in sensors.ts is a full 2*pi: the robot sees the whole
+ * horizon at once, and a box with a lens in one face said the opposite.
+ *
+ * So it is drawn as what actually gives a robot that view - a catadioptric
+ * rig: the camera itself sits on the deck looking straight up, a clear tube
+ * carries a conical mirror above it, apex down, and the mirror wraps the whole
+ * 360 degrees into the frame. On the centre line, because an omnidirectional
+ * view with a blind spot behind the mast would not be omnidirectional.
  */
-function addCamera(group: THREE.Group, deckTop: number): void {
-  const postHeight = 46 * MM;
-  const post = new THREE.Mesh(
-    new THREE.CylinderGeometry(11 * MM, 13 * MM, postHeight, 12),
-    mat(0x424b56, 0.5, 0.3),
-  );
-  post.position.set(-26 * MM, deckTop + postHeight / 2, 0);
-  group.add(post);
+function addCamera(group: THREE.Group, deckTop: number, number: string, colour: number): void {
+  const moduleHeight = 24 * MM;
+  const collarHeight = 6 * MM;
+  const tubeHeight = 62 * MM;
+  const mirrorHeight = 30 * MM;
+  // The mirror has to fit INSIDE the tube that carries it, and the cap has to
+  // cover both, or the mast reads as a lump rather than as an optical rig.
+  const mirrorRadius = 34 * MM;
+  const tubeRadius = mirrorRadius + 4 * MM;
+  const tubeBase = deckTop + collarHeight;
 
-  const housing = new THREE.Mesh(
-    new THREE.BoxGeometry(34 * MM, 28 * MM, 32 * MM),
+  // A collar the tube seats in. Without it the tube's wall stood on nothing -
+  // it is wider than the camera under it - and the whole mast read as floating
+  // a hand's width above the robot.
+  const collar = new THREE.Mesh(
+    new THREE.CylinderGeometry(tubeRadius + 3 * MM, tubeRadius + 5 * MM, collarHeight, 28),
+    mat(0x39424d, 0.5, 0.25),
+  );
+  collar.position.set(0, deckTop + collarHeight / 2, 0);
+  collar.castShadow = true;
+  group.add(collar);
+
+  // The camera module, lens up, standing inside the tube at the bottom.
+  const module = new THREE.Mesh(
+    new THREE.CylinderGeometry(17 * MM, 19 * MM, moduleHeight, 16),
     mat(0x2b323a, 0.45),
   );
-  housing.position.set(-26 * MM, deckTop + postHeight + 14 * MM, 0);
-  housing.rotation.z = -0.12;
-  housing.castShadow = true;
-  group.add(housing);
+  module.position.set(0, tubeBase + moduleHeight / 2, 0);
+  group.add(module);
 
   const lens = new THREE.Mesh(
-    new THREE.CylinderGeometry(9 * MM, 9 * MM, 6 * MM, 16),
+    new THREE.CylinderGeometry(8 * MM, 9 * MM, 5 * MM, 16),
     mat(0x0c1013, 0.15, 0.8),
   );
-  lens.rotation.z = Math.PI / 2;
-  lens.position.set(-8 * MM, deckTop + postHeight + 14 * MM, 0);
+  lens.position.set(0, tubeBase + moduleHeight + 2 * MM, 0);
   group.add(lens);
+
+  // The acrylic tube holding the mirror up, seated on the collar. Transparent,
+  // or it would be the blind spot the whole arrangement exists to avoid.
+  const tube = new THREE.Mesh(
+    new THREE.CylinderGeometry(tubeRadius, tubeRadius, tubeHeight, 24, 1, true),
+    new THREE.MeshStandardMaterial({
+      color: 0xdcecf6,
+      roughness: 0.15,
+      metalness: 0,
+      transparent: true,
+      opacity: 0.14,
+      side: THREE.DoubleSide,
+    }),
+  );
+  tube.position.set(0, tubeBase + tubeHeight / 2, 0);
+  group.add(tube);
+
+  // The mirror: a cone apex-down over the lens, which is what turns a forward
+  // lens into a view of the whole horizon.
+  const mirror = new THREE.Mesh(
+    new THREE.ConeGeometry(mirrorRadius, mirrorHeight, 28),
+    // The scene carries no environment map, so a truly metallic surface has
+    // nothing to reflect and renders black. A bright, faintly self-lit
+    // dielectric is what actually reads as polished from every angle.
+    new THREE.MeshStandardMaterial({
+      color: 0xeef3f8,
+      roughness: 0.22,
+      metalness: 0.1,
+      emissive: 0x39424e,
+    }),
+  );
+  mirror.rotation.x = Math.PI;
+  mirror.position.set(0, tubeBase + tubeHeight - mirrorHeight / 2, 0);
+  mirror.castShadow = true;
+  group.add(mirror);
+
+  /*
+   * The cap the mirror hangs from, drawn to the mirror's own diameter so the
+   * two read as one part. It is also the largest flat surface the robot has
+   * facing the overhead camera, which makes it the place to put the robot's
+   * number: on the deck it was hidden under the mast, and on the shell it only
+   * showed from whichever side you happened to be standing.
+   */
+  const capTop = tubeBase + tubeHeight + 3 * MM;
+  const cap = new THREE.Mesh(
+    new THREE.CylinderGeometry(mirrorRadius, mirrorRadius, 6 * MM, 28),
+    mat(0x14181e, 0.55, 0.15),
+  );
+  cap.position.set(0, capTop, 0);
+  cap.castShadow = true;
+  group.add(cap);
+
+  const decal = numberDecal(number, colour, mirrorRadius * 1.7);
+  if (decal) {
+    // Turned so the digit's own upright runs along the robot's heading, the
+    // way the arrow on the deck does: from overhead the two agree.
+    const facing = new THREE.Object3D();
+    facing.rotation.y = -Math.PI / 2;
+    decal.rotation.x = -Math.PI / 2;
+    decal.position.y = capTop + 3.5 * MM;
+    facing.add(decal);
+    group.add(facing);
+  }
 }
 
 /**
- * Rule 4.5.7: a stable, easily noticeable handle, liftable from 50 mm clear of
- * the highest structure. A bail across the deck reads as a handle from any
- * angle; a flat ring lying on top does not.
+ * The robot's number, drawn to a texture.
+ *
+ * Returns null where there is no canvas to draw on - the test suite runs in
+ * node, and a robot that cannot be built there is a robot the rule 4.1.2
+ * envelope check cannot measure. The number is decoration; the mesh is not.
  */
-function addHandle(group: THREE.Group, deckTop: number, span: number): void {
-  const bar = new THREE.Mesh(
-    new THREE.CylinderGeometry(4 * MM, 4 * MM, span * 2, 8),
-    mat(0xc9d1d9, 0.35, 0.4),
-  );
-  bar.rotation.x = Math.PI / 2;
-  bar.position.set(20 * MM, deckTop + 34 * MM, 0);
-  group.add(bar);
+function numberDecal(number: string, colour: number, size: number): THREE.Mesh | null {
+  if (typeof document === 'undefined') return null;
 
-  for (const side of [-1, 1] as const) {
-    const post = new THREE.Mesh(
-      new THREE.CylinderGeometry(3.5 * MM, 3.5 * MM, 34 * MM, 8),
-      mat(0xc9d1d9, 0.35, 0.4),
-    );
-    post.position.set(20 * MM, deckTop + 17 * MM, side * span);
-    group.add(post);
-  }
+  const px = 128;
+  const canvas = document.createElement('canvas');
+  canvas.width = px;
+  canvas.height = px;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return null;
+
+  ctx.fillStyle = `#${colour.toString(16).padStart(6, '0')}`;
+  ctx.font = `bold ${px * 0.8}px system-ui, -apple-system, Segoe UI, sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(number, px / 2, px * 0.54);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  return new THREE.Mesh(
+    new THREE.PlaneGeometry(size, size),
+    new THREE.MeshBasicMaterial({ map: texture, transparent: true, depthWrite: false }),
+  );
 }
 
 /**
@@ -240,14 +364,20 @@ function addHeadingArrow(group: THREE.Group, colour: number, y: number): void {
 export function buildRobotMesh(robot: ViewRobot, league: League): THREE.Group {
   const group = new THREE.Group();
   const colour = TEAM_COLOUR[robot.team];
-  const radius = robot.radius * MM;
+  const envelope = robot.radius * MM;
 
   const bodyHeight = 108 * MM;
   const bodyBase = 14 * MM;
   const deckTop = bodyBase + bodyHeight + 12 * MM;
+  /*
+   * The shell is drawn inside rule 4.1.2's cylinder rather than on it, which
+   * is how a real chassis is built: what reaches the limit is the hardware
+   * bolted to the outside - the wheels, and the dribbler on the front.
+   */
+  const shell = envelope * 0.93;
 
   const body = new THREE.Mesh(
-    new THREE.CylinderGeometry(radius * 0.98, radius * 0.93, bodyHeight, 40),
+    new THREE.CylinderGeometry(shell, shell * 0.95, bodyHeight, 40),
     mat(0x323a44, 0.5, 0.2),
   );
   body.position.y = bodyBase + bodyHeight / 2;
@@ -257,33 +387,32 @@ export function buildRobotMesh(robot: ViewRobot, league: League): THREE.Group {
   // Rule 4.3.1: team marking. A band on the shell and a ring on the deck make
   // the team obvious from the side and from directly overhead respectively.
   const band = new THREE.Mesh(
-    new THREE.CylinderGeometry(radius * 0.99, radius * 0.99, 26 * MM, 40),
+    new THREE.CylinderGeometry(shell * 1.01, shell * 1.01, 26 * MM, 40),
     mat(colour, 0.42),
   );
   band.position.y = bodyBase + bodyHeight * 0.74;
   group.add(band);
 
   const deck = new THREE.Mesh(
-    new THREE.CylinderGeometry(radius * 0.98, radius * 0.98, 12 * MM, 40),
+    new THREE.CylinderGeometry(shell, shell, 12 * MM, 40),
     mat(0x3e4753, 0.45, 0.25),
   );
   deck.position.y = deckTop - 6 * MM;
   group.add(deck);
 
   const ring = new THREE.Mesh(
-    new THREE.TorusGeometry(92 * MM, 5 * MM, 8, 40),
+    new THREE.TorusGeometry(shell * 0.87, 5 * MM, 8, 40),
     mat(colour, 0.4),
   );
   ring.rotation.x = Math.PI / 2;
   ring.position.y = deckTop + 1 * MM;
   group.add(ring);
 
-  addDribbler(group, league, deckTop);
-  if (league.kickerAllowed) addKicker(group, league);
-  addCamera(group, deckTop);
-  addWheels(group, radius);
+  addDribbler(group, league, envelope, shell);
+  if (league.kickerAllowed) addKicker(group, league, shell);
+  addCamera(group, deckTop, robot.id.slice(robot.id.lastIndexOf('-') + 1), colour);
+  addWheels(group, envelope);
   addHeadingArrow(group, colour, deckTop + 4 * MM);
-  addHandle(group, deckTop, 46 * MM);
 
   return group;
 }

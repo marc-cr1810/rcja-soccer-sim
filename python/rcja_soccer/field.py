@@ -23,24 +23,25 @@ HALF_WIDTH = 610.0
 
 #: The 50 mm white line sits OUTSIDE the playing area, between HALF_LENGTH and
 #: HALF_LENGTH + LINE_THICKNESS. Crossing it is not in itself an offence: rule
-#: 5.7.1.6 only punishes a robot that is *wholly* in the out area. A robot
-#: taking a shot has to put part of itself over the line, because the goal
-#: mouth is further out than the line is.
+#: 5.7.1.6 only punishes a robot that is *wholly* in the out area, and there is
+#: a full 250 mm band of out area beyond the line to be wholly inside, at the
+#: ends of the field as well as at the touchlines.
 LINE_THICKNESS = 50.0
 OUT_BAND = 250.0
 
-#: Wall to wall, rule 2.1 diagram.
+#: Wall to wall, rule 2.1 diagram: the field is 2430 x 1820 over all.
 WALL_X = 1215.0
 WALL_Z = 910.0
 
-#: Rule 2.3, and the placement derived in the simulator's field.ts: the mouth
-#: is flush with the outer edge of the white line, 50 mm beyond the playing
-#: area, and the goal runs 74 mm further out to the back wall a goal is scored
-#: against (rule 5.5.1).
+#: Rule 2.3. The mouth is on the goal line - the inner edge of the white line,
+#: flush with the playing area - and the goal runs 74 mm outward from there to
+#: the back wall a goal is scored against (rule 5.5.1). Rule 2.3.6 carries the
+#: goal's side walls on from there to the end wall, so nothing can pass behind
+#: it: driving at your own goal, the thing that stops you is GOAL_MOUTH_X.
 GOAL_WIDTH = 450.0
 HALF_GOAL_WIDTH = 225.0
-GOAL_MOUTH_X = 965.0
-GOAL_BACK_X = 1039.0
+GOAL_MOUTH_X = 915.0
+GOAL_BACK_X = 989.0
 
 #: From the field diagram.
 PENALTY_DEPTH = 300.0

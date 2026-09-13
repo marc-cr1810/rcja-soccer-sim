@@ -14,7 +14,9 @@
 import {
   GOAL_BACK_X,
   GOAL_MOUTH_X,
+  HALF_GOAL_SHELL,
   HALF_GOAL_WIDTH,
+  WALL_X,
   WALL_Z,
 } from './field';
 
@@ -142,12 +144,68 @@ export function stepRobot(robot: Body, dt: number): void {
 /**
  * Bounce a body off the perimeter. Returns which wall was struck, or null.
  *
- * The goal mouths are openings in the end walls, so a body inside the goal
- * width passes through the end wall plane and is contained by the goal's own
- * back and side walls instead. Rule 2.3.6 walls off the space behind a goal,
- * so nothing can travel past the goal back.
+ * The field is 2430 x 1820 wall to wall, so the end wall is a full 250 mm out
+ * band beyond the white line, not the goal line. The goal stands in that band
+ * with its mouth on the goal line, and rule 2.3.6 carries its side walls back
+ * to the end wall, so goal and walls together are one solid block: from the
+ * goal line to the end wall, within the goal width. A body allowed into the
+ * goal passes through the mouth and is held by the goal's own back and sides.
+ * Everything else is kept out of the block, and is free to run past it into
+ * the pocket of out area either side - the same out area a robot can reach at
+ * the touchlines, and the same rule 5.7.1.6 exposure.
  */
 export type WallHit = 'side' | 'end' | 'goal-back' | 'goal-side';
+
+/**
+ * Keep a body out of the solid block the goal and rule 2.3.6's walls make.
+ *
+ * Circle against box, resolved along the line from the nearest point on the
+ * box - so a ball clipping the corner of a post is deflected along the way it
+ * actually hit it rather than being sent straight back up the field, which is
+ * the difference between a shot that rolls on out of play and one the referee
+ * sees rebound. A body whose centre is somehow inside the block, shoved there
+ * by another robot, has no such line and is pushed out through the nearest face.
+ */
+function pushOutOfGoalBlock(b: Body, sign: -1 | 1): WallHit | null {
+  const xMin = sign > 0 ? GOAL_MOUTH_X : -WALL_X;
+  const xMax = sign > 0 ? WALL_X : -GOAL_MOUTH_X;
+
+  const nearX = Math.min(Math.max(b.x, xMin), xMax);
+  const nearZ = Math.min(Math.max(b.z, -HALF_GOAL_SHELL), HALF_GOAL_SHELL);
+  let dx = b.x - nearX;
+  let dz = b.z - nearZ;
+  let dist = Math.hypot(dx, dz);
+
+  if (dist > 1e-9) {
+    if (dist >= b.radius) return null;
+    dx /= dist;
+    dz /= dist;
+  } else {
+    // Centre inside the block: out through whichever face is nearest.
+    const faces: [number, number, number][] = [
+      [b.x - xMin, -1, 0],
+      [xMax - b.x, 1, 0],
+      [b.z + HALF_GOAL_SHELL, 0, -1],
+      [HALF_GOAL_SHELL - b.z, 0, 1],
+    ];
+    const [depth, fx, fz] = faces.reduce((a, c) => (c[0] < a[0] ? c : a));
+    dx = fx;
+    dz = fz;
+    dist = -depth;
+  }
+
+  b.x += dx * (b.radius - dist);
+  b.z += dz * (b.radius - dist);
+
+  // Restitution along the contact normal only, so the tangential component
+  // survives and a graze stays a graze.
+  const normal = b.vx * dx + b.vz * dz;
+  if (normal < 0) {
+    b.vx -= (1 + WALL_BOUNCE) * normal * dx;
+    b.vz -= (1 + WALL_BOUNCE) * normal * dz;
+  }
+  return Math.abs(dx) >= Math.abs(dz) ? 'end' : 'goal-side';
+}
 
 export function collideWithPerimeter(b: Body, allowGoalEntry: boolean): WallHit | null {
   let hit: WallHit | null = null;
@@ -163,24 +221,34 @@ export function collideWithPerimeter(b: Body, allowGoalEntry: boolean): WallHit 
     hit = 'side';
   }
 
+  // End walls, at the far side of the out band. Nothing that reaches these is
+  // inside a goal: the goal back stops well short of them.
+  if (b.x - b.radius < -WALL_X) {
+    b.x = -WALL_X + b.radius;
+    b.vx = Math.abs(b.vx) * WALL_BOUNCE;
+    hit = 'end';
+  } else if (b.x + b.radius > WALL_X) {
+    b.x = WALL_X - b.radius;
+    b.vx = -Math.abs(b.vx) * WALL_BOUNCE;
+    hit = 'end';
+  }
+
   const insideGoalWidth = Math.abs(b.z) <= HALF_GOAL_WIDTH - b.radius * 0.5;
   const enteringGoal = allowGoalEntry && insideGoalWidth;
 
   for (const sign of [-1, 1] as const) {
     const mouth = sign * GOAL_MOUTH_X;
-    const back = sign * GOAL_BACK_X;
     const beyondMouth = sign > 0 ? b.x + b.radius > mouth : b.x - b.radius < mouth;
     if (!beyondMouth) continue;
 
     if (!enteringGoal) {
-      // The end wall either side of the goal mouth.
-      b.x = mouth - sign * b.radius;
-      b.vx = -sign * Math.abs(b.vx) * WALL_BOUNCE;
-      hit = 'end';
+      const blocked = pushOutOfGoalBlock(b, sign);
+      if (blocked && hit !== 'side') hit = blocked;
       continue;
     }
 
     // Inside the goal: contained by the back wall and the goal's side walls.
+    const back = sign * GOAL_BACK_X;
     const beyondBack = sign > 0 ? b.x + b.radius > back : b.x - b.radius < back;
     if (beyondBack) {
       b.x = back - sign * b.radius;

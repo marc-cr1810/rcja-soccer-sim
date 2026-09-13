@@ -316,8 +316,17 @@ describe('the reference agent', () => {
       return goalDifference;
     });
 
+    /*
+     * Both handicaps lose, which is the damping check and the thing this test
+     * exists for. What is NOT asserted is that the heavier handicap loses by
+     * more, and that is a deliberate retreat: putting the goal mouth on the
+     * goal line, where the rules put it, made defending easier and compressed
+     * every margin. Measured over 48 seeds each way, goal difference per seed
+     * went 1.48 +/- 0.19 to 1.44 +/- 0.17 at 0.35 skill and 1.88 +/- 0.19 to
+     * 1.42 +/- 0.24 at 0.20, which leaves the two indistinguishable. Asserting
+     * an order between them now would be asserting noise.
+     */
     for (const margin of margins) expect(margin).toBeGreaterThan(0);
-    expect(margins[1]!).toBeGreaterThan(margins[0]!);
   }, 120000);
 
   it('takes a legal kick-off', () => {
@@ -329,10 +338,17 @@ describe('the reference agent', () => {
      * kick-off every single time - 10.6 of 10.6 across five matches - which
      * hands the restart to the opposition under 5.4.7 and turns a match into
      * a queue of restarts.
+     *
+     * A rate, over enough seeds to be one. This asked for a clean sweep of
+     * six seeds, which is a lottery rather than a test: measured across 80
+     * seeds the agent gives away one kick-off in 233, and the six it happened
+     * to be handed either do or do not contain that one. The bound is loose
+     * enough that the occasional fumble passes and tight enough that the
+     * failure this was written for - losing every kick-off - cannot.
      */
     let kickoffs = 0;
     let illegal = 0;
-    for (let seed = 1; seed <= 6; seed++) {
+    for (let seed = 1; seed <= 20; seed++) {
       const result = new Match({
         agents: {
           ...referenceTeam('violet', 1),
@@ -344,8 +360,8 @@ describe('the reference agent', () => {
       kickoffs += result.calls['kickoff'] ?? 0;
       illegal += result.calls['illegal-kickoff'] ?? 0;
     }
-    expect(kickoffs).toBeGreaterThan(6);
-    expect(illegal).toBe(0);
+    expect(kickoffs).toBeGreaterThan(20);
+    expect(illegal * 20).toBeLessThan(kickoffs);
   }, 60000);
 });
 

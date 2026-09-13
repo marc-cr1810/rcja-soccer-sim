@@ -26,7 +26,7 @@ function rolls(v: number): number {
 describe('the ball rolls like a ball on carpet', () => {
   it('carries a full kick goal to goal, as rule 4.7.1 requires', () => {
     // 4.7.1 asks for a kick that crosses the field from goal to goal and
-    // rebounds. Goal backs sit at +/-1039 mm, so that is 2078 mm of travel.
+    // rebounds. Goal backs sit at +/-989 mm, so that is 1978 mm of travel.
     const goalToGoal = 2 * GOAL_BACK_X;
     expect(rolls(2400)).toBeGreaterThan(goalToGoal);
   });

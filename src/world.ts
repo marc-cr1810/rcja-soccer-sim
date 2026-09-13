@@ -1025,7 +1025,10 @@ export class World {
         const own = this.defendingGoal(robot.team);
         const ballInBox = inPenaltyBox(this.ball, own);
         const ballSlow = Math.hypot(this.ball.vx, this.ball.vz) < 40;
-        const goalieOnLine = Math.abs(robot.x) > HALF_LENGTH - 65;
+        // On its line, measured off the goal mouth rather than off the
+        // playing area: the mouth is what physically stops the robot, so this
+        // is the same "hard up against the goal" test as the 5.7.1.2 one above.
+        const goalieOnLine = Math.abs(robot.x) + robot.radius > GOAL_MOUTH_X - 10;
         if (ballInBox && ballSlow && goalieOnLine) {
           robot.inactiveGoalieFor = (robot.inactiveGoalieFor ?? 0) + dt;
           if (robot.inactiveGoalieFor > 8) {
