@@ -170,7 +170,10 @@ export class Match {
    * kicker, whether it was charged, and whether the ball ever sat in the gate.
    * This is the answer to that, and it is written for a bench, not for play.
    */
-  readonly actuators: Record<string, { kicker: boolean; dribbler: number; kickCooldown: number }> = {};
+  readonly actuators: Record<
+    string,
+    { kicker: boolean; dribbler: number; kickCooldown: number; say?: unknown }
+  > = {};
   private readonly radios: Record<TeamId, TeamRadio> = {
     cyan: new TeamRadio(),
     yellow: new TeamRadio(),
@@ -349,6 +352,7 @@ export class Match {
         kicker: command.kicker === true,
         dribbler: command.dribbler ?? 0,
         kickCooldown: slot.kickCooldown,
+        say: command.say,
       };
 
       if (command.say !== undefined && this.world.commsEnabled) {

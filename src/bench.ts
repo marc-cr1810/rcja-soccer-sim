@@ -93,6 +93,27 @@ export interface RobotTelemetry {
   errors: number;
   /** Times the referee took this robot off, by rule. */
   removals: Record<string, number>;
+  /**
+   * Per cent of ticks this robot told its team mate where the ball was
+   * (rule 4.2.5) - any `say` whose body carried a non-null `ball`, whatever
+   * shape a program chooses to put it in. Ground truth is what a program
+   * actually put on the wire, not whether it meant to.
+   */
+  relayed: number;
+  /**
+   * Per cent of ticks another robot's shell sat on the line between this one
+   * and the ball - a geometric stand-in for "the IR ring is almost certainly
+   * occluded right now", computed from the world rather than from any
+   * sensor's own noise model.
+   */
+  blocked: number;
+  /**
+   * Of the ticks counted in `blocked`, the per cent where the team mate was
+   * relaying a ball position at the same tick - the number that actually says
+   * whether the radio is covering the blind spots it exists for, rather than
+   * just being switched on.
+   */
+  covered: number;
 }
 
 export interface KickOffTelemetry {
@@ -221,6 +242,9 @@ interface Accumulator {
   lastZ: number;
   removals: Record<string, number>;
   wasRemoved: boolean;
+  relayed: number;
+  blocked: number;
+  blockedCovered: number;
 }
 
 function blank(x: number, z: number): Accumulator {
@@ -228,7 +252,59 @@ function blank(x: number, z: number): Accumulator {
     samples: 0, x: 0, z: 0, possession: 0, nearBall: 0, attackThird: 0, ownThird: 0,
     outsideLines: 0, whollyOut: 0, stalled: 0, travelled: 0, speed: 0,
     lastX: x, lastZ: z, removals: {}, wasRemoved: false,
+    relayed: 0, blocked: 0, blockedCovered: 0,
   };
+}
+
+/** Whether a `say` payload told the team mate a ball position, in any shape. */
+export function relaying(say: unknown): boolean {
+  if (!say || typeof say !== 'object') return false;
+  return (say as { ball?: unknown }).ball != null;
+}
+
+/** Squared distance from point P to the segment AB, and where along it. */
+function pointToSegment(
+  px: number, pz: number, ax: number, az: number, bx: number, bz: number,
+): { t: number; dist: number } {
+  const dx = bx - ax;
+  const dz = bz - az;
+  const len2 = dx * dx + dz * dz;
+  const t = len2 > 1e-9 ? Math.max(0, Math.min(1, ((px - ax) * dx + (pz - az) * dz) / len2)) : 0;
+  const cx = ax + t * dx;
+  const cz = az + t * dz;
+  return { t, dist: Math.hypot(px - cx, pz - cz) };
+}
+
+/**
+ * Whether some other robot's shell sits between this one and the ball.
+ *
+ * A ground-truth stand-in for "the IR ring cannot see the ball right now",
+ * the same reasoning `sense.py`'s `Locator` and `obstacle_range` use for
+ * sonar occlusion, applied here to the ball sightline instead: an obstruction
+ * strictly between the two, close enough to the line between them to plausibly
+ * block a ring reading. Whichever robot causes it, a team mate with a clear
+ * view is the thing that can fix it - an opponent standing in the way blocks
+ * the ring exactly as well as this robot's own team mate does.
+ */
+export function ballBlocked(
+  robot: { id: string; x: number; z: number },
+  ball: { x: number; z: number; radius: number },
+  others: readonly { id: string; x: number; z: number; radius: number; removed: boolean }[],
+): boolean {
+  for (const o of others) {
+    if (o.id === robot.id || o.removed) continue;
+    const { t, dist } = pointToSegment(o.x, o.z, robot.x, robot.z, ball.x, ball.z);
+    if (t > 0.05 && t < 0.95 && dist < o.radius + ball.radius) return true;
+  }
+  return false;
+}
+
+/** The other robot on this one's own team, e.g. `cyan-1` -> `cyan-2`. */
+export function partnerId(id: string): string {
+  const dash = id.lastIndexOf('-');
+  const team = id.slice(0, dash);
+  const number = id.slice(dash + 1);
+  return `${team}-${number === '1' ? '2' : '1'}`;
 }
 
 /**
@@ -385,6 +461,12 @@ class Sampler {
       const sign = robot.team === 'cyan' ? 1 : -1;
       if (robot.x * sign > THIRD) acc.attackThird++;
       if (robot.x * sign < -THIRD) acc.ownThird++;
+
+      if (relaying(match.actuators[robot.id]?.say)) acc.relayed++;
+      if (ballBlocked(robot, ball, world.robots)) {
+        acc.blocked++;
+        if (relaying(match.actuators[partnerId(robot.id)]?.say)) acc.blockedCovered++;
+      }
     }
 
     this.previous = { x: ball.x, z: ball.z, vx: ball.vx, vz: ball.vz };
@@ -822,6 +904,12 @@ function aggregate(
       worstRun: slot?.worstRun ?? 0,
       errors: Math.round((slot?.errors ?? 0) / n),
       removals,
+      relayed: pct(parts.reduce((a, p) => a + p.relayed, 0), samples),
+      blocked: pct(parts.reduce((a, p) => a + p.blocked, 0), samples),
+      covered: pct(
+        parts.reduce((a, p) => a + p.blockedCovered, 0),
+        parts.reduce((a, p) => a + p.blocked, 0),
+      ),
     };
   }
 
@@ -1083,6 +1171,31 @@ function diagnose(r: BenchResult): Finding[] {
     }
   }
 
+  // -- teamwork ---------------------------------------------------------------
+  // The interesting number is not "blocked" on its own - a robot occluded from
+  // the ball some of the time is normal on a crowded field - it is whether the
+  // team mate was covering for it when it happened. Forgiving thresholds, same
+  // reasoning as the rest of this function: a robot blocked 3% of the match
+  // with no relay to show for it has a real gap, not a rounding error.
+  for (const robot of tested) {
+    if (robot.blocked < 3) continue;
+    if (robot.covered < 50) {
+      add({
+        severity: robot.covered < 20 ? 'medium' : 'low',
+        subject: robot.id,
+        code: 'uncovered',
+        message:
+          `blocked from its own view of the ball ${robot.blocked}% of the match, and its ` +
+          `team mate was relaying a position for only ${robot.covered}% of those ticks.`,
+        advice:
+          'Blocked is usually the team mate standing in the way, which is exactly the case ' +
+          'radio communication (rule 4.2.5) exists for. If the team mate only relays while ' +
+          'confident of its own position, check whether that gate is filtering out relays ' +
+          'that would still have been better than nothing.',
+      });
+    }
+  }
+
   // -- giving the ball away -------------------------------------------------
 
   const ourOuts = r.tested.reduce((a, id) => a + (r.ball.outByRobot[id] ?? 0), 0);
@@ -1259,6 +1372,19 @@ export function formatBench(r: BenchResult, baseline?: BenchResult): string {
     `  ball mean x:         ${r.ball.meanX} mm   in your attacking third ${r.ball.inTestedAttackThird}%` +
       `   in your own ${r.ball.inTestedOwnThird}%`,
   );
+
+  // -- teamwork ---------------------------------------------------------------
+  // "relayed" is ground truth from the wire (a `say` with a `ball` in it, any
+  // shape); "blocked" and "covered" are ground truth from the world (another
+  // robot's shell on the ball sightline, and whether the team mate was
+  // relaying at that same tick) - not a strategy's own opinion of itself.
+  out.push('');
+  out.push(row('team radio', 'relay%', 'blkd%', 'cov%'));
+  for (const id of Object.keys(r.robots).sort()) {
+    const q = r.robots[id]!;
+    const mark = q.tested ? '*' : ' ';
+    out.push(row(`${mark}${id}`, q.relayed, q.blocked, q.blocked > 0 ? q.covered : '—'));
+  }
 
   // -- per robot ------------------------------------------------------------
   out.push('');

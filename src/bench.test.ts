@@ -8,11 +8,46 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { runBench, formatBench, type BenchResult } from './bench';
+import { ballBlocked, formatBench, partnerId, relaying, runBench, type BenchResult } from './bench';
 import { Match, type MatchAgents } from './match';
 import { referenceTeam } from './reference';
 import { naiveChaser, statue } from './bots';
 import { PROTOCOL_VERSION } from './protocol';
+
+describe('teamwork telemetry', () => {
+  it('recognises a relayed ball in any shape, and rejects everything else', () => {
+    expect(relaying({ ball: [10, 20] })).toBe(true);
+    expect(relaying({ ball: { x: 10, z: 20 } })).toBe(true);
+    expect(relaying({ ball: null })).toBe(false);
+    expect(relaying({ role: 'striker' })).toBe(false);
+    expect(relaying(undefined)).toBe(false);
+    expect(relaying('garbage')).toBe(false);
+  });
+
+  it('names the other robot on the same team', () => {
+    expect(partnerId('cyan-1')).toBe('cyan-2');
+    expect(partnerId('cyan-2')).toBe('cyan-1');
+    expect(partnerId('yellow-1')).toBe('yellow-2');
+  });
+
+  it('calls a robot blocked when another shell sits on the line to the ball', () => {
+    const me = { id: 'cyan-1', x: 0, z: 0 };
+    const ball = { x: 200, z: 0, radius: 40 };
+    const inTheWay = { id: 'cyan-2', x: 100, z: 0, radius: 100, removed: false };
+    expect(ballBlocked(me, ball, [inTheWay])).toBe(true);
+  });
+
+  it('does not call it blocked when nothing is actually between them', () => {
+    const me = { id: 'cyan-1', x: 0, z: 0 };
+    const ball = { x: 200, z: 0, radius: 40 };
+    const toOneSide = { id: 'cyan-2', x: 100, z: 400, removed: false, radius: 100 };
+    const beyondTheBall = { id: 'yellow-1', x: 400, z: 0, removed: false, radius: 100 };
+    const removed = { id: 'yellow-2', x: 100, z: 0, removed: true, radius: 100 };
+    expect(ballBlocked(me, ball, [toOneSide, beyondTheBall, removed])).toBe(false);
+    // A robot cannot block its own view of the ball.
+    expect(ballBlocked(me, ball, [{ ...me, radius: 100, removed: false }])).toBe(false);
+  });
+});
 
 describe('the observer hook', () => {
   it('is called every physics step and sees the match', () => {
@@ -182,6 +217,7 @@ function skeleton(): BenchResult {
     meanX: 0, meanZ: 0, possession: 10, nearBall: 30, attackThird: 10, ownThird: 20,
     outsideLines: 1, whollyOut: 0, stalled: 0, metresTravelled: 50, meanSpeed: 400,
     missed: 0, worstRun: 0, errors: 0, removals: {},
+    relayed: 0, blocked: 0, covered: 0,
   });
   return {
     matches: 2,
