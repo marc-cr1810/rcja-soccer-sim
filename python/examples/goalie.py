@@ -32,7 +32,7 @@ from pathlib import Path
 # Ensure rcja_soccer can be imported regardless of current working directory
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from rcja_soccer import Robot, clamp, drive, wrap_angle
+from rcja_soccer import Robot, clamp, drive, relay_ball, teammate_ball, wrap_angle
 from rcja_soccer.field import (
     HALF_LENGTH,
     HALF_WIDTH,
@@ -44,8 +44,8 @@ from rcja_soccer.frame import GoalFrame
 from rcja_soccer.sense import (
     BallTracker,
     CompassBias,
+    GyroRate,
     Locator,
-    YawRate,
     back_inside,
     obstacle_range,
     spin_towards,
@@ -97,7 +97,7 @@ LEASH_Z = 430.0
 # `LEASH_X` is the goal-line distance either way round, so it needs no frame.
 LEASH_X = HALF_LENGTH - 40.0
 
-yaw = YawRate()
+yaw = GyroRate()
 locator = Locator(TEAM)
 ball = BallTracker()
 drift = CompassBias()
@@ -156,7 +156,19 @@ def think(s, me):
         )
 
     if not ball.seen:
-        return hold(s, me, me_x, me_z, guard_x, guard_z, square, heading, "HOLD_CENTRE")
+        # The team mate can often still see it - the commonest way this
+        # keeper loses the ball is the striker standing between it and the
+        # ring. Shadow the side of the goal it reported rather than sitting
+        # dead centre, but do not chase on secondhand information: leaving
+        # the line still waits for `ball.seen` for real, further down.
+        told = teammate_ball(s)
+        if told is None:
+            return hold(s, me, me_x, me_z, guard_x, guard_z, square, heading, "HOLD_CENTRE")
+        _, told_z = told
+        target_z = clamp(told_z, -POST_CLAMP, POST_CLAMP)
+        step = clamp((1.0 - abs(target_z) / POST_CLAMP) * 70.0, 0.0, 70.0)
+        target_x, _ = frame.from_our_goal(GUARD_DIST + step)
+        return hold(s, me, me_x, me_z, target_x, target_z, square, heading, "GUARD_RELAY")
 
     bx, bz = ball.x, ball.z
     depth = frame.depth(bx, bz)               # how far up the field the ball is
@@ -193,7 +205,7 @@ def think(s, me):
             # The roller has to let go for the kick to carry.
             dribbler=0.0 if safe else 1.0,
             kicker=safe,
-            say={"role": "goalie", "ball": [round(bx), round(bz)], "held": True},
+            say={"role": "goalie", "ball": relay_ball(bx, bz, locator.confidence), "held": True},
         )
 
     # -- shoved onto the line: get back off it ------------------------------
@@ -205,7 +217,7 @@ def think(s, me):
         return robot.motors(
             drive(bearing=wrap_angle(travel - heading), speed=1.0, spin=square),
             dribbler=1.0,
-            say={"role": "goalie", "ball": [round(bx), round(bz)], "held": False},
+            say={"role": "goalie", "ball": relay_ball(bx, bz, locator.confidence), "held": False},
         )
 
     # -- loose in the box: go and get it -----------------------------------
@@ -225,7 +237,7 @@ def think(s, me):
         return robot.motors(
             drive(bearing=wrap_angle(travel - heading), speed=1.0, spin=square),
             dribbler=1.0,
-            say={"role": "goalie", "ball": [round(bx), round(bz)], "held": False},
+            say={"role": "goalie", "ball": relay_ball(bx, bz, locator.confidence), "held": False},
         )
 
     # -- otherwise: guard the line it is going to cross ---------------------
@@ -296,7 +308,7 @@ def hold(s, me, me_x, me_z, target_x, target_z, spin, heading, state, bx=None, b
     dx = target_x - me_x
     dz = target_z - me_z
     gap = math.hypot(dx, dz)
-    message = {"role": "goalie", "ball": None if bx is None else [round(bx), round(bz)], "held": False}
+    message = {"role": "goalie", "ball": relay_ball(bx, bz, locator.confidence), "held": False}
 
     if gap < 18.0:
         say(me, state)

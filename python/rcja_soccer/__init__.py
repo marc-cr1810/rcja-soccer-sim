@@ -32,6 +32,7 @@ from .drive import WHEEL_AXES, clamp, coast, drive, wrap_angle
 from .robot import DEFAULT_URL, PROTOCOL_VERSION, Memory, Reading, Robot
 from .sense import (
     BallTracker,
+    GyroRate,
     Locator,
     YawRate,
     approach_point,
@@ -39,15 +40,18 @@ from .sense import (
     keep_inside,
     line_bearing,
     obstacle_range,
+    relay_ball,
     spin_towards,
     steer_ball_inside,
     steer_clear_of_edges,
+    teammate_ball,
 )
 
 __all__ = [
     "DEFAULT_URL",
     "PROTOCOL_VERSION",
     "BallTracker",
+    "GyroRate",
     "Locator",
     "Memory",
     "Reading",
@@ -63,9 +67,11 @@ __all__ = [
     "keep_inside",
     "line_bearing",
     "obstacle_range",
+    "relay_ball",
     "spin_towards",
     "steer_ball_inside",
     "steer_clear_of_edges",
+    "teammate_ball",
     "wrap_angle",
 ]
 

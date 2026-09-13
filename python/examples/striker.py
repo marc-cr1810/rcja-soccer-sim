@@ -35,7 +35,7 @@ from pathlib import Path
 # Ensure rcja_soccer can be imported regardless of current working directory
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from rcja_soccer import Robot, clamp, drive, wrap_angle
+from rcja_soccer import Robot, clamp, drive, relay_ball, teammate_ball, wrap_angle
 from rcja_soccer.field import (
     HALF_GOAL_WIDTH,
     HALF_LENGTH,
@@ -47,8 +47,9 @@ from rcja_soccer.frame import GoalFrame
 from rcja_soccer.sense import (
     BallTracker,
     CompassBias,
+    GyroRate,
     Locator,
-    YawRate,
+    WheelEffort,
     back_inside,
     obstacle_range,
     spin_towards,
@@ -79,7 +80,8 @@ frame = GoalFrame(TEAM)
 #: to actually move. The posts are at 225 mm.
 AIM_POST = 155.0
 
-yaw = YawRate()
+yaw = GyroRate()
+effort = WheelEffort()
 locator = Locator(TEAM)
 ball = BallTracker()
 drift = CompassBias()
@@ -98,8 +100,10 @@ def think(s, me):
         me.restarted = True
         ball.reset()
         yaw.reset()
+        effort.reset()
 
     yaw.update(s)
+    effort.update(s)
     heading = s.compass.heading
     drift.update(locator.x, locator.z, heading, s)
     heading = drift.corrected(heading)
@@ -196,7 +200,7 @@ def think(s, me):
         bx, bz = ball.x, ball.z
 
     # -- where to put it ----------------------------------------------------
-    aim_x, aim_z = choose_aim(bx, bz, me_z, frame)
+    aim_x, aim_z = choose_aim(bx, bz, me_z, locator.confidence, frame)
     push = math.atan2(aim_z - bz, aim_x - bx)
 
     # Face the way the ball has to go. The kicker fires along the heading, so
@@ -308,7 +312,7 @@ def think(s, me):
         drive(bearing=wrap_angle(travel_field - heading), speed=speed, spin=spin),
         dribbler=dribbler,
         kicker=kick,
-        say={"role": "striker", "ball": [round(bx), round(bz)], "held": holding},
+        say={"role": "striker", "ball": relay_ball(bx, bz, locator.confidence), "held": holding},
     )
 
 
@@ -333,7 +337,7 @@ def leave_room_for_the_keeper(
 
 
 def choose_aim(
-    bx: float, bz: float, me_z: float, frame: GoalFrame
+    bx: float, bz: float, me_z: float, me_confidence: float, frame: GoalFrame
 ) -> tuple[float, float]:
     """Where in the goal to put it — or, deep in our own half, where instead.
 
@@ -371,7 +375,14 @@ def choose_aim(
         # game. Every restart puts a robot on z = 0 exactly, so this is the
         # normal case and not a corner: below the deadband, take the side from
         # the frame, which does reverse with the attack.
-        post = math.copysign(AIM_POST, -me_z if abs(me_z) > 1.0 else frame.up_x)
+        #
+        # And only when the fix is actually solid. `me_z` holds its last
+        # solved value even after the solve fails - a robot occluded for a
+        # while is not on z = 0, it just has not been told otherwise - so an
+        # unconfident `me_z` is stale rather than a fact worth a 310 mm swing
+        # of the aim either.
+        trust_me_z = abs(me_z) > 1.0 and me_confidence >= 1.0
+        post = math.copysign(AIM_POST, -me_z if trust_me_z else frame.up_x)
     return frame.their_x, clamp(post, -HALF_GOAL_WIDTH + 70, HALF_GOAL_WIDTH - 70)
 
 
@@ -413,7 +424,7 @@ def unstick(s, me, me_x, me_z, travel, speed, spin, state, push, holding):
     me.track = history
 
     moved = math.hypot(me_x - history[0][1], me_z - history[0][2]) if len(history) > 1 else 999.0
-    trying = yaw.moving > 180.0
+    trying = effort.value > 180.0
     stalled = len(history) > 8 and moved < 22.0 and trying
 
     timer = me.get("breakout", 0)
@@ -434,17 +445,6 @@ def unstick(s, me, me_x, me_z, travel, speed, spin, state, push, holding):
         me.breakout = 16
         me.breakout_side = -me.get("breakout_side", -1.0)
     return travel, speed, spin, state
-
-
-def teammate_ball(s):
-    """Where the keeper last saw the ball, if it said."""
-    for message in getattr(s, "messages", []):
-        body = getattr(message, "body", None)
-        if isinstance(body, dict) and isinstance(body.get("ball"), list):
-            spot = body["ball"]
-            if len(spot) == 2:
-                return float(spot[0]), float(spot[1])
-    return None
 
 
 def teammate_is_keeping(s) -> bool:

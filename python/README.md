@@ -137,7 +137,7 @@ second test, and far enough to matter by the end of a five minute half.
 
 **The gyro looks steadier than the compass, and is not.** `s.gyro.rate` is a
 direct rate, fine to read every tick — a damping term, say, the way the
-example robots use `YawRate`. It has a bias that random-walks, the same as
+example robots use `GyroRate`. It has a bias that random-walks, the same as
 the compass's drift. Read it as a rate and the bias is nothing, a small
 constant offset that never accumulates. Integrate it into a heading of your
 own instead — trusting a gyro the way you'd trust the compass — and that
@@ -175,7 +175,7 @@ Three modules, none of which know anything your robot does not.
 |---|---|
 | `rcja_soccer.drive` | four wheel powers from a direction. Needed on day one. |
 | `rcja_soccer.field` | the rulebook's dimensions, and the geometry questions worth asking of them — `shot_range`, `kick_lands_in_goal`, `in_penalty_box`. |
-| `rcja_soccer.sense` | `Locator` (where am I), `BallTracker` (where is the ball and where is it going), `YawRate`, and the steering helpers the examples use. |
+| `rcja_soccer.sense` | `Locator` (where am I), `BallTracker` (where is the ball and where is it going), `GyroRate`/`YawRate` (how fast am I turning), `teammate_ball` (where did the radio say it was), and the steering helpers the examples use. |
 
 `field` is not a cheat: every number in it is printed in the rules and a team
 measures them off the table before a competition. `sense` is where the

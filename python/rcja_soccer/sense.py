@@ -83,7 +83,6 @@ class YawRate:
 
     def __init__(self, tau: float = 0.05) -> None:
         self.rate = 0.0
-        self.moving = 0.0
         self._tau = tau
         self._last: list[float] | None = None
         self._clock: float | None = None
@@ -104,9 +103,6 @@ class YawRate:
         # mean is rotation and the rest is translation.
         mean = sum(turns) / len(turns) / dt
         omega = mean * WHEEL_RADIUS / MOUNT_RADIUS
-        # How hard the wheels are working at all, which is how a stall is told
-        # apart from standing still on purpose.
-        self.moving = sum(abs(t) for t in turns) / len(turns) / dt * WHEEL_RADIUS
 
         blend = min(1.0, dt / self._tau)
         self.rate += (omega - self.rate) * blend
@@ -114,6 +110,44 @@ class YawRate:
 
     def reset(self) -> None:
         self.rate = 0.0
+        self._last = None
+        self._clock = None
+
+
+class WheelEffort:
+    """How hard the wheels are working, from the encoders.
+
+    A different question from either yaw tracker's: not "how fast am I
+    turning" but "how hard am I trying to move at all" — which is how a robot
+    tells a stall (wheels turning, chassis going nowhere) apart from standing
+    still on purpose. It used to be a side effect of :class:`YawRate`
+    differencing the encoders for its own reasons; kept separate so it stays
+    available to a robot that reads its rotation from the gyro instead, which
+    never touches the encoders at all.
+    """
+
+    def __init__(self) -> None:
+        self.value = 0.0
+        self._last: list[float] | None = None
+        self._clock: float | None = None
+
+    def update(self, s) -> float:
+        clock = s.clock
+        dt = 0.02 if self._clock is None else max(1e-3, clock - self._clock)
+        self._clock = clock
+
+        encoders = list(getattr(s, "encoders", []) or [])
+        last = self._last
+        self._last = encoders
+        if last is None or len(last) != len(encoders) or not encoders:
+            return self.value
+
+        turns = [a - b for a, b in zip(encoders, last)]
+        self.value = sum(abs(t) for t in turns) / len(turns) / dt * WHEEL_RADIUS
+        return self.value
+
+    def reset(self) -> None:
+        self.value = 0.0
         self._last = None
         self._clock = None
 
@@ -207,7 +241,7 @@ class CompassBias:
         return wrap_angle(heading - self.bias)
 
 
-def spin_towards(error: float, yaw: YawRate, kp: float = 1.4, kd: float = 0.28) -> float:
+def spin_towards(error: float, yaw: "YawRate | GyroRate", kp: float = 1.4, kd: float = 0.28) -> float:
     """Spin power that turns to face something and stops there.
 
     Proportional to the heading error, damped by how fast the robot is already
@@ -216,6 +250,38 @@ def spin_towards(error: float, yaw: YawRate, kp: float = 1.4, kd: float = 0.28) 
     that is rotating.
     """
     return clamp(error * kp - yaw.rate * kd, -1.0, 1.0)
+
+
+def teammate_ball(s) -> tuple[float, float] | None:
+    """Where the team mate last saw the ball, if it said (rule 4.2.5).
+
+    Worth having because the robot most likely to block this one's own view of
+    the ball is its own team mate — standing in front of the infrared ring is
+    the commonest way to lose the ball, not the rarest. The link expires a
+    message after 0.4 seconds, so whatever comes back here is recent by
+    construction.
+    """
+    for message in getattr(s, "messages", []):
+        body = getattr(message, "body", None)
+        if isinstance(body, dict) and isinstance(body.get("ball"), list):
+            spot = body["ball"]
+            if len(spot) == 2:
+                return float(spot[0]), float(spot[1])
+    return None
+
+
+def relay_ball(bx: float | None, bz: float | None, confidence: float) -> list[float] | None:
+    """The ball position worth telling the team mate, or nothing.
+
+    Only when this robot's own position fix is solid - a shaky relay is worse
+    than none, because the team mate receiving it has no way to tell the two
+    apart. `bx`/`bz` are usually built from this robot's own `me_x, me_z` at
+    the moment of sighting, so a bad position fix produces a bad ball estimate
+    that would otherwise be handed to the other robot as if it were reliable.
+    """
+    if bx is None or bz is None or confidence < 1.0:
+        return None
+    return [round(bx), round(bz)]
 
 
 # ------------------------------------------------------------------ where am I
