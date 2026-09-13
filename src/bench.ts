@@ -54,6 +54,15 @@ export interface BenchOptions {
   connectTimeout: number;
 }
 
+/**
+ * How long a finished shot waits to learn whether it scored.
+ *
+ * The referee confirms a goal about 0.15-0.22s after the ball crosses,
+ * measured over full matches. Half a second covers that with room, and is far
+ * short of the restart, so nothing else can be mistaken for the same goal.
+ */
+const GOAL_SETTLE_SECONDS = 0.5;
+
 export const DEFAULT_OPTIONS: BenchOptions = {
   team: 'violet',
   opponent: 'reference',
@@ -319,7 +328,7 @@ export function partnerId(id: string): string {
  * and it reads them precisely so it can be compared against the truth beside
  * it.
  */
-class Sampler {
+export class Sampler {
   readonly robots = new Map<string, Accumulator>();
   readonly kicks = new Map<string, KickTelemetry>();
   ballSamples = 0;
@@ -338,7 +347,23 @@ class Sampler {
   private previous = { x: 0, z: 0, vx: 0, vz: 0 };
   private seenEvents = new Set<unknown>();
   private shot: { by: string; range: number; onTarget: boolean } | null = null;
-  private goalsSoFar = 0;
+  /**
+   * A finished shot, waiting to find out whether it was a goal.
+   *
+   * The score does not move at the instant the ball crosses the line - the
+   * referee takes about two tenths of a second to confirm it, measured. So by
+   * the time the score changes the ball is long out of play and the shot that
+   * put it there has already been resolved as something else. Deciding at the
+   * moment the ball leaves play is therefore too early, and deciding when the
+   * score moves is too late; the shot has to wait out the gap.
+   */
+  private settling: {
+    shot: { by: string; range: number; onTarget: boolean };
+    outcome: keyof KickTelemetry;
+    at: number;
+  } | null = null;
+  /** Each side's score as of the last tick, kept apart rather than summed. */
+  private scoreSoFar = { violet: 0, lime: 0 };
   readonly kickoffs: KickOffTelemetry[] = [];
   private pendingKO: {
     team: TeamId;
@@ -546,15 +571,41 @@ class Sampler {
       }
     }
 
+    // Whoever scored, it was not whoever happened to kick next. Settle any
+    // shot that is waiting on the referee before looking at this tick.
+    if (this.settling) {
+      const scorer = world.score.violet > this.scoreSoFar.violet
+        ? 'violet'
+        : world.score.lime > this.scoreSoFar.lime
+          ? 'lime'
+          : null;
+      if (scorer) {
+        // A goal, and it belongs to the shot that was in the air - but only if
+        // that shot came from the side that scored. Crediting it regardless is
+        // what made the table report the two teams' goals almost exactly
+        // swapped: the kick after a goal is the kick-OFF, and a kick-off is
+        // taken by the team that just conceded.
+        this.record(
+          this.settling.shot,
+          this.settling.shot.by.startsWith(scorer) ? 'goals' : this.settling.outcome,
+        );
+        this.settling = null;
+      } else if (world.clock - this.settling.at > GOAL_SETTLE_SECONDS) {
+        this.record(this.settling.shot, this.settling.outcome);
+        this.settling = null;
+      }
+    }
+    this.scoreSoFar = { violet: world.score.violet, lime: world.score.lime };
+
     if (!this.shot) return;
-    const scored = world.score.violet + world.score.lime;
-    if (scored !== this.goalsSoFar) {
-      this.goalsSoFar = scored;
-      this.record(this.shot, 'goals');
-      this.shot = null;
-    } else if (Math.abs(ball.x) > HALF_LENGTH || Math.abs(ball.z) > HALF_WIDTH) {
+    if (Math.abs(ball.x) > HALF_LENGTH || Math.abs(ball.z) > HALF_WIDTH) {
       const intoMouth = Math.abs(ball.z) < 220 && Math.abs(ball.x) > HALF_LENGTH;
-      this.record(this.shot, intoMouth ? 'intoMouth' : this.shot.onTarget ? 'blockedOut' : 'offTarget');
+      // Not recorded yet: the referee has not said whether this was a goal.
+      this.settling = {
+        shot: this.shot,
+        outcome: intoMouth ? 'intoMouth' : this.shot.onTarget ? 'blockedOut' : 'offTarget',
+        at: world.clock,
+      };
       this.shot = null;
     } else if (now < 250) {
       this.record(this.shot, this.shot.onTarget ? 'stoppedInPlay' : 'offTarget');

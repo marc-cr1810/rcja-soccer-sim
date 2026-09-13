@@ -8,10 +8,19 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { ballBlocked, formatBench, partnerId, relaying, runBench, type BenchResult } from './bench';
+import {
+  Sampler,
+  ballBlocked,
+  formatBench,
+  partnerId,
+  relaying,
+  runBench,
+  type BenchResult,
+} from './bench';
 import { Match, type MatchAgents } from './match';
 import { referenceTeam } from './reference';
 import { naiveChaser, statue } from './bots';
+import { HALF_LENGTH, HALF_WIDTH } from './field';
 import { PROTOCOL_VERSION } from './protocol';
 
 describe('teamwork telemetry', () => {
@@ -315,3 +324,96 @@ for (const robot of [1, 2]) {
 // Referenced so the imports are not dead weight if a test is skipped.
 void naiveChaser;
 void statue;
+
+describe('kick telemetry attributes a goal to whoever actually scored it', () => {
+  /**
+   * The real sequence, which is what makes this awkward: the ball crosses the
+   * line, it is out of play for a fifth of a second while the referee decides,
+   * and only then does the score move. So the shot that scored has already
+   * been resolved as "went out of play" by the time there is a goal to credit
+   * it with - and the next kick after that is the kick-OFF, taken by the team
+   * that just conceded.
+   */
+  const shootThenConcede = (scorer: 'violet' | 'lime') => {
+    const match = new Match({
+      agents: { ...referenceTeam('violet'), ...referenceTeam('lime') } as unknown as MatchAgents,
+      halfSeconds: 90,
+      seed: 1,
+    });
+    const sampler = new Sampler('violet');
+    match.world.kickOff('violet');
+    match.world.running = true;
+
+    const ball = match.world.ball;
+    const shooter = match.world.robots.find((r) => r.id === 'violet-1')!;
+    shooter.heading = 0;
+
+    // At rest beside violet-1, so the next tick reads as an acceleration.
+    ball.x = shooter.x + 60;
+    ball.z = shooter.z;
+    ball.vx = 0;
+    ball.vz = 0;
+    sampler.step(match);
+
+    // Struck.
+    ball.vx = 2600;
+    ball.vz = 0;
+    sampler.step(match);
+
+    // Over the line and out of play, still no score: the referee is deciding.
+    ball.x = HALF_LENGTH + 60;
+    ball.z = 0;
+    sampler.step(match);
+
+    // Two tenths later the goal is given.
+    match.world.clock += 0.2;
+    match.world.score[scorer] += 1;
+    sampler.step(match);
+
+    return sampler.kicks.get('violet-1');
+  };
+
+  it("credits the kick when the shooter's own team scores", () => {
+    expect(shootThenConcede('violet')?.goals).toBe(1);
+  });
+
+  it('does not credit it when the other team scores', () => {
+    expect(shootThenConcede('lime')?.goals ?? 0).toBe(0);
+  });
+
+  it('still resolves the kick either way, rather than losing it', () => {
+    expect(shootThenConcede('violet')?.total).toBe(1);
+    expect(shootThenConcede('lime')?.total).toBe(1);
+  });
+
+  it('resolves a shot that went out and was never a goal, once the wait is up', () => {
+    const match = new Match({
+      agents: { ...referenceTeam('violet'), ...referenceTeam('lime') } as unknown as MatchAgents,
+      halfSeconds: 90,
+      seed: 1,
+    });
+    const sampler = new Sampler('violet');
+    match.world.kickOff('violet');
+    match.world.running = true;
+    const ball = match.world.ball;
+    const shooter = match.world.robots.find((r) => r.id === 'violet-1')!;
+    shooter.heading = 0;
+    ball.x = shooter.x + 60;
+    ball.z = shooter.z;
+    ball.vx = 0;
+    ball.vz = 0;
+    sampler.step(match);
+    ball.vx = 2600;
+    sampler.step(match);
+    // Out over a sideline, and nobody scores.
+    ball.x = 0;
+    ball.z = HALF_WIDTH + 60;
+    sampler.step(match);
+    match.world.clock += 1.0;
+    sampler.step(match);
+
+    const bag = sampler.kicks.get('violet-1');
+    expect(bag?.goals ?? 0).toBe(0);
+    expect(bag?.total).toBe(1);
+  });
+});
