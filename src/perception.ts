@@ -39,8 +39,8 @@ export interface MatchView {
   playing: boolean;
   ball: { x: number; z: number };
   robots: readonly SensedRobot[];
-  /** Which team, if any, has a kick-off to take. */
-  kickoff: { pending: boolean; team: string | null };
+  /** Which team, if any, has a kick-off under way, and how long until it is live. */
+  kickoff: { pending: boolean; team: string | null; countdown: number };
 }
 
 export interface SenseInput {
@@ -131,7 +131,11 @@ export class Senses {
       playing: view.playing,
       kickoff: {
         pending: view.kickoff.pending,
-        ours: view.kickoff.pending && view.kickoff.team === self.team,
+        // The countdown belongs to whoever the restart belongs to: a robot that
+        // must not approach the ball until the whistle needs `ours` to say true
+        // for the whole wait, not just the live part.
+        ours: (view.kickoff.pending || view.kickoff.countdown > 0) && view.kickoff.team === self.team,
+        countdown: view.kickoff.countdown,
       } satisfies KickoffReading,
       ball: readIr(self, view.ball, { blockers, ideal }, this.ir),
       compass: { heading: this.compass.read(self.heading, this.compassNoise, ideal) },

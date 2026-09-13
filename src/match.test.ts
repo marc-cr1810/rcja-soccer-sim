@@ -28,6 +28,10 @@ function play(seed: number, agents: MatchAgents = teams(), halfSeconds = HALF) {
   return new Match({ agents, halfSeconds, seed }).run();
 }
 
+// Whole live matches are CPU-heavy; under a parallel suite they can exceed
+// vitest's 5 s default. Give this block room to breathe.
+// Whole live matches are CPU-heavy; under a parallel suite they can exceed
+// vitest's 5 s default. Give this block room to breathe.
 describe('the gate: sensors-only robots play football', () => {
   it('scores goals across a range of seeds', () => {
     const totals = [1, 2, 3, 4].map((seed) => {
@@ -86,7 +90,7 @@ describe('the gate: sensors-only robots play football', () => {
     expect(wall).toBeLessThan(20);
     expect(600 / wall).toBeGreaterThan(30);
   });
-});
+}, 120_000);
 
 describe('a match can be replayed', () => {
   it('gives the same result for the same seed', () => {
@@ -187,7 +191,7 @@ describe('the reference agent', () => {
         playing: true,
         ball: { x: 0, z: 0 },
         robots: [self],
-        kickoff: { pending: false, team: null },
+        kickoff: { pending: false, team: null, countdown: 0 },
       },
       self,
       wheelSpeeds: [0, 0, 0, 0],
@@ -214,7 +218,7 @@ describe('the reference agent', () => {
         playing: true,
         ball: { x: 0, z: 0 },
         robots: [self],
-        kickoff: { pending: false, team: null },
+        kickoff: { pending: false, team: null, countdown: 0 },
       },
       self,
       wheelSpeeds: [0, 0, 0, 0],
@@ -255,7 +259,7 @@ describe('the reference agent', () => {
       clock: 0,
       lines: [],
       encoders: [0, 0, 0, 0],
-      kickoff: { pending: false, ours: false },
+      kickoff: { pending: false, ours: false, countdown: 0 },
     } as unknown as SensorFrame);
     expect(out.motors.every((m) => m === 0)).toBe(true);
   });

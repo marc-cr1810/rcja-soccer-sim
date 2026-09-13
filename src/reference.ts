@@ -394,6 +394,14 @@ export class ReferenceAgent implements Agent {
 
     if (!frame.playing) return { motors: [0, 0, 0, 0] };
 
+    // A kick-off countdown is "placed but not live": the ball is on the spot
+    // but the whistle has not blown, so nothing must move. In the rare case
+    // the clock is still running (a post-goal restart under autoResolve), this
+    // is what keeps the striker from racing the ball before the whistle fires.
+    if (frame.kickoff.countdown > 0) {
+      return { motors: [0, 0, 0, 0] };
+    }
+
     /*
      * Rule 5.4.7: a kick-off has to be a strike, not a carry.
      *

@@ -20,7 +20,7 @@ function make(tag: string, x: number, z: number, heading: number, ballX: number,
     playing: true,
     ball: { x: ballX, z: ballZ },
     robots: [self],
-    kickoff: { pending: false, team: null },
+    kickoff: { pending: false, team: null, countdown: 0 },
   };
   const input: SenseInput = {
     view,

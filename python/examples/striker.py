@@ -138,6 +138,13 @@ def think(s, me):
     if not s.playing:
         return robot.coast()
 
+    # The ball is on the spot but play is not live until the whistle ends the
+    # countdown. This is easy to miss post-goal, where the clock is still
+    # running: `playing` is true while `kickoff.countdown` ticks down, and a
+    # robot that makes for the ball early is encroaching before the restart.
+    if s.kickoff.countdown > 0:
+        return robot.coast()
+
     # `me` is emptied at every kick-off, so an empty one is the signal that the
     # previous passage of play is over. The trackers are not in `me` and have
     # to be told: a ball estimate from before the restart is an estimate of

@@ -228,7 +228,7 @@ function syntheticFrame(robotNumber: number) {
       playing: false,
       ball: { x: 0, z: 0 },
       robots: [self],
-      kickoff: { pending: false, team: null },
+      kickoff: { pending: false, team: null, countdown: 0 },
     },
     self,
     wheelSpeeds: [0, 0, 0, 0],

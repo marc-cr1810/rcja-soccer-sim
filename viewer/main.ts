@@ -31,6 +31,13 @@ const board = {
   half: document.getElementById('half')!,
 };
 
+const kickoffCountdown = document.getElementById('kickoff-countdown')!;
+const kickoffNumber = kickoffCountdown.querySelector('.ko-num')!;
+const kickoffTeam = kickoffCountdown.querySelector('.ko-team')!;
+/** The countdown value a restart began from, so the draining ring can sit full at 3. */
+let countdownRingStart = 3;
+let countdownFadeTimer: number | undefined;
+
 let renderer: FieldRenderer | null = null;
 let league: League | null = null;
 let halfSeconds = 300;
@@ -148,6 +155,46 @@ function updateStandDown(frame: ViewFrame): void {
   standdown.replaceChildren(...cards);
 }
 
+/**
+ * A kick-off that has been placed but not whistled live.
+ *
+ * The countdown value arrives in match time, so frames (30 Hz from a 100 Hz
+ * world) tick past fractions of a second. The number shows whole seconds; the
+ * ring drains against where this restart began, so it reads "full" the
+ * instant the kick-off is placed and "empty" at the whistle.
+ */
+function updateKickoff(frame: ViewFrame): void {
+  const countdown = frame.kickoff.countdown;
+  if (countdown > 0) {
+    if (countdownFadeTimer !== undefined) {
+      clearTimeout(countdownFadeTimer);
+      countdownFadeTimer = undefined;
+    }
+    const appearing = kickoffCountdown.hidden;
+    kickoffCountdown.hidden = false;
+    kickoffCountdown.classList.remove('fade');
+    if (appearing) countdownRingStart = countdown;
+    kickoffNumber.textContent = String(Math.ceil(countdown));
+    const team = frame.kickoff.team;
+    if (team === 'violet' || team === 'lime') {
+      kickoffCountdown.dataset['team'] = team;
+      kickoffTeam.textContent = frame.teams[team];
+    } else {
+      delete kickoffCountdown.dataset['team'];
+      kickoffTeam.textContent = '';
+    }
+    const start = countdownRingStart > 0 ? countdownRingStart : 1;
+    kickoffCountdown.style.setProperty('--p', String(Math.max(0, Math.min(1, countdown / start))));
+  } else if (!kickoffCountdown.hidden) {
+    kickoffCountdown.classList.add('fade');
+    countdownFadeTimer = window.setTimeout(() => {
+      kickoffCountdown.hidden = true;
+      kickoffCountdown.classList.remove('fade');
+      countdownFadeTimer = undefined;
+    }, 150);
+  }
+}
+
 function updateBoard(frame: ViewFrame): void {
   // Teams swap ends at half time, so the panels flip to keep each name over
   // the goal the team is defending - the .violet/.lime order in the CSS.
@@ -197,6 +244,7 @@ function draw(): void {
   renderer.render(frame, 1 / 60);
   updateBoard(latest);
   updateStandDown(latest);
+  updateKickoff(latest);
 }
 
 function receive(message: ViewMessage): void {

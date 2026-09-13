@@ -91,6 +91,7 @@ ball position and no map: a real robot does not have those, so neither do you.
 | `s.ball_gate.held` | Whether the dribbler has the ball. |
 | `s.messages` | What your team mate said (rule 4.2.5). |
 | `s.kickoff.pending` / `.ours` | A kick-off is live and 5.4.7 applies. |
+| `s.kickoff.countdown` | Seconds left before the whistle makes the kick-off live; hold still while it's above 0. |
 | `s.playing` | False before the whistle and at a stoppage. |
 
 `me` is yours. Anything you put on it survives to the next tick, and it is

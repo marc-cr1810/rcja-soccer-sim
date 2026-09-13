@@ -8,7 +8,7 @@
  */
 
 import { MatchServer } from './server';
-import { Match, type MatchAgents } from './match';
+import { Match, KICKOFF_COUNTDOWN_SECONDS, type MatchAgents } from './match';
 import { referenceTeam } from './reference';
 import { runLadder, formatLadder, type Entry } from './ladder';
 import { ReferenceAgent } from './reference';
@@ -117,6 +117,11 @@ async function serve(flags: Map<string, string>): Promise<void> {
     viewHz: num(flags, 'view-hz', 60),
     idealSensors,
     pythonLibDir: pythonLibDir(),
+    // Present means the operator said something ("0" included); absent lets
+    // the server pick its own default for the mode.
+    kickoffCountdown: flags.has('kickoff-countdown')
+      ? num(flags, 'kickoff-countdown', KICKOFF_COUNTDOWN_SECONDS)
+      : undefined,
   });
   const port = await server.listen();
 
@@ -368,7 +373,7 @@ function usage(): void {
   console.log(`
   rcja-soccer-sim
 
-    serve     run the match server and keep playing matches   [--port --half --home --away --seed --opponent --agents --fast --referee]
+    serve     run the match server and keep playing matches   [--port --half --home --away --seed --opponent --agents --fast --referee --kickoff-countdown]
     match     play one match headless and print the result    [--half --home --away --seed --opponent]
     ladder    play every bot against every other              [--half --rounds --seed]
     bench     measure your robot program and say what is wrong
@@ -385,6 +390,11 @@ function usage(): void {
   kick-off, remove/return a robot or correct the score at any time. Prints a
   one-time token; --referee-token sets it yourself instead of a random one.
   Needs npm run build:referee. See docs/running-a-server.md.
+
+  --kickoff-countdown N  pause each kick-off for N seconds of placed-but-not-
+                         live wait (default 3 for spectated matches, 0 for
+                         headless). The whistle blows when it reaches zero;
+                         the referee's "Kick off now" skips it. 0 disables it.
 
   bench flags:
     --spawn CMD     start your robots with CMD; {url} becomes the address

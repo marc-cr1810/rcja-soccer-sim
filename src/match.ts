@@ -37,6 +37,14 @@ const GATE_ARC = 0.6;
 const KICK_SPEED = 2400;
 /** Seconds to recharge. A capacitor kicker cannot fire every tick. */
 const KICK_COOLDOWN = 1.2;
+/**
+ * Default countdown before a live kick-off becomes play, in seconds.
+ *
+ * The server's choice for refereed/live matches; here so `serve` shares the
+ * default with the referee board. Headless matches never see it — they pass 0
+ * through `MatchOptions.kickoffCountdown`.
+ */
+export const KICKOFF_COUNTDOWN_SECONDS = 3;
 /** How firmly the roller holds the ball against the robot. */
 const DRIBBLE_GRIP = 0.55;
 
@@ -93,6 +101,14 @@ export interface MatchOptions {
   /** Forwarded to `World` directly, independent of `refereed`. Defaults to World's own default (true). */
   autoResolve?: boolean;
   autoDamaged?: boolean;
+  /**
+   * Seconds of placed-but-not-live countdown at each kick-off, or 0 (the
+   * default) for an instant restart. The server chooses a default for live
+   * play; a headless match stays 0 so nothing about it changes. During the
+   * countdown the half-start clock stays stopped and 5.4.7 does not open
+   * until the whistle.
+   */
+  kickoffCountdown?: number;
   /**
    * Called after every physics step, with the match.
    *
@@ -227,6 +243,7 @@ export class Match {
       commsEnabled: league.commsAllowed,
       autoResolve: opts.autoResolve,
       autoDamaged: opts.autoDamaged,
+      kickoffCountdown: opts.kickoffCountdown ?? 0,
     });
     this.world.resetRobots('violet');
 
@@ -480,14 +497,14 @@ export class Match {
    */
   kickOff(team: TeamId): void {
     this.world.kickOff(team);
-    this.world.running = true;
+    if (!this.world.countdownActive) this.world.running = true;
     this.hasKickedOffThisHalf = true;
   }
 
   /** Rule violated at kick-off: the other side gets it instead. */
   awardKickOffToOther(): void {
     this.world.callIllegalKickOff();
-    this.world.running = true;
+    if (!this.world.countdownActive) this.world.running = true;
     this.hasKickedOffThisHalf = true;
   }
 
@@ -505,6 +522,9 @@ export class Match {
   pause(): void {
     if (!this.world.running) return;
     this.world.running = false;
+    // A pause also freezes any kick-off countdown in flight, so the referee
+    // can talk a team down and still give them their full restart.
+    this.world.paused = true;
     this.world.emit({ kind: 'paused', rule: '—', message: 'Play paused by referee.' });
   }
 
@@ -515,11 +535,23 @@ export class Match {
    * referee clicking Resume instead of Kick Off at the top of a half would
    * otherwise start play with every robot wherever the last half left it,
    * skipping the rule 5.4 restart placement entirely.
+   *
+   * Also refuses while a half-start kick-off is still counting down unpaused:
+   * that is a restart waiting for its whistle, not a paused match, and
+   * Resume ending the countdown would hand the striker an instant 5.4.7
+   * strike window with no warning.
    */
   resume(): void {
     if (this.world.running || !this.hasKickedOffThisHalf) return;
+    if (this.world.countdownActive && !this.world.paused) return;
+    this.world.paused = false;
     this.world.running = true;
     this.world.emit({ kind: 'resumed', rule: '—', message: 'Play resumed by referee.' });
+  }
+
+  /** A referee skipping the kick-off wait: end the countdown and play now. */
+  skipKickoffCountdown(): void {
+    this.world.skipKickoffCountdown();
   }
 
   /** End the current half early. The loop driving the match checks this once per frame. */
@@ -595,6 +627,10 @@ export class Match {
       clock: this.world.clock,
       half: this.world.half,
       running: this.world.running,
+      kickoff: {
+        countdown: this.world.countdownSeconds,
+        team: this.world.restart.team,
+      },
       score: { ...this.world.score },
       ball: {
         x: this.world.ball.x,
@@ -646,7 +682,10 @@ export class Match {
       this.world.kickOff(half === 1 ? 'violet' : 'lime');
       this.resetAgents();
 
-      this.world.running = true;
+      // With a countdown the kick-off is placed but not live: the whistle
+      // inside `step` starts the clock. Headless matches have no countdown,
+      // so nothing about them changes.
+      if (!this.world.countdownActive) this.world.running = true;
       const until = this.world.clock + this.halfSeconds;
       while (this.world.clock < until) this.step(dt);
       this.world.running = false;

@@ -127,7 +127,7 @@ function frames(seq: Pose[], attackDirection: 1 | -1, held: boolean, rotated: bo
       playing: true,
       ball: { x: p.bx, z: p.bz },
       robots: [self, ...rest],
-      kickoff: { pending: false, team: null },
+      kickoff: { pending: false, team: null, countdown: 0 },
     };
     const input: SenseInput = {
       view,

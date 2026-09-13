@@ -14,7 +14,7 @@
  */
 
 /** Protocol version. Bumped when a frame changes shape; the server refuses a mismatch. */
-export const PROTOCOL_VERSION = 4;
+export const PROTOCOL_VERSION = 5;
 
 /** What the infrared ring can see of the ball. Null when nothing is detected. */
 export interface BallReading {
@@ -168,6 +168,17 @@ export interface KickoffReading {
   pending: boolean;
   /** Whether it is ours to take. */
   ours: boolean;
+  /**
+   * Seconds left before the whistle makes the kick-off live.
+   *
+   * The ball is placed and play is not live ("not live" is also what
+   * `pending: false` says, but `pending` is false while the countdown runs and
+   * true after it) - a restart the referee has not yet whistled. Non-zero only
+   * when the host runs a countdown; headless matches see 0 and only ever see
+   * `pending` turn true. `pending` and `countdown` are never both live: the
+   * countdown reaching zero IS the whistle that arms the 5.4.7 strike window.
+   */
+  countdown: number;
 }
 
 export interface SensorFrame {

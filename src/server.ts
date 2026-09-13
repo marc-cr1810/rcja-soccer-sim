@@ -19,7 +19,14 @@ import { tmpdir } from 'node:os';
 import { extname, join, normalize, resolve } from 'node:path';
 import { WebSocketServer, type WebSocket } from 'ws';
 
-import { Match, CONTROL_HZ, PHYSICS_HZ, type MatchOptions, type MatchResult } from './match';
+import {
+  Match,
+  CONTROL_HZ,
+  KICKOFF_COUNTDOWN_SECONDS,
+  PHYSICS_HZ,
+  type MatchOptions,
+  type MatchResult,
+} from './match';
 import { VIEW_HZ, type ViewMessage } from './view';
 import { AGENT_PATH, AgentGateway } from './gateway';
 import { slugifyTeam, TOKEN_FILENAME } from './manifest';
@@ -50,6 +57,14 @@ export interface ServerOptions {
    * or plain `serve` behaviour changes unless this is set.
    */
   refereeToken?: string;
+  /**
+   * Seconds of placed-but-not-live countdown before each kick-off becomes
+   * play. Defaults to `KICKOFF_COUNTDOWN_SECONDS` for realtime (spectated,
+   * refereed) matches and 0 for headless ones; a referee can still tell the
+   * server to skip a single wait, and `--kickoff-countdown 0` disables it
+   * entirely for a match that must start instantly.
+   */
+  kickoffCountdown?: number;
 }
 
 const MAX_SUBMIT_BYTES = 2 * 1024 * 1024;
@@ -247,6 +262,8 @@ export class MatchServer {
     const match = new Match({
       idealSensors: this.opts.idealSensors ?? false,
       ...options,
+      kickoffCountdown:
+        options.kickoffCountdown ?? this.opts.kickoffCountdown ?? (this.realtime ? KICKOFF_COUNTDOWN_SECONDS : 0),
     });
     this.current = match;
     // A program that dropped out mid-match may not simply reconnect and carry
@@ -284,7 +301,10 @@ export class MatchServer {
       match.world.half = half;
       match.world.kickOff(half === 1 ? 'violet' : 'lime');
       match.resetAgents();
-      match.world.running = true;
+      // The kick-off is placed but not live while its countdown runs: the
+      // whistle inside `step` starts the clock. Headless matches (no
+      // countdown) start exactly as before.
+      if (!match.world.countdownActive) match.world.running = true;
 
       const until = match.world.clock + match.halfLength;
       let owed = 0;
@@ -337,7 +357,7 @@ export class MatchServer {
       match.world.half = half;
       match.world.kickOff(half === 1 ? 'violet' : 'lime');
       match.resetAgents();
-      match.world.running = true;
+      if (!match.world.countdownActive) match.world.running = true;
       const until = match.world.clock + match.halfLength;
       while (match.world.clock < until) {
         for (let i = 0; i < perControl && match.world.clock < until; i++) match.step(dt);
@@ -395,7 +415,11 @@ export class MatchServer {
           owed = dt * perControl;
         }
 
-        if (match.world.running) {
+        // Stepping while a kick-off counts down is what makes the whistle
+        // audible: the countdown advances inside `step`. A pause freezes it
+        // (paused = countdown stopped, clock stopped), so the gate has to
+        // let an UNpaused countdown step even though play has not started.
+        if (match.world.running || (match.world.countdownActive && !match.world.paused)) {
           while (owed >= dt && match.world.clock < until) {
             match.step(dt);
             owed -= dt;
@@ -519,6 +543,9 @@ export class MatchServer {
         break;
       case 'resume':
         match.resume();
+        break;
+      case 'skip-kickoff-countdown':
+        match.skipKickoffCountdown();
         break;
       case 'end-half':
         match.endHalf();

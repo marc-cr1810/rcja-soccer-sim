@@ -10,8 +10,17 @@ import {
 } from './field';
 import { distance } from './physics';
 
-const world = (leagueId: Parameters<typeof getLeague>[0], inclined = false) =>
-  new World({ league: getLeague(leagueId), halfLengthSeconds: 300, inclined });
+const world = (
+  leagueId: Parameters<typeof getLeague>[0],
+  inclined = false,
+  config: { kickoffCountdown?: number } = {},
+) =>
+  new World({
+    league: getLeague(leagueId),
+    halfLengthSeconds: 300,
+    inclined,
+    kickoffCountdown: config.kickoffCountdown ?? 0,
+  });
 
 /** Advance the simulation in small steps, as the render loop would. */
 function run(w: World, seconds: number, dt = 1 / 120): void {
@@ -672,6 +681,111 @@ describe('kick-off placement (5.4.5)', () => {
     const gap = distance(violetStriker, w.ball) - (violetStriker.radius + w.ball.radius);
     // In a kicking league, starts ~15 mm from the ball.
     expect(gap).toBeCloseTo(15, 0);
+  });
+});
+
+describe('kick-off countdown (placed but not live)', () => {
+  it('runs the countdown after kickOff without starting the clock', () => {
+    const w = world('open', false, { kickoffCountdown: 3 });
+    w.kickOff('violet');
+
+    expect(w.countdownSeconds).toBe(3);
+    expect(w.running).toBe(false);
+    // 5.4.7 is NOT armed while the countdown runs: it opens at the whistle.
+    expect(w.restart.pending).toBe(false);
+    expect(w.restart.team).toBe('violet'); // still this side's restart
+
+    run(w, 1);
+    expect(w.countdownSeconds).toBeCloseTo(2, 1); // run() steps 121 times per sim-second
+    expect(w.clock).toBe(0); // half-start clock stays stopped
+  });
+
+  it('blows the whistle at zero: clock starts and 5.4.7 opens', () => {
+    const w = world('open', false, { kickoffCountdown: 3 });
+    w.kickOff('violet');
+    run(w, 3.5);
+
+    expect(w.countdownSeconds).toBe(0);
+    expect(w.running).toBe(true);
+    expect(w.events.some((e) => e.kind === 'kickoff-live')).toBe(true);
+    // The striker is ~15 mm from the ball, so it may take the strike.
+    expect(w.restart.pending).toBe(true);
+    // The 3-second window of rule 5.4.7 starts at the whistle, not at the
+    // placement: an illegal kick-off is only possible while actually live.
+    expect(w.sinceKickOff).toBeCloseTo(0.5, 1);
+  });
+
+  it('keeps post-goal auto-resolve going through the countdown', () => {
+    const w = world('open', false, { kickoffCountdown: 2 });
+    w.running = true; // play is under way when the goal is scored
+    w.robots.forEach((r) => (r.removed = true));
+    w.ball.x = 400;
+    w.ball.vx = 3000;
+    run(w, 1); // the goal restarts without a whistle-before-clock
+
+    expect(w.score.violet).toBe(1);
+    // World.kickOff (not Match.kickOff) leaves `running` alone, so the clock
+    // keeps running while the next restart is placed and counts down.
+    expect(w.running).toBe(true);
+    expect(w.countdownSeconds).toBeGreaterThan(0);
+    expect(w.clock).toBeGreaterThan(0);
+    expect(w.events.some((e) => e.kind === 'kickoff-live')).toBe(false);
+
+    run(w, 3);
+    expect(w.countdownSeconds).toBe(0);
+    expect(w.events.some((e) => e.kind === 'kickoff-live')).toBe(true);
+  });
+
+  it('requires a clear strike only once the ball is live', () => {
+    const w = world('open', false, { kickoffCountdown: 1 });
+    w.kickOff('violet');
+
+    // Mid-countdown the ball is not live: take it off the spot and hold it,
+    // and rule 5.4.7 cannot be asked for compliance because no kick-off has
+    // been taken yet. The detector must stay silent.
+    const striker = w.robots.find((r) => r.id === 'violet-1')!;
+    w.ball.x = 180; // carried more than 120 mm from the centre spot
+    striker.x = w.ball.x - striker.radius - w.ball.radius + 5; // touching it
+    w.step(1 / 120);
+    expect(w.events.some((e) => e.kind === 'illegal-kickoff')).toBe(false);
+    expect(w.restart.pending).toBe(false);
+
+    // The whistle opens 5.4.7. The ball is still held off the spot, so the
+    // next eligible step awards the kick-off to the other side.
+    run(w, 3.5);
+    expect(w.countdownSeconds).toBe(0);
+    expect(w.events.some((e) => e.kind === 'illegal-kickoff')).toBe(true);
+  });
+
+  it('pause freezes the countdown and resume continues it', () => {
+    const w = world('open', false, { kickoffCountdown: 3 });
+    w.kickOff('violet');
+    run(w, 1);
+    w.paused = true;
+    w.running = true; // a referee pausing an already-started restart
+    run(w, 2);
+    expect(w.countdownSeconds).toBeCloseTo(2, 1);
+    w.paused = false;
+    run(w, 1);
+    expect(w.countdownSeconds).toBeCloseTo(1, 1);
+  });
+
+  it('skipKickoffCountdown blows the whistle immediately', () => {
+    const w = world('open', false, { kickoffCountdown: 3 });
+    w.kickOff('violet');
+    expect(w.running).toBe(false);
+    w.skipKickoffCountdown();
+    expect(w.countdownSeconds).toBe(0);
+    expect(w.running).toBe(true);
+    expect(w.events.some((e) => e.kind === 'kickoff-live')).toBe(true);
+  });
+
+  it('leaves countdown 0 and the instant restart exactly as before', () => {
+    const w = world('open'); // kickoffCountdown 0, today's behaviour
+    w.kickOff('violet');
+    expect(w.countdownSeconds).toBe(0);
+    expect(w.restart.pending).toBe(true);
+    expect(w.running).toBe(false); // the caller decides, as always
   });
 });
 

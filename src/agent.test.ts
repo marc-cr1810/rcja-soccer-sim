@@ -37,7 +37,7 @@ function view(over: Partial<MatchView> = {}): MatchView {
     playing: true,
     ball: { x: 400, z: 0 },
     robots: [robot()],
-    kickoff: { pending: false, team: null },
+    kickoff: { pending: false, team: null, countdown: 0 },
     ...over,
   };
 }

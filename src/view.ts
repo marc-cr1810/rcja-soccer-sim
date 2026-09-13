@@ -62,6 +62,20 @@ export interface ViewEvent {
   team?: 'violet' | 'lime';
 }
 
+/** A restart the referee has placed but not yet whistled live. */
+export interface ViewKickoff {
+  /**
+   * The team taking the restart. Null between restarts, when the previous
+   * half's kick-off has been played out.
+   */
+  team: 'violet' | 'lime' | null;
+  /**
+   * Seconds left before the whistle makes the kick-off live; 0 when no
+   * countdown is running (including headless matches, which never have one).
+   */
+  countdown: number;
+}
+
 /**
  * The frame a viewer draws.
  *
@@ -76,6 +90,7 @@ export interface ViewFrame {
   clock: number;
   half: 1 | 2;
   running: boolean;
+  kickoff: ViewKickoff;
   score: { violet: number; lime: number };
   ball: ViewBall;
   robots: ViewRobot[];

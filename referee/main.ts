@@ -41,6 +41,13 @@ const board = {
   half: document.getElementById('half')!,
 };
 
+const kickoffCountdown = document.getElementById('kickoff-countdown')!;
+const kickoffNumber = kickoffCountdown.querySelector('.ko-num')!;
+const kickoffTeam = kickoffCountdown.querySelector('.ko-team')!;
+let countdownRingStart = 3;
+let countdownFadeTimer: number | undefined;
+const skipCountdown = document.querySelector('button[data-action="skip-kickoff-countdown"]') as HTMLButtonElement | null;
+
 const abandonReason = document.getElementById('abandon-reason') as HTMLInputElement;
 const correctTeam = document.getElementById('correct-team') as HTMLSelectElement;
 const correctTo = document.getElementById('correct-to') as HTMLInputElement;
@@ -123,6 +130,40 @@ async function act(action: string, body?: unknown): Promise<boolean> {
     logLine(`${action} failed: ${(err as Error).message}`);
     return false;
   }
+}
+
+/** Same countdown overlay as the viewer, plus the "Kick off now" button state. */
+function updateKickoff(frame: ViewFrame): void {
+  const countdown = frame.kickoff.countdown;
+  if (countdown > 0) {
+    if (countdownFadeTimer !== undefined) {
+      clearTimeout(countdownFadeTimer);
+      countdownFadeTimer = undefined;
+    }
+    const appearing = kickoffCountdown.hidden;
+    kickoffCountdown.hidden = false;
+    kickoffCountdown.classList.remove('fade');
+    if (appearing) countdownRingStart = countdown;
+    kickoffNumber.textContent = String(Math.ceil(countdown));
+    const team = frame.kickoff.team;
+    if (team === 'violet' || team === 'lime') {
+      kickoffCountdown.dataset['team'] = team;
+      kickoffTeam.textContent = frame.teams[team];
+    } else {
+      delete kickoffCountdown.dataset['team'];
+      kickoffTeam.textContent = '';
+    }
+    const start = countdownRingStart > 0 ? countdownRingStart : 1;
+    kickoffCountdown.style.setProperty('--p', String(Math.max(0, Math.min(1, countdown / start))));
+  } else if (!kickoffCountdown.hidden) {
+    kickoffCountdown.classList.add('fade');
+    countdownFadeTimer = window.setTimeout(() => {
+      kickoffCountdown.hidden = true;
+      kickoffCountdown.classList.remove('fade');
+      countdownFadeTimer = undefined;
+    }, 150);
+  }
+  if (skipCountdown) skipCountdown.disabled = !(countdown > 0);
 }
 
 function updateBoard(frame: ViewFrame): void {
@@ -223,6 +264,7 @@ function draw(): void {
   renderer.render(frame, 1 / 60);
   updateBoard(latest);
   updateStandDown(latest);
+  updateKickoff(latest);
 }
 
 function receive(message: ViewMessage): void {

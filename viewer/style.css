@@ -96,6 +96,64 @@ html, body {
 .call[data-team="lime"] { border-left-color: var(--lime); }
 .call[hidden] { display: none; }
 
+/* A kick-off placed but not whistled live: the countdown dial. The panel is a
+   dark disc with a ring in the kicking team's colour that drains as the
+   countdown runs, readable from the back of a hall without any words. */
+.kickoff-countdown {
+  --ring: var(--ink);
+  --p: 1;
+  position: fixed;
+  top: 18%;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10;
+  width: 14rem;
+  height: 14rem;
+  border-radius: 50%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.1rem;
+  background: conic-gradient(
+    var(--ring) 0deg,
+    var(--ring) calc(var(--p) * 1turn),
+    rgba(8, 14, 10, 0.82) calc(var(--p) * 1turn),
+    rgba(8, 14, 10, 0.82) 1turn
+  );
+  box-shadow: 0 0 3rem rgba(0, 0, 0, 0.55);
+  transition: opacity 0.15s ease, scale 0.15s ease;
+}
+.kickoff-countdown::before {
+  content: '';
+  position: absolute;
+  inset: 0.65rem;
+  border-radius: 50%;
+  background: var(--ground);
+}
+.kickoff-countdown > * { position: relative; z-index: 1; }
+.kickoff-countdown[data-team="violet"] { --ring: var(--violet); }
+.kickoff-countdown[data-team="lime"] { --ring: var(--lime); }
+.kickoff-countdown.fade { opacity: 0; scale: 0.9; }
+.kickoff-countdown[hidden] { display: none; }
+.ko-label {
+  font-size: 0.74rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+.ko-num {
+  font-size: 5.5rem;
+  font-weight: 700;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.ko-team {
+  font-size: 1.15rem;
+  font-weight: 600;
+  color: var(--ring);
+}
+
 .status {
   position: fixed;
   bottom: 0.6rem;

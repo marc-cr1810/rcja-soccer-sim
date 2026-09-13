@@ -31,7 +31,7 @@ const out = spots.map(([x, z, heading]) => {
     playing: true,
     ball: { x: 0, z: 0 },
     robots: [self],
-    kickoff: { pending: true, team: 'cyan' },
+    kickoff: { pending: true, team: 'cyan', countdown: 0 },
   };
   const input: SenseInput = {
     view,

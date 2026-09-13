@@ -36,6 +36,13 @@
 
       <div id="call" class="call" hidden></div>
 
+      <!-- A kick-off has been placed but the whistle has not blown. -->
+      <div id="kickoff-countdown" class="kickoff-countdown" hidden>
+        <span class="ko-label">kick-off</span>
+        <span class="ko-num">3</span>
+        <span class="ko-team"></span>
+      </div>
+
       <!-- Rule 5.7: robots off the field, with a Return button once ready. -->
       <div id="standdown" class="standdown" hidden></div>
 
@@ -46,6 +53,7 @@
             <button data-action="kickoff" data-team="violet">Violet kicks off</button>
             <button data-action="kickoff" data-team="lime">Lime kicks off</button>
           </div>
+          <button data-action="skip-kickoff-countdown" disabled>Kick off now</button>
           <button data-action="award-kickoff">Award kick-off to other side</button>
         </section>
 

@@ -93,6 +93,7 @@ export type EventKind =
   | 'possible-multiple-defence'
   | 'possible-damaged'
   | 'kickoff'
+  | 'kickoff-live'
   | 'illegal-kickoff'
   | 'paused'
   | 'resumed'
@@ -153,6 +154,16 @@ export interface MatchConfig {
    * Defaults to league.commsAllowed, and can be disabled per referee request (4.2.6).
    */
   commsEnabled?: boolean;
+  /**
+   * Seconds of placed-but-not-live countdown at each kick-off.
+   *
+   * The robots are placed and the ball is on the spot, but the kick-off is not
+   * live — 5.4.7 is not armed — until the countdown reaches zero and the
+   * whistle blows. Advances in `step()`, so it is real match time, not wall
+   * time. Omit, or pass 0, for the instant restart every headless match always
+   * used.
+   */
+  kickoffCountdown?: number;
 }
 
 /** Rule 4.1.1: every league caps the robot at a 220 mm cylinder. */
@@ -301,6 +312,19 @@ export class World {
   sinceForcing = 999;
   /** Seconds since the last kick-off, so 5.4.5 placement is not read as 5.11.1. */
   sinceKickOff = 0;
+  /**
+   * Seconds left of a placed-but-not-live kick-off countdown. Ticked down in
+   * `step()`; reaching zero opens 5.4.7 and starts the clock. How long the
+   * countdown runs is the host's choice (`config.kickoffCountdown`), not the
+   * world's. 0 when none is in progress, which is every headless match.
+   */
+  countdownSeconds = 0;
+  /**
+   * A referee's pause, kept separate from `running`: a kick-off countdown
+   * leaves the clock stopped (`running=false`) without being a pause, and a
+   * pause freezes the countdown, so the two cannot be read off one flag.
+   */
+  paused = false;
   kickingOffTeam: TeamId = 'violet';
   private kickOffPending = false;
   /**
@@ -338,11 +362,18 @@ export class World {
   }
 
   /** Whether a kick-off is under way, and whose it is. Rule 5.4.7 turns on it. */
-  get restart(): { pending: boolean; team: TeamId | null } {
+  get restart(): { pending: boolean; team: TeamId | null; countdown: number } {
+    const underWay = this.kickOffPending || this.countdownActive;
     return {
       pending: this.kickOffPending,
-      team: this.kickOffPending ? this.kickingOffTeam : null,
+      team: underWay ? this.kickingOffTeam : null,
+      countdown: this.countdownSeconds,
     };
+  }
+
+  /** Whether a kick-off has been placed but the whistle has not blown. */
+  get countdownActive(): boolean {
+    return this.countdownSeconds > 0;
   }
 
   /**
@@ -542,6 +573,10 @@ export class World {
     this.pairOrderFlipped = !this.pairOrderFlipped;
     if (this.running) this.clock += dt;
     this.sinceKickOff += dt;
+    if (this.countdownSeconds > 0 && !this.paused) {
+      this.countdownSeconds = Math.max(0, this.countdownSeconds - dt);
+      if (this.countdownSeconds === 0) this.blowWhistle();
+    }
     for (const team of ['violet', 'lime'] as const) {
       this.multipleDefenceCooldown[team] = Math.max(0, this.multipleDefenceCooldown[team] - dt);
     }
@@ -729,7 +764,7 @@ export class World {
    * shape: a ball nobody is near, and nobody is coming for.
    */
   private detectUnreachable(dt: number): void {
-    if (!this.running || this.kickOffPending || speed(this.ball) > 40) {
+    if (!this.running || this.countdownActive || this.kickOffPending || speed(this.ball) > 40) {
       this.unreachableFor = 0;
       return;
     }
@@ -781,6 +816,7 @@ export class World {
    * possession, it is actively in play and NOT in a lack-of-progress condition.
    */
   private detectStall(dt: number): void {
+    if (this.countdownActive || this.kickOffPending) return;
     const ballSpd = speed(this.ball);
 
     /*
@@ -883,7 +919,7 @@ export class World {
    * opposition robot that is in its penalty box.
    */
   private detectForcing(dt: number): void {
-    if (!this.running) return;
+    if (!this.running || this.countdownActive) return;
 
     let forcingAttacker: Robot | null = null;
     let forcedDefender: Robot | null = null;
@@ -1062,7 +1098,7 @@ export class World {
     for (const team of ['violet', 'lime'] as const) {
       // Rule 5.4.5 legitimately puts both defenders on the box at kick-off, so
       // the detector stays quiet until play has actually developed.
-      if (!this.running || this.sinceKickOff < 3) continue;
+      if (!this.running || this.countdownActive || this.sinceKickOff < 3) continue;
       if (this.multipleDefenceCooldown[team] > 0) continue;
 
       const defenders = this.multipleDefenceCandidates(team);
@@ -1327,17 +1363,42 @@ export class World {
 
   kickOff(team: TeamId): void {
     this.resetRobots(team);
-    const striker = this.robots.find((r) => r.team === team && !r.isGoalie);
-    const startsClose = striker
-      ? distance(striker, this.ball) - (striker.radius + this.ball.radius) < 50
-      : false;
-    this.kickOffPending = startsClose;
+    this.countdownSeconds = this.config.kickoffCountdown ?? 0;
+    this.paused = false;
+    if (this.countdownSeconds === 0) {
+      const striker = this.robots.find((r) => r.team === team && !r.isGoalie);
+      this.kickOffPending = striker
+        ? distance(striker, this.ball) - (striker.radius + this.ball.radius) < 50
+        : false;
+    }
     this.emit({
       kind: 'kickoff',
       rule: '5.4',
       team,
       message: `Kick-off to ${team === 'violet' ? 'Violet' : 'Lime'}.`,
     });
+  }
+
+  private blowWhistle(): void {
+    this.paused = false;
+    this.running = true;
+    const striker = this.robots.find((r) => r.team === this.kickingOffTeam && !r.isGoalie);
+    this.kickOffPending = striker
+      ? distance(striker, this.ball) - (striker.radius + this.ball.radius) < 50
+      : false;
+    this.sinceKickOff = 0;
+    this.emit({
+      kind: 'kickoff-live',
+      rule: '5.4',
+      message: 'Play is live.',
+    });
+  }
+
+  /** A referee skipping the kick-off wait: end the countdown and blow the whistle now. */
+  skipKickoffCountdown(): void {
+    if (this.countdownSeconds <= 0) return;
+    this.countdownSeconds = 0;
+    this.blowWhistle();
   }
 
   /**

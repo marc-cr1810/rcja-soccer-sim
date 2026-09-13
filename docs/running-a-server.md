@@ -117,7 +117,7 @@ for the rest of the event.
 
 ```
 serve     run the match server and keep playing matches
-          [--port --half --home --away --seed --opponent --agents --fast --referee]
+          [--port --half --home --away --seed --opponent --agents --fast --referee --kickoff-countdown]
 match     play one match headless and print the result
           [--half --home --away --seed --opponent]
 ladder    play every built-in bot against every other  [--half --rounds --seed]
@@ -132,6 +132,23 @@ Other `serve` flags worth knowing: `--fast` runs as fast as the physics loop
 allows instead of wall-clock (for a machine, not a screen); `--noisy-sensors`
 turns on drift and dropouts instead of the default ideal sensors;
 `--view-hz` changes the spectator frame rate (default 60).
+
+### The kick-off countdown
+
+For any spectated match (realtime, and always for `--referee`), each kick-off
+is placed but **not live** for three seconds by default: the robots are put
+in their 5.4 spots, the ball is on the centre spot, and play — the clock, and
+the 5.4.7 strike window — starts when the countdown reaches zero and the
+whistle blows. The spectator viewer and the referee console both show a dial
+in the kicking team's colour that drains as the countdown runs. A half-start
+restart waits with the clock stopped, so a match cannot be started early by
+clicking Resume instead of Kick Off; a restart after a goal keeps playing
+because the clock was already running.
+
+`--kickoff-countdown N` changes the wait for that server (headless matches
+always get `0`, so `bench`, `ladder` and the `match` command are unchanged).
+On the referee console, the **Kick off now** button skips the wait being
+played out — it is enabled only while a countdown is actually running.
 
 ## Watching
 
