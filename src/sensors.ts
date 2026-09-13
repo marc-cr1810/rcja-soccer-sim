@@ -215,12 +215,14 @@ export function readIr(
  */
 const COMPASS_NOISE = 0.012;
 /**
- * Tuned so a five-minute half walks the heading a few degrees — enough that a
- * robot dead-reckoning off the compass ends the half aiming visibly wide, and
- * little enough that a team testing for thirty seconds sees nothing wrong.
- * That gap is deliberate: it is the bug, and finding it is the lesson.
+ * Tuned so a five-minute half walks the heading about five degrees — enough
+ * that a robot dead-reckoning off the compass ends the half aiming visibly
+ * wide, and little enough that a team testing for thirty seconds sees nothing
+ * wrong. That gap is deliberate: it is the bug, and finding it is the lesson.
+ * The occasional seed drifts to ten or fifteen degrees by the end of a half;
+ * a tacking team spots the bias, a closed-heading team does not.
  */
-const DRIFT_RATE = 0.05;
+const DRIFT_RATE = 0.005;
 
 export class CompassState {
   drift = 0;

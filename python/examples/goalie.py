@@ -43,6 +43,7 @@ from rcja_soccer.field import (
 from rcja_soccer.frame import GoalFrame
 from rcja_soccer.sense import (
     BallTracker,
+    CompassBias,
     Locator,
     YawRate,
     back_inside,
@@ -99,6 +100,7 @@ LEASH_X = HALF_LENGTH - 40.0
 yaw = YawRate()
 locator = Locator(TEAM)
 ball = BallTracker()
+drift = CompassBias()
 
 
 @robot.tick
@@ -117,6 +119,11 @@ def think(s, me):
 
     yaw.update(s)
     heading = s.compass.heading
+    # The compass wanders a degree or three a half and every bearing is
+    # projected through it, so take the drift back out before the world model
+    # is built. It is estimated from the previous fix against the fixed goals.
+    drift.update(locator.x, locator.z, heading, s)
+    heading = drift.corrected(heading)
     me_x, me_z = locator.update(s, heading)
     frame.update(s, heading, me_x, me_z)
     ball.update(s, heading, me_x, me_z)

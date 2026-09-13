@@ -78,14 +78,30 @@ describe('infrared ball seeker', () => {
 });
 
 describe('compass', () => {
-  it('drifts measurably over a five minute half, without being told to', () => {
-    const c = new CompassState();
-    const n = seed();
-    for (let t = 0; t < 300; t += 1 / 50) c.step(1 / 50, n);
-    // Big enough to matter to a robot that integrates it; small enough that a
-    // team testing for thirty seconds will not notice.
-    expect(Math.abs(c.drift)).toBeGreaterThan(0.01);
-    expect(Math.abs(c.drift)).toBeLessThan(0.6);
+  it('drifts a few degrees over a five minute half, not tens of degrees', () => {
+    // The peak wander over a half, averaged across seeds, is what matters: a
+    // robot dead-reckoning off the compass has to end the half visibly wide,
+    // but by degrees, not by a goal and a half. One seed alone can wander back
+    // through zero, so watch the peak and average the end error across seeds.
+    let sumEnd = 0;
+    const seeds = 12;
+    for (let s = 1; s <= seeds; s++) {
+      const c = new CompassState();
+      const n = new Noise(s);
+      let peak = 0;
+      for (let t = 0; t < 300; t += 1 / 50) {
+        c.step(1 / 50, n);
+        peak = Math.max(peak, Math.abs(c.drift));
+      }
+      // 0.35 rad is about 20 degrees; the old 0.05 rate reached 40-100.
+      expect(peak).toBeLessThan(0.35);
+      sumEnd += Math.abs(c.drift);
+    }
+    // Typical end-of-half error is a handful of degrees (about 0.06 rad),
+    // not the 0.6 rad the old rate produced, and not zero either.
+    const meanEnd = sumEnd / seeds;
+    expect(meanEnd).toBeGreaterThan(0.01);
+    expect(meanEnd).toBeLessThan(0.2);
   });
 
   it('reads near the true heading in the short term', () => {

@@ -118,6 +118,55 @@ class YawRate:
         self._clock = None
 
 
+class CompassBias:
+    """Recover the compass's slow drift from the goal posts.
+
+    The compass is the only sensor with an absolute reference, and its needle
+    wanders a few degrees over a half. A driver never notices; a strategy that
+    projects every reading into field coordinates through ``heading`` does,
+    and the error is the whole world rotating gently underneath it.
+
+    The drift cannot be measured from the compass itself, but the goals are
+    always at the same two absolute places and the camera sees them every
+    frame. Whatever the compass says, the bearing to a goal from a known spot
+    is exact, so the difference between that and the camera's bearing to the
+    same goal is the drift, averaged over both goals and smoothed over time.
+    """
+
+    def __init__(self, alpha: float = 0.03) -> None:
+        self.bias = 0.0
+        self._alpha = alpha
+
+    def update(self, me_x: float, me_z: float, heading: float, s) -> None:
+        """Fold this frame's goal sightings into the drift estimate.
+
+        ``me`` is the previous frame's fix, which is a short lag on a bias that
+        moves a fraction of a degree a second; the position error it puts into
+        the true bearing washes out of the average.
+        """
+        camera = getattr(s, "camera", None)
+        goals = getattr(camera, "goals", None) if camera is not None else None
+        if goals is None:
+            return
+        errors = 0.0
+        count = 0
+        for side in ("cyan", "yellow"):
+            sighting = getattr(goals, side, None)
+            if sighting is None:
+                continue
+            gx, gz = goal_centre(side)
+            true = math.atan2(gz - me_z, gx - me_x)
+            observed = wrap_angle(heading + sighting.bearing)
+            errors += wrap_angle(observed - true)
+            count += 1
+        if count:
+            self.bias = wrap_angle(self.bias + self._alpha * (errors / count - self.bias))
+
+    def corrected(self, heading: float) -> float:
+        """The heading the compass is really pointing in."""
+        return wrap_angle(heading - self.bias)
+
+
 def spin_towards(error: float, yaw: YawRate, kp: float = 1.4, kd: float = 0.28) -> float:
     """Spin power that turns to face something and stops there.
 

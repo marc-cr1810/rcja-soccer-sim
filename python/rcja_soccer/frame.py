@@ -69,6 +69,18 @@ class GoalFrame:
             return
 
         cv = getattr(s, "camera", None)
+        if cv is not None and not getattr(cv, "fresh", False):
+            # The camera runs at 30 fps against a faster control loop, so most
+            # ticks hand back last frame's reading rather than a new one. On an
+            # ordinary tick that is harmless - a stale ball or goal sighting is
+            # off by one control step. It is not harmless here: a kick-off
+            # teleports every robot, and a cached sighting is a bearing and
+            # range to the goals from wherever this robot stood *before* that
+            # teleport. Freeze that and the whole half's attack direction is
+            # built from a snapshot of a position the robot no longer occupies.
+            # So wait for a sighting that was actually taken this tick; nothing
+            # else here is tight enough on time to need it.
+            return
         goals = getattr(cv, "goals", None) if cv is not None else None
         mine = getattr(goals, self.team, None)
         theirs = getattr(goals, self.other, None)

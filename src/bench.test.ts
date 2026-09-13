@@ -204,6 +204,7 @@ function skeleton(): BenchResult {
       'yellow-1': robot('yellow-1', false),
       'yellow-2': robot('yellow-2', false),
     },
+    kickoffs: [],
     findings: [],
     scores: [
       { seed: 1, for: 3, against: 1 },

@@ -161,6 +161,16 @@ interface Slot {
 export class Match {
   readonly world: World;
   private readonly slots = new Map<string, Slot>();
+  /**
+   * The last command and actuator state per robot, written every control cycle.
+   *
+   * Reading the world tells you what happened, never what a robot was asking
+   * for; the difference matters. A kick-off turns out to fail in three
+   * completely different ways depending on whether the striker asked for the
+   * kicker, whether it was charged, and whether the ball ever sat in the gate.
+   * This is the answer to that, and it is written for a bench, not for play.
+   */
+  readonly actuators: Record<string, { kicker: boolean; dribbler: number; kickCooldown: number }> = {};
   private readonly radios: Record<TeamId, TeamRadio> = {
     cyan: new TeamRadio(),
     yellow: new TeamRadio(),
@@ -286,6 +296,7 @@ export class Match {
       slot.kickCooldown = Math.max(0, slot.kickCooldown - dt);
       if (robot.removed) {
         robot.motors = [0, 0, 0, 0];
+        this.actuators[robot.id] = { kicker: false, dribbler: 0, kickCooldown: slot.kickCooldown };
         continue;
       }
 
@@ -333,6 +344,11 @@ export class Match {
       const command = slot.agent.poll(frame);
       slot.command = command;
       robot.motors = command.motors;
+      this.actuators[robot.id] = {
+        kicker: command.kicker === true,
+        dribbler: command.dribbler ?? 0,
+        kickCooldown: slot.kickCooldown,
+      };
 
       if (command.say !== undefined && this.world.commsEnabled) {
         this.radios[robot.team].send(number, command.say, this.world.clock);

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
 import sys
 from pathlib import Path
 
@@ -45,6 +46,7 @@ from rcja_soccer.field import (
 from rcja_soccer.frame import GoalFrame
 from rcja_soccer.sense import (
     BallTracker,
+    CompassBias,
     Locator,
     YawRate,
     back_inside,
@@ -80,6 +82,7 @@ AIM_POST = 155.0
 yaw = YawRate()
 locator = Locator(TEAM)
 ball = BallTracker()
+drift = CompassBias()
 
 
 @robot.tick
@@ -98,10 +101,21 @@ def think(s, me):
 
     yaw.update(s)
     heading = s.compass.heading
+    drift.update(locator.x, locator.z, heading, s)
+    heading = drift.corrected(heading)
     me_x, me_z = locator.update(s, heading)
     frame.update(s, heading, me_x, me_z)
     ball.update(s, heading, me_x, me_z)
     holding = s.ball_gate.held
+
+    if s.kickoff.pending and os.environ.get("RJC_DEBUG_KO"):
+        print(
+            f"[KO] t={s.clock:6.2f} ours={s.kickoff.ours} me=({me_x:7.1f},{me_z:6.1f}) "
+            f"h={math.degrees(heading):6.1f} ball.seen={ball.seen} holding={holding} "
+            f"ball=({ball.x if ball.seen else float('nan'):7.1f},"
+            f"{ball.z if ball.seen else float('nan'):6.1f}) gate={s.ball_gate.held}",
+            flush=True,
+        )
 
     # -- rule 5.4.7 ---------------------------------------------------------
     # A kick-off is a strike, not a carry: the ball has to roll 50 mm clear or
@@ -124,10 +138,18 @@ def think(s, me):
         if holding:
             say(me, "KICK_OFF_WAIT")
             return robot.motors(drive(speed=0.0, spin=square), dribbler=1.0, kicker=True)
-        to_ball = wrap_angle(math.atan2(ball.z - me_z, ball.x - me_x) - heading) if ball.seen else 0.0
+        # The approach must not chase the ball estimate. A kick-off starts you
+        # right behind the ball, facing up the field; the estimate has not
+        # converged again after the restart, and steering by it for the first
+        # half second is exactly what drags the ball off the spot. The referee
+        # called illegal kick-offs whose only difference from the legal ones
+        # was how long the striker spent steering. So creep dead straight (in
+        # front of you, no spin) until the gate has the ball, then stop and
+        # let the kicker do the rest. The roller has to stay OFF while
+        # creeping - on, it drags the ball along with you before you hold it.
         say(me, "KICK_OFF")
         return robot.motors(
-            drive(bearing=to_ball, speed=0.55, spin=square), dribbler=1.0, kicker=True
+            drive(bearing=0.0, speed=0.15, spin=0.0), dribbler=0.0, kicker=True
         )
 
     # -- the edges ----------------------------------------------------------

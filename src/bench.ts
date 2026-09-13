@@ -26,7 +26,7 @@ import { botRoster } from './bots';
 import { HALF_LENGTH, HALF_WIDTH } from './field';
 import { MOUNT_RADIUS } from './drive';
 import type { MatchAgents } from './match';
-import type { TeamId } from './world';
+import type { TeamId, World } from './world';
 
 // ------------------------------------------------------------------- options
 
@@ -37,7 +37,11 @@ export interface BenchOptions {
   opponent: string;
   seeds: number[];
   halfSeconds: number;
-  /** Noise, drift and camera latency off. Matches the server's own default. */
+  /**
+   * Noise, drift and camera latency off. False by default, matching the
+   * server's own default: a program has to be measured in the world it will
+   * actually play in. The noise-free mode is a diagnostic, not a fair one.
+   */
   idealSensors: boolean;
   port: number;
   /**
@@ -55,7 +59,7 @@ export const DEFAULT_OPTIONS: BenchOptions = {
   opponent: 'reference',
   seeds: [1, 2, 3],
   halfSeconds: 90,
-  idealSensors: true,
+  idealSensors: false,
   port: 0,
   connectTimeout: 30,
 };
@@ -89,6 +93,37 @@ export interface RobotTelemetry {
   errors: number;
   /** Times the referee took this robot off, by rule. */
   removals: Record<string, number>;
+}
+
+export interface KickOffTelemetry {
+  team: TeamId;
+  /** The robot that had to strike the ball. */
+  striker: string;
+  resolution: 'struck' | 'rolled-clear' | 'illegal' | 'timeout' | 'removed';
+  /** Seconds from kick-off until the kicker fired, 0 if it never did. */
+  timeToStrike: number;
+  /** Furthest the ball got from centre while the striker was still touching it. */
+  maxCarry: number;
+  /** Ball distance from centre when the referee called it (illegal only). */
+  carryAtCall: number;
+  /**
+   * Smallest heading error to the ball while touching it, degrees. Below ~34°
+   * (0.6 rad, the gate's arc) the ball was physically in the gate and the
+   * kicker could have fired; above it the approach was pointing the wrong way.
+   */
+  headingErrorDeg: number;
+  /** Whether the striker ever asked for the kicker during the window. */
+  kickerRequested: boolean;
+  /** Whether the kicker was ever charged (cooldown zero) during the window. */
+  everCharged: boolean;
+  /** Ticks the ball actually sat in the gate (arc and within the mouth). */
+  gateHeldTicks: number;
+  /** Ticks it was fireable: asked for, charged, and in the gate at once. */
+  fireableTicks: number;
+  /** Length of the window, seconds from kick-off to resolution. */
+  windowSec: number;
+  /** Closest the striker ever got to the ball, mm contact-to-contact. */
+  closestGap: number;
 }
 
 export interface KickTelemetry {
@@ -147,6 +182,8 @@ export interface BenchResult {
   ball: BallTelemetry;
   kicks: Record<string, KickTelemetry>;
   robots: Record<string, RobotTelemetry>;
+  /** Every kick-off observed, across all seeds, with how it was resolved. */
+  kickoffs: KickOffTelemetry[];
   findings: Finding[];
   /** Per-seed scorelines, so a result that hangs on one match is obvious. */
   scores: { seed: number; for: number; against: number }[];
@@ -224,6 +261,23 @@ class Sampler {
   private seenEvents = new Set<unknown>();
   private shot: { by: string; range: number; onTarget: boolean } | null = null;
   private goalsSoFar = 0;
+  readonly kickoffs: KickOffTelemetry[] = [];
+  private pendingKO: {
+    team: TeamId;
+    striker: string;
+    struck: boolean;
+    timeToStrike: number;
+    maxCarry: number;
+    lastBallSpeed: number;
+    minArc: number;
+    kickerRequested: boolean;
+    everCharged: boolean;
+    gateHeldTicks: number;
+    fireableTicks: number;
+    minGap: number;
+    windowSec: number;
+    trace: string[];
+  } | null = null;
 
   constructor(private readonly attackSign: number) {}
 
@@ -260,8 +314,19 @@ class Sampler {
           if (acc) acc.removals[rule] = (acc.removals[rule] ?? 0) + 1;
         }
       }
+      if (event.kind === 'kickoff') {
+        const team = (event as { team?: TeamId }).team;
+        if (team) this.openKickOff(world, team);
+      }
+      if (event.kind === 'illegal-kickoff') {
+        const team = (event as { team?: TeamId }).team;
+        if (team && this.pendingKO?.team === team) {
+          this.closeKickOff('illegal', Math.hypot(ball.x, ball.z));
+        }
+      }
     }
 
+    this.trackKickOff(match);
     this.trackKick(match);
 
     this.ballSamples++;
@@ -393,6 +458,140 @@ class Sampler {
     } else if (now < 250) {
       this.record(this.shot, this.shot.onTarget ? 'stoppedInPlay' : 'offTarget');
       this.shot = null;
+    }
+  }
+
+  /**
+   * Kick-offs, and how they resolved.
+   *
+   * A kick-off is a window: the kicker must open a 50 mm gap to the ball
+   * before the striker carries it more than 120 mm off the centre spot. The
+   * referee's check is four lines of geometry, which tells you nothing about
+   * *why* a kick-off went wrong. The interesting questions are whether the
+   * kicker ever fired — it is usually still charging a second or so after a
+   * restart — how long the striker waited before firing, and how far the ball
+   * was carried in the meantime. A discharge is not reported anywhere, so it
+   * is inferred from the ball's velocity jumping past two metres a second,
+   * the same way :meth:`trackKick` does.
+   */
+  private openKickOff(world: World, team: TeamId): void {
+    this.closeKickOff('timeout');
+    this.pendingKO = {
+      team,
+      striker:
+        world.robots.find((r) => r.team === team && !r.isGoalie && !r.removed)?.id ?? '',
+      struck: false,
+      timeToStrike: 0,
+      maxCarry: 0,
+      lastBallSpeed: Math.hypot(world.ball.vx, world.ball.vz),
+      minArc: Infinity,
+      kickerRequested: false,
+      everCharged: false,
+      gateHeldTicks: 0,
+      fireableTicks: 0,
+      minGap: Infinity,
+      windowSec: 0,
+      trace: [] as string[],
+    };
+  }
+
+  private closeKickOff(resolution: KickOffTelemetry['resolution'], carryAtCall = 0): void {
+    if (!this.pendingKO) return;
+    if (process.env.RJC_TRACE_KO && resolution === 'illegal') {
+      // eslint-disable-next-line no-console
+      console.error(`KO ${resolution} ${this.pendingKO.striker}:`);
+      for (const line of this.pendingKO.trace) console.error(`  ${line}`);
+    }
+    this.kickoffs.push({
+      team: this.pendingKO.team,
+      striker: this.pendingKO.striker,
+      resolution,
+      timeToStrike: this.pendingKO.struck ? this.pendingKO.timeToStrike : 0,
+      maxCarry: Math.round(this.pendingKO.maxCarry),
+      carryAtCall: Math.round(carryAtCall),
+      headingErrorDeg:
+        this.pendingKO.minArc === Infinity ? 0 : Math.round((this.pendingKO.minArc * 180) / Math.PI),
+      kickerRequested: this.pendingKO.kickerRequested,
+      everCharged: this.pendingKO.everCharged,
+      gateHeldTicks: this.pendingKO.gateHeldTicks,
+      fireableTicks: this.pendingKO.fireableTicks,
+      windowSec: Math.round(this.pendingKO.windowSec * 100) / 100,
+      closestGap: Math.round(this.pendingKO.minGap === Infinity ? -1 : this.pendingKO.minGap),
+    });
+    this.pendingKO = null;
+  }
+
+  private trackKickOff(match: Match): void {
+    const world = match.world;
+    const pending = this.pendingKO;
+    if (!pending) return;
+    const ball = world.ball;
+    const speed = Math.hypot(ball.vx, ball.vz);
+    // A discharge first, so a strike that clears the window the same tick it
+    // fires is still counted as struck.
+    if (speed > 2000 && pending.lastBallSpeed < 1500) {
+      pending.struck = true;
+      pending.timeToStrike = world.sinceKickOff;
+    }
+    pending.lastBallSpeed = speed;
+    const act = match.actuators[pending.striker];
+
+    const striker = world.robots.find((r) => r.id === pending.striker);
+    if (striker) {
+      const gap =
+        Math.hypot(ball.x - striker.x, ball.z - striker.z) - (striker.radius + ball.radius);
+      pending.minGap = Math.min(pending.minGap, gap);
+      // The referee's own "still touching" line (5.4.7): carry is ball carried
+      // while the striker is within 35 mm of it.
+      if (gap < 35) {
+        pending.maxCarry = Math.max(pending.maxCarry, Math.hypot(ball.x, ball.z));
+        const bearingToBall = Math.atan2(ball.z - striker.z, ball.x - striker.x);
+        const arc = Math.abs(
+          Math.atan2(
+            Math.sin(bearingToBall - striker.heading),
+            Math.cos(bearingToBall - striker.heading),
+          ),
+        );
+        pending.minArc = Math.min(pending.minArc, arc);
+        const gateSlop = 12; // GATE_SLOP: the ball must sit within this many mm of contact.
+        const held = arc < 0.6 && gap <= gateSlop;
+        if (held) pending.gateHeldTicks++;
+        // The kicker does not fire on geometry alone: the exact instant it
+        // leaves needs kicker requested, a charged solenoid, and the gate held
+        // all on the same tick. Anything else fires later or not at all, so
+        // this is the one number that proves a request was genuinely lost.
+        if (act && held && act.kicker && act.kickCooldown === 0) pending.fireableTicks++;
+        if (process.env.RJC_TRACE_KO) {
+          pending.trace.push(
+            `t=${world.sinceKickOff.toFixed(2)} gap=${gap.toFixed(0)}` +
+              ` arc=${((arc * 180) / Math.PI).toFixed(1)}° held=${held} carry=${Math.hypot(ball.x, ball.z).toFixed(0)}` +
+              ` kicker=${act?.kicker ?? '-'} cd=${act?.kickCooldown?.toFixed(2) ?? '-'}` +
+              ` sx=${striker.x.toFixed(0)} sz=${striker.z.toFixed(0)} bx=${ball.x.toFixed(0)} bz=${ball.z.toFixed(0)}`,
+          );
+        }
+      }
+    }
+
+    if (act) {
+      if (act.kicker) pending.kickerRequested = true;
+      if (act.kickCooldown === 0) pending.everCharged = true;
+    }
+    pending.windowSec = world.sinceKickOff;
+
+    if (!world.restart.pending) {
+      // The referee cleared the window without calling a foul: the striker
+      // opened the 50 mm gap, the striker was removed, or three seconds
+      // elapsed with nothing happening.
+      const stillPresent = world.robots.some((r) => r.id === pending.striker && !r.removed);
+      this.closeKickOff(
+        pending.struck
+          ? 'struck'
+          : !stillPresent
+            ? 'removed'
+            : world.sinceKickOff > 3
+              ? 'timeout'
+              : 'rolled-clear',
+      );
     }
   }
 
@@ -672,6 +871,7 @@ function aggregate(
     },
     kicks,
     robots,
+    kickoffs: samplers.flatMap((s) => s.kickoffs),
     findings: [],
     scores,
   };
@@ -708,17 +908,51 @@ function diagnose(r: BenchResult): Finding[] {
   const illegal = r.callsAgainstUs['illegal-kickoff'] ?? 0;
   const kickoffs = r.calls['kickoff'] ?? 0;
   if (illegal > 0.5) {
+    const side = r.tested[0]?.slice(0, r.tested[0].indexOf('-')) ?? 'cyan';
+    const ours = r.kickoffs.filter((k) => k.team === side);
+    const bad = ours.filter((k) => k.resolution === 'illegal');
+    const maxCarry = bad.length > 0 ? Math.max(...bad.map((k) => k.carryAtCall || k.maxCarry)) : 0;
+    let detail = '';
+    if (bad.length > 0) {
+      const neverAsked = bad.every((k) => !k.kickerRequested);
+      const neverCharged = bad.every((k) => !k.everCharged);
+      const neverHeld = bad.every((k) => k.gateHeldTicks === 0);
+      const maxArc = Math.max(0, ...bad.map((k) => k.headingErrorDeg));
+      if (neverAsked) {
+        detail =
+          ` In every one the striker never even asked for the kicker — the kick-off branch was not ` +
+          `running while the window was open, so the robot simply pushed the ball ${maxCarry} mm off ` +
+          'the centre spot instead of striking it.';
+      } else if (neverCharged) {
+        detail =
+          ` The striker asked for the kicker the whole time but the window closed before it ever ` +
+          `finished recharging — the ball was carried ${maxCarry} mm in ${bad[0]!.windowSec}s, a fraction ` +
+          'of the recharge time. The striker must have been shoving the ball while it waited instead of ' +
+          'standing square on it: whatever it was steering by had it pushing for the whole window.';
+      } else if (neverHeld) {
+        detail =
+          ` The striker asked for the kicker and it was charged, but the ball never sat in the gate — ` +
+          `its heading stayed up to ${maxArc}° off the line to the ball while touching it, so it pushed ` +
+          'past instead of holding.';
+      } else {
+        detail =
+          ' The striker asked, charged, and had the ball in the gate at once, yet the kicker never ' +
+          'discharged — the request must not be reaching the kicker every tick.';
+      }
+    }
     add({
       severity: 'high',
       subject: 'team',
       code: 'illegal-kickoff',
-      message: `${perMatch(illegal)} illegal kick-offs charged to you, out of ${kickoffs.toFixed(1)} kick-offs (rule 5.4.7).`,
+      message: `${perMatch(illegal)} illegal kick-offs charged to you, out of ${kickoffs.toFixed(1)} kick-offs (rule 5.4.7).${detail}`,
       advice:
         'A kick-off must be a strike. Pushing cannot work: robot and ball separate by ' +
         'position here, so a shoved ball travels with you and the 50 mm gap never opens. ' +
-        'Come up to the ball, STOP, and hold the kicker request — the kicker is usually ' +
-        'still charging at a restart, and driving on while you wait carries the ball off ' +
-        'the spot and gives the kick-off away.',
+        'Meet the ball ONCE until the gate says it is held, then STOP and hold the kicker ' +
+        'request — the kicker is usually still charging at a restart. If the direction you ' +
+        'approach from is wrong, the gate never engages and you push the ball around the ' +
+        'centre spot; at a restart your position is fixed, so aim for the ball from the ' +
+        'restart geometry, not from a stale position fix.',
     });
   }
 
@@ -989,6 +1223,32 @@ export function formatBench(r: BenchResult, baseline?: BenchResult): string {
   const ours = Object.entries(r.callsAgainstUs).filter(([k]) => OFFENCES.has(k));
   if (ours.length > 0) {
     out.push(`  charged to you:      ${ours.map(([k, v]) => `${k} ${v}`).join('   ')}`);
+  }
+  const side = r.tested[0]?.slice(0, r.tested[0].indexOf('-')) ?? 'cyan';
+  const kt = r.kickoffs.filter((k) => k.team === side);
+  if (kt.length > 0) {
+    const byRes = (res: string): number => kt.filter((k) => k.resolution === res).length;
+    const struck = kt.filter((k) => k.resolution === 'struck');
+    const wait =
+      struck.length > 0
+        ? `, avg ${(struck.reduce((a, k) => a + k.timeToStrike, 0) / struck.length).toFixed(2)}s to fire`
+        : '';
+    const maxCarry = Math.max(0, ...kt.map((k) => k.maxCarry));
+    const badArc = kt.filter((k) => k.resolution === 'illegal');
+    const act =
+      badArc.length > 0
+        ? ` [${badArc.every((k) => k.kickerRequested) ? 'ask' : 'no-ask'},` +
+          `${badArc.every((k) => k.everCharged) ? 'charge' : 'no-charge'},` +
+          `gate-tick ${Math.max(...badArc.map((k) => k.gateHeldTicks))},` +
+          `firable ${Math.max(...badArc.map((k) => k.fireableTicks))},` +
+          `win ${Math.min(...badArc.map((k) => k.windowSec)).toFixed(2)}s,` +
+          `arc ${Math.max(...badArc.map((k) => k.headingErrorDeg))}°,` +
+          `gap ${Math.min(...badArc.map((k) => k.closestGap))} mm]`
+        : '';
+    out.push(
+      `  kick-offs (yours):   ${kt.length}   struck ${byRes('struck')}${wait}   rolled ${byRes('rolled-clear')}   illegal ${byRes('illegal')}${act}` +
+        `   timeout ${byRes('timeout')}   max carry ${maxCarry} mm`,
+    );
   }
   out.push(
     `  ball out of play:    ${r.ball.outOfPlay}` +
