@@ -5,7 +5,7 @@ at the goals. Both ends are painted a team colour, but colours live at fixed
 places and do not move at half-time — what changes (rule 1.4/5.4) is which
 goal a team defends. So "my goal" is a *place* fact, not a colour fact: at a
 kick-off this robot is standing on its own half, and its goal is the nearer of
-the two. A cyan robot defending the far end sees its own goal under the
+the two. A violet robot defending the far end sees its own goal under the
 camera's other label, and it does not care.
 
 The camera sees both goals every frame (they are wide targets on the walls of
@@ -23,6 +23,11 @@ from __future__ import annotations
 import math
 
 from .field import other_side
+
+#: The camera's two goal sightings are named after the goal paint (cyan, yellow),
+#: which stays at a fixed place for the whole match; a team id is the robot colour
+#: (violet, lime). Half 1: violet defends the cyan goal, lime defends the yellow.
+_GOAL_OF_TEAM = {"violet": "cyan", "lime": "yellow"}
 
 
 class GoalFrame:
@@ -82,8 +87,8 @@ class GoalFrame:
             # else here is tight enough on time to need it.
             return
         goals = getattr(cv, "goals", None) if cv is not None else None
-        mine = getattr(goals, self.team, None)
-        theirs = getattr(goals, self.other, None)
+        mine = getattr(goals, _GOAL_OF_TEAM[self.team], None)
+        theirs = getattr(goals, _GOAL_OF_TEAM[self.other], None)
         if mine is None or theirs is None:
             # Nothing to look at - hold whatever frame we had. With an
             # omnidirectional camera and goals that cannot be hidden this is

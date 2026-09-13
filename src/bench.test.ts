@@ -25,24 +25,24 @@ describe('teamwork telemetry', () => {
   });
 
   it('names the other robot on the same team', () => {
-    expect(partnerId('cyan-1')).toBe('cyan-2');
-    expect(partnerId('cyan-2')).toBe('cyan-1');
-    expect(partnerId('yellow-1')).toBe('yellow-2');
+    expect(partnerId('violet-1')).toBe('violet-2');
+    expect(partnerId('violet-2')).toBe('violet-1');
+    expect(partnerId('lime-1')).toBe('lime-2');
   });
 
   it('calls a robot blocked when another shell sits on the line to the ball', () => {
-    const me = { id: 'cyan-1', x: 0, z: 0 };
+    const me = { id: 'violet-1', x: 0, z: 0 };
     const ball = { x: 200, z: 0, radius: 40 };
-    const inTheWay = { id: 'cyan-2', x: 100, z: 0, radius: 100, removed: false };
+    const inTheWay = { id: 'violet-2', x: 100, z: 0, radius: 100, removed: false };
     expect(ballBlocked(me, ball, [inTheWay])).toBe(true);
   });
 
   it('does not call it blocked when nothing is actually between them', () => {
-    const me = { id: 'cyan-1', x: 0, z: 0 };
+    const me = { id: 'violet-1', x: 0, z: 0 };
     const ball = { x: 200, z: 0, radius: 40 };
-    const toOneSide = { id: 'cyan-2', x: 100, z: 400, removed: false, radius: 100 };
-    const beyondTheBall = { id: 'yellow-1', x: 400, z: 0, removed: false, radius: 100 };
-    const removed = { id: 'yellow-2', x: 100, z: 0, removed: true, radius: 100 };
+    const toOneSide = { id: 'violet-2', x: 100, z: 400, removed: false, radius: 100 };
+    const beyondTheBall = { id: 'lime-1', x: 400, z: 0, removed: false, radius: 100 };
+    const removed = { id: 'lime-2', x: 100, z: 0, removed: true, radius: 100 };
     expect(ballBlocked(me, ball, [toOneSide, beyondTheBall, removed])).toBe(false);
     // A robot cannot block its own view of the ball.
     expect(ballBlocked(me, ball, [{ ...me, radius: 100, removed: false }])).toBe(false);
@@ -55,7 +55,7 @@ describe('the observer hook', () => {
     let sawBallMove = false;
     let first: number | null = null;
     const match = new Match({
-      agents: { ...referenceTeam('cyan'), ...referenceTeam('yellow') } as unknown as MatchAgents,
+      agents: { ...referenceTeam('violet'), ...referenceTeam('lime') } as unknown as MatchAgents,
       halfSeconds: 1,
       seed: 1,
       observe: (m) => {
@@ -64,7 +64,7 @@ describe('the observer hook', () => {
         else if (m.world.ball.x !== first) sawBallMove = true;
       },
     });
-    match.world.kickOff('cyan');
+    match.world.kickOff('violet');
     match.world.running = true;
     for (let i = 0; i < 200; i++) match.step(1 / 100);
     expect(calls).toBe(200);
@@ -84,13 +84,13 @@ describe('the observer hook', () => {
      */
     const play = (observe?: (m: Match) => void): string => {
       const match = new Match({
-        agents: { ...referenceTeam('cyan'), ...referenceTeam('yellow') } as unknown as MatchAgents,
+        agents: { ...referenceTeam('violet'), ...referenceTeam('lime') } as unknown as MatchAgents,
         halfSeconds: 6,
         seed: 4,
         idealSensors: true,
         observe,
       });
-      match.world.kickOff('cyan');
+      match.world.kickOff('violet');
       match.world.running = true;
       for (let i = 0; i < 600; i++) match.step(1 / 100);
       return JSON.stringify({
@@ -103,7 +103,7 @@ describe('the observer hook', () => {
     let touched = 0;
     const watched = play((m) => {
       touched +=
-        m.world.robots.length + m.world.ball.x + m.world.score.cyan + m.world.events.length;
+        m.world.robots.length + m.world.ball.x + m.world.score.violet + m.world.events.length;
     });
     expect(touched).not.toBe(0);
     expect(watched).toEqual(play());
@@ -115,7 +115,7 @@ describe('what the bench measures', () => {
   /** Play two built-in agents through the bench's own plumbing. */
   async function local(opponent: string, spawn: string | undefined): Promise<BenchResult> {
     return runBench({
-      team: 'cyan',
+      team: 'violet',
       opponent,
       seeds: [1],
       halfSeconds: 8,
@@ -138,14 +138,14 @@ describe('what the bench measures', () => {
       `node -e "${inlineAgent(0.6, 0)}" -- {url}`,
     );
     expect(result.matches).toBe(1);
-    expect(result.tested).toEqual(['cyan-1', 'cyan-2']);
+    expect(result.tested).toEqual(['violet-1', 'violet-2']);
     expect(Object.keys(result.robots).sort()).toEqual([
-      'cyan-1', 'cyan-2', 'yellow-1', 'yellow-2',
+      'lime-1', 'lime-2', 'violet-1', 'violet-2',
     ]);
-    expect(result.robots['cyan-1']!.tested).toBe(true);
-    expect(result.robots['yellow-1']!.tested).toBe(false);
+    expect(result.robots['violet-1']!.tested).toBe(true);
+    expect(result.robots['lime-1']!.tested).toBe(false);
     // Something moved, so distance and speed are not placeholders.
-    expect(result.robots['cyan-1']!.metresTravelled).toBeGreaterThan(0);
+    expect(result.robots['violet-1']!.metresTravelled).toBeGreaterThan(0);
     expect(result.calls['kickoff']).toBeGreaterThan(0);
   }, 40000);
 
@@ -156,7 +156,7 @@ describe('what the bench measures', () => {
      * stays there, which is rule 5.7.1.6 and thirty seconds off.
      */
     const result = await local('statue', `node -e "${inlineAgent(0, 1)}" -- {url}`);
-    const wanderer = result.robots['cyan-1']!;
+    const wanderer = result.robots['violet-1']!;
     expect(wanderer.whollyOut).toBeGreaterThan(5);
     const codes = result.findings.map((f) => f.code);
     expect(codes).toContain('wholly-out');
@@ -169,7 +169,7 @@ describe('what the bench measures', () => {
     // A program that connects and then says nothing is the commonest way a
     // robot is broken, and it looks exactly like a robot that is very slow.
     const result = await local('statue', `node -e "${silentAgent()}" -- {url}`);
-    expect(result.robots['cyan-1']!.missed).toBeGreaterThan(700);
+    expect(result.robots['violet-1']!.missed).toBeGreaterThan(700);
     expect(result.findings.map((f) => f.code)).toContain('slow');
   }, 40000);
 
@@ -186,9 +186,9 @@ describe('the report', () => {
     const result = skeleton();
     const text = formatBench(result);
     expect(text).toContain('SCORE  3 - 1');
-    expect(text).toContain('cyan-1');
+    expect(text).toContain('violet-1');
     // A tested robot is marked, so it is obvious which rows are yours.
-    expect(text).toMatch(/\*cyan-1/);
+    expect(text).toMatch(/\*violet-1/);
     expect(text.split('\n').every((line) => line.length < 120)).toBe(true);
   });
 
@@ -212,7 +212,7 @@ describe('the report', () => {
 function skeleton(): BenchResult {
   const robot = (id: string, tested: boolean) => ({
     id,
-    team: id.startsWith('cyan') ? ('cyan' as const) : ('yellow' as const),
+    team: id.startsWith('violet') ? ('violet' as const) : ('lime' as const),
     tested,
     meanX: 0, meanZ: 0, possession: 10, nearBall: 30, attackThird: 10, ownThird: 20,
     outsideLines: 1, whollyOut: 0, stalled: 0, metresTravelled: 50, meanSpeed: 400,
@@ -224,7 +224,7 @@ function skeleton(): BenchResult {
     halfSeconds: 90,
     idealSensors: true,
     opponent: 'reference',
-    tested: ['cyan-1', 'cyan-2'],
+    tested: ['violet-1', 'violet-2'],
     goalsFor: 3,
     goalsAgainst: 1,
     calls: { kickoff: 4 },
@@ -235,10 +235,10 @@ function skeleton(): BenchResult {
     },
     kicks: {},
     robots: {
-      'cyan-1': robot('cyan-1', true),
-      'cyan-2': robot('cyan-2', true),
-      'yellow-1': robot('yellow-1', false),
-      'yellow-2': robot('yellow-2', false),
+      'violet-1': robot('violet-1', true),
+      'violet-2': robot('violet-2', true),
+      'lime-1': robot('lime-1', false),
+      'lime-2': robot('lime-2', false),
     },
     kickoffs: [],
     findings: [],
@@ -262,7 +262,7 @@ const WebSocket = require('ws');
 const url = process.argv[process.argv.length - 1];
 for (const robot of [1, 2]) {
   const ws = new WebSocket(url);
-  ws.on('open', () => ws.send(JSON.stringify({ type: 'join', protocol: ${PROTOCOL_VERSION}, team: 'cyan', robot, name: 'T' })));
+  ws.on('open', () => ws.send(JSON.stringify({ type: 'join', protocol: ${PROTOCOL_VERSION}, team: 'violet', robot, name: 'T' })));
   ws.on('message', (d) => {
     const m = JSON.parse(String(d));
     if (m.type !== 'sensors') return;
@@ -282,7 +282,7 @@ const WebSocket = require('ws');
 const url = process.argv[process.argv.length - 1];
 for (const robot of [1, 2]) {
   const ws = new WebSocket(url);
-  ws.on('open', () => ws.send(JSON.stringify({ type: 'join', protocol: ${PROTOCOL_VERSION}, team: 'cyan', robot, name: 'T' })));
+  ws.on('open', () => ws.send(JSON.stringify({ type: 'join', protocol: ${PROTOCOL_VERSION}, team: 'violet', robot, name: 'T' })));
   ws.on('error', () => {});
 }
 `;

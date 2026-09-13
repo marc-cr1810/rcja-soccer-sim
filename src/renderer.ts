@@ -123,7 +123,7 @@ export class FieldRenderer {
   private readonly renderer: THREE.WebGLRenderer;
   private readonly camera: THREE.PerspectiveCamera;
   private readonly robotMeshes = new Map<string, THREE.Group>();
-  private readonly commsLines = new Map<'cyan' | 'yellow', THREE.Line>();
+  private readonly commsLines = new Map<'violet' | 'lime', THREE.Line>();
   private ballMesh!: THREE.Mesh;
   /** Set only when a deployment supplies its own robot model. */
   private robotTemplate: THREE.Group | null = null;
@@ -151,7 +151,7 @@ export class FieldRenderer {
     this.buildStaticScene();
     this.buildBall();
 
-    for (const team of ['cyan', 'yellow'] as const) {
+    for (const team of ['violet', 'lime'] as const) {
       const geom = new THREE.BufferGeometry().setFromPoints([
         new THREE.Vector3(0, 0.08, 0),
         new THREE.Vector3(0, 0.08, 0),
@@ -305,7 +305,7 @@ export class FieldRenderer {
       mesh.rotation.y = -robot.heading;
     }
 
-    for (const team of ['cyan', 'yellow'] as const) {
+    for (const team of ['violet', 'lime'] as const) {
       const line = this.commsLines.get(team);
       if (!line) continue;
       const activeTeammates = world.robots.filter((r) => r.team === team && !r.removed);

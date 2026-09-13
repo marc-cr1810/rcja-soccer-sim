@@ -2,7 +2,7 @@
 
     from rcja_soccer import Robot, drive
 
-    robot = Robot(team="cyan", number=1, name="ACT-01")
+    robot = Robot(team="violet", number=1, name="ACT-01")
 
     @robot.tick
     def think(s, me):
@@ -40,11 +40,14 @@ from .sense import (
     keep_inside,
     line_bearing,
     obstacle_range,
+    pass_is_open,
     relay_ball,
+    relay_position,
     spin_towards,
     steer_ball_inside,
     steer_clear_of_edges,
     teammate_ball,
+    teammate_position,
 )
 
 __all__ = [
@@ -67,11 +70,14 @@ __all__ = [
     "keep_inside",
     "line_bearing",
     "obstacle_range",
+    "pass_is_open",
     "relay_ball",
+    "relay_position",
     "spin_towards",
     "steer_ball_inside",
     "steer_clear_of_edges",
     "teammate_ball",
+    "teammate_position",
     "wrap_angle",
 ]
 

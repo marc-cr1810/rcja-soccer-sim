@@ -71,7 +71,7 @@ export const statue: Agent = {
  * point: the detector should keep noticing, and the removals should keep
  * coming, rather than the pair quietly parking there all match.
  */
-export function camper(team: 'cyan' | 'yellow'): Agent {
+export function camper(team: 'violet' | 'lime'): Agent {
   return {
     name: `camper-${team}`,
     tick(frame) {
@@ -149,7 +149,7 @@ export function wanderer(seed: number): Agent {
 }
 
 /** Every bot above, paired into two-robot teams for a ladder. */
-export function botRoster(): { name: string; make: (team: 'cyan' | 'yellow') => Agent[] }[] {
+export function botRoster(): { name: string; make: (team: 'violet' | 'lime') => Agent[] }[] {
   return [
     { name: 'naive-chaser', make: () => [naiveChaser, naiveChaser] },
     { name: 'shover', make: () => [shover, shover] },

@@ -13,7 +13,7 @@ const ready = pythonAvailable && sandboxAvailable();
 const ARGPARSE_PREAMBLE = `
 import argparse
 parser = argparse.ArgumentParser()
-parser.add_argument("--team", default="cyan")
+parser.add_argument("--team", default="violet")
 parser.add_argument("--number", type=int, default=1)
 parser.add_argument("--name", default=None)
 parser.add_argument("--url", default="ws://localhost:8080/agent")
@@ -149,7 +149,7 @@ robot.run(args.url)
       'robot.py': `
 import argparse
 parser = argparse.ArgumentParser()
-parser.add_argument("--team", default="cyan")
+parser.add_argument("--team", default="violet")
 parser.add_argument("--number", type=int, default=1)
 parser.add_argument("--name", default=None)
 parser.add_argument("--url", default="ws://localhost:8080/agent")

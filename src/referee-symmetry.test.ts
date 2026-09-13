@@ -34,7 +34,7 @@ const world = (): World => {
     inclined: false,
     commsEnabled: true,
   });
-  w.resetRobots('cyan');
+  w.resetRobots('violet');
   w.running = true;
   return w;
 };
@@ -126,7 +126,7 @@ describe('the referee makes the same call at both ends', () => {
     // not the one the referee set - and it is only ever the non-kicking team,
     // because it is the only one with two robots placed close together.
     for (const half of [1, 2] as const) {
-      for (const kicking of ['cyan', 'yellow'] as const) {
+      for (const kicking of ['violet', 'lime'] as const) {
         const w = world();
         w.half = half;
         w.kickOff(kicking);

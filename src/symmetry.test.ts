@@ -88,8 +88,8 @@ function trajectory(p: Pose, ticks: number): Pose[] {
   }));
 }
 
-function others(p: Pose, team: 'cyan' | 'yellow') {
-  const foe = team === 'cyan' ? 'yellow' : 'cyan';
+function others(p: Pose, team: 'violet' | 'lime') {
+  const foe = team === 'violet' ? 'lime' : 'violet';
   return [
     { id: `${team}-2`, team, number: 2 as const, x: p.x * 0.2 - 300, z: p.z * 0.3 + 40, heading: p.heading + 0.5 },
     { id: `${foe}-1`, team: foe, number: 1 as const, x: (p.x + p.bx) / 2 + 90, z: (p.z + p.bz) / 2 - 30, heading: p.heading - 1.1 },
@@ -115,8 +115,8 @@ function frames(seq: Pose[], attackDirection: 1 | -1, held: boolean, rotated: bo
   return seq.map((base) => {
     clock += 0.02;
     const p = rotated ? rotate(base) : base;
-    const self = { id: 'cyan-1', team: 'cyan' as const, number: 1 as const, x: p.x, z: p.z, heading: p.heading };
-    const rest = others(base, 'cyan').map((r) => ({
+    const self = { id: 'violet-1', team: 'violet' as const, number: 1 as const, x: p.x, z: p.z, heading: p.heading };
+    const rest = others(base, 'violet').map((r) => ({
       ...r,
       x: s * r.x,
       z: s * r.z,
@@ -189,14 +189,14 @@ describe('the field is the same game at both ends', () => {
         inclined: false,
         commsEnabled: true,
       });
-      w.resetRobots('cyan');
+      w.resetRobots('violet');
       w.running = true;
       const s = rotated ? -1 : 1;
       const at: [string, number, number, number][] = [
-        ['cyan-1', 120, -80, 0.3],
-        ['cyan-2', -700, 40, 0.1],
-        ['yellow-1', -60, 150, 2.6],
-        ['yellow-2', 690, -30, 3.0],
+        ['violet-1', 120, -80, 0.3],
+        ['violet-2', -700, 40, 0.1],
+        ['lime-1', -60, 150, 2.6],
+        ['lime-2', 690, -30, 3.0],
       ];
       for (const [id, x, z, h] of at) {
         const r = w.robots.find((q) => q.id === id)!;
@@ -216,10 +216,10 @@ describe('the field is the same game at both ends', () => {
     // The robot frame is carried along by the rotation, so the SAME powers are
     // the rotated command.
     const powers: Record<string, number[]> = {
-      'cyan-1': [0.8, -0.2, 0.5, 0.9],
-      'cyan-2': [-0.4, 0.7, 0.3, -0.6],
-      'yellow-1': [0.6, 0.6, -0.9, 0.1],
-      'yellow-2': [0.2, -0.8, 0.4, 0.5],
+      'violet-1': [0.8, -0.2, 0.5, 0.9],
+      'violet-2': [-0.4, 0.7, 0.3, -0.6],
+      'lime-1': [0.6, 0.6, -0.9, 0.1],
+      'lime-2': [0.2, -0.8, 0.4, 0.5],
     };
 
     for (let i = 0; i < 1200; i++) {
@@ -262,8 +262,8 @@ describe('the field is the same game at both ends', () => {
         ['goalie', 2],
       ] as const) {
         for (const pose of poses(40)) {
-          const a = new ReferenceAgent({ team: 'cyan', number, role });
-          const b = new ReferenceAgent({ team: 'cyan', number, role });
+          const a = new ReferenceAgent({ team: 'violet', number, role });
+          const b = new ReferenceAgent({ team: 'violet', number, role });
           const fa = frames(trajectory(pose, 30), 1, held, false);
           const fb = frames(trajectory(pose, 30), -1, held, true);
 

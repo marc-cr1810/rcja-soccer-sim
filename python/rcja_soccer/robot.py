@@ -7,7 +7,7 @@ its own frame, the way a real one has it.
 
     from rcja_soccer import Robot, drive
 
-    robot = Robot(team="cyan", number=1, name="ACT-01")
+    robot = Robot(team="violet", number=1, name="ACT-01")
 
     @robot.tick
     def think(s, me):
@@ -31,7 +31,7 @@ from .drive import coast as _coast
 #: The wire contract this library speaks. The server refuses a mismatch, which
 #: is a season boundary rather than a typo: the frame shape changed and this
 #: program was written against the old one.
-PROTOCOL_VERSION = 3
+PROTOCOL_VERSION = 4
 
 DEFAULT_URL = "ws://localhost:8080/agent"
 
@@ -138,8 +138,8 @@ class Robot:
         motors: int = 4,
         token: str | None = None,
     ) -> None:
-        if team not in ("cyan", "yellow"):
-            raise ValueError(f'team must be "cyan" or "yellow", not {team!r}')
+        if team not in ("violet", "lime"):
+            raise ValueError(f'team must be "violet" or "lime", not {team!r}')
         if number not in (1, 2):
             raise ValueError(f"number must be 1 or 2, not {number!r}")
         self.team = team

@@ -6,7 +6,7 @@ the sensors report, and it returns what the motors should do.
 ```python
 from rcja_soccer import Robot, drive
 
-robot = Robot(team="cyan", number=1, name="ACT-01")
+robot = Robot(team="violet", number=1, name="ACT-01")
 
 @robot.tick
 def think(s, me):
@@ -49,7 +49,7 @@ metre. Those are invisible at normal speed and none of them show up in a
 scoreline.
 
 ```bash
-npm run bench -- --spawn "python3 python/examples/play.py --only cyan --url {url}"
+npm run bench -- --spawn "python3 python/examples/play.py --only violet --url {url}"
 ```
 
 One command. It starts your robots, plays three matches against the reference

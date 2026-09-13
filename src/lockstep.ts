@@ -46,13 +46,13 @@ export interface LockstepOptions extends MatchOptions {
    */
   halves?: readonly (1 | 2)[];
   /**
-   * Who takes the opening kick-off of each half, default cyan then yellow.
+   * Who takes the opening kick-off of each half, default violet then lime.
    *
    * Flipping it is how you build a match's 180-degree rotation: the same half
    * with the other team kicking off places every robot at the mirror of where
    * it stood, so run A rotated should BE run B with the colours swapped.
    */
-  kickOffFor?: (half: 1 | 2) => 'cyan' | 'yellow';
+  kickOffFor?: (half: 1 | 2) => 'violet' | 'lime';
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -103,7 +103,7 @@ export async function playLockstep(options: LockstepOptions): Promise<MatchResul
     deadlineMs = 10000,
     onCycle,
     halves = [1, 2] as const,
-    kickOffFor = (half: 1 | 2): 'cyan' | 'yellow' => (half === 1 ? 'cyan' : 'yellow'),
+    kickOffFor = (half: 1 | 2): 'violet' | 'lime' => (half === 1 ? 'violet' : 'lime'),
     ...matchOptions
   } = options;
   const transports = matchOptions.transports ?? {};

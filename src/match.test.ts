@@ -16,8 +16,8 @@ import { Senses, type SensedRobot } from './perception';
 
 function teams(skill = 1): MatchAgents {
   return {
-    ...referenceTeam('cyan', skill),
-    ...referenceTeam('yellow', skill),
+    ...referenceTeam('violet', skill),
+    ...referenceTeam('lime', skill),
   } as unknown as MatchAgents;
 }
 
@@ -32,7 +32,7 @@ describe('the gate: sensors-only robots play football', () => {
   it('scores goals across a range of seeds', () => {
     const totals = [1, 2, 3, 4].map((seed) => {
       const r = play(seed);
-      return r.score.cyan + r.score.yellow;
+      return r.score.violet + r.score.lime;
     });
     // Not "every match has a goal" - a real match can end nil all, and a test
     // that forbids it would be testing luck. Across four matches, football
@@ -47,15 +47,15 @@ describe('the gate: sensors-only robots play football', () => {
   });
 
   it('lets both sides score, rather than one always winning', () => {
-    let cyan = 0;
-    let yellow = 0;
+    let violet = 0;
+    let lime = 0;
     for (const seed of [1, 2, 3, 4, 5, 6]) {
       const r = play(seed);
-      cyan += r.score.cyan;
-      yellow += r.score.yellow;
+      violet += r.score.violet;
+      lime += r.score.lime;
     }
-    expect(cyan).toBeGreaterThan(0);
-    expect(yellow).toBeGreaterThan(0);
+    expect(violet).toBeGreaterThan(0);
+    expect(lime).toBeGreaterThan(0);
   });
 
   it('runs the referee: the detectors fire during real play', () => {
@@ -112,25 +112,25 @@ describe('a misbehaving program only hurts itself', () => {
 
   it('plays on when one robot crashes every tick', () => {
     const agents = { ...teams() } as unknown as Record<string, Agent>;
-    agents['cyan-1'] = crasher;
+    agents['violet-1'] = crasher;
     const r = play(5, agents as unknown as MatchAgents);
     expect(r.clock).toBeGreaterThanOrEqual(HALF * 2 - 1);
-    expect(r.slots['cyan-1']!.errors).toBeGreaterThan(100);
-    expect(r.slots['yellow-1']!.errors).toBe(0);
+    expect(r.slots['violet-1']!.errors).toBeGreaterThan(100);
+    expect(r.slots['lime-1']!.errors).toBe(0);
   });
 
   it('plays a full match out with a whole team dead', () => {
     const agents = { ...teams() } as unknown as Record<string, Agent>;
-    agents['cyan-1'] = crasher;
-    agents['cyan-2'] = crasher;
+    agents['violet-1'] = crasher;
+    agents['violet-2'] = crasher;
     const r = play(5, agents as unknown as MatchAgents, 120);
     // The match runs to the whistle, the dead side's faults are on the record,
     // and the working side's programs are untouched by any of it.
     expect(r.clock).toBeGreaterThanOrEqual(240 - 1);
-    expect(r.slots['cyan-1']!.errors).toBeGreaterThan(100);
-    expect(r.slots['cyan-2']!.errors).toBeGreaterThan(100);
-    expect(r.slots['yellow-1']!.errors).toBe(0);
-    expect(r.slots['yellow-2']!.errors).toBe(0);
+    expect(r.slots['violet-1']!.errors).toBeGreaterThan(100);
+    expect(r.slots['violet-2']!.errors).toBeGreaterThan(100);
+    expect(r.slots['lime-1']!.errors).toBe(0);
+    expect(r.slots['lime-2']!.errors).toBe(0);
   });
 
   it('no longer own-goals its way through a motionless opponent', () => {
@@ -149,9 +149,9 @@ describe('a misbehaving program only hurts itself', () => {
      */
     const worst = [5, 6, 7, 8, 9].map((seed) => {
       const agents = { ...teams() } as unknown as Record<string, Agent>;
-      agents['cyan-1'] = crasher;
-      agents['cyan-2'] = crasher;
-      return play(seed, agents as unknown as MatchAgents, 120).score.cyan;
+      agents['violet-1'] = crasher;
+      agents['violet-2'] = crasher;
+      return play(seed, agents as unknown as MatchAgents, 120).score.violet;
     });
     expect(Math.max(...worst)).toBeLessThanOrEqual(8);
   }, 30000);
@@ -162,25 +162,25 @@ describe('a misbehaving program only hurts itself', () => {
       tick: () => ({ motors: [NaN, Infinity, 'x' as unknown as number, 99] }),
     };
     const agents = { ...teams() } as unknown as Record<string, Agent>;
-    agents['yellow-1'] = junk;
+    agents['lime-1'] = junk;
     const r = play(6, agents as unknown as MatchAgents);
     expect(Number.isFinite(r.clock)).toBe(true);
-    expect(Number.isFinite(r.score.cyan)).toBe(true);
+    expect(Number.isFinite(r.score.violet)).toBe(true);
   });
 
   it('survives a program that never returns anything', () => {
     const mute: Agent = { name: 'mute', tick: () => null };
     const agents = { ...teams() } as unknown as Record<string, Agent>;
-    agents['yellow-2'] = mute;
+    agents['lime-2'] = mute;
     const r = play(7, agents as unknown as MatchAgents);
-    expect(r.slots['yellow-2']!.missed).toBeGreaterThan(100);
+    expect(r.slots['lime-2']!.missed).toBeGreaterThan(100);
     expect(r.clock).toBeGreaterThanOrEqual(HALF * 2 - 1);
   });
 });
 
 describe('the reference agent', () => {
   it('works out roughly where it is from walls and a compass', () => {
-    const self: SensedRobot = { id: 'cyan-1', team: 'cyan', number: 1, x: -400, z: 250, heading: 0.4 };
+    const self: SensedRobot = { id: 'violet-1', team: 'violet', number: 1, x: -400, z: 250, heading: 0.4 };
     const frame = new Senses(5, 4).read({
       view: {
         clock: 0,
@@ -207,7 +207,7 @@ describe('the reference agent', () => {
   });
 
   it('is confident when it can check one wall against the opposite one', () => {
-    const self: SensedRobot = { id: 'cyan-1', team: 'cyan', number: 1, x: -300, z: 120, heading: 0 };
+    const self: SensedRobot = { id: 'violet-1', team: 'violet', number: 1, x: -300, z: 120, heading: 0 };
     const frame = new Senses(5, 4).read({
       view: {
         clock: 0,
@@ -246,7 +246,7 @@ describe('the reference agent', () => {
   });
 
   it('stands still before the whistle', () => {
-    const a = new ReferenceAgent({ team: 'cyan', number: 1 });
+    const a = new ReferenceAgent({ team: 'violet', number: 1 });
     // encoders included because the yaw filter runs before the whistle check:
     // the filters have to keep tracking while the game is stopped, or they
     // restart cold at every kick-off.
@@ -278,7 +278,7 @@ describe('the reference agent', () => {
      * symmetric in a single match - the halves alternate who kicks off, and
      * the contact solver resolves robots in array order - and when the agent
      * was giving away every kick-off under 5.4.7 that asymmetry was worth an
-     * entire goal a match, always to yellow. Playing each way cancels it,
+     * entire goal a match, always to lime. Playing each way cancels it,
      * which is the same reason a tournament plays every pairing twice.
      *
      * And the dial is only asserted where the handicap is bigger than the
@@ -290,24 +290,24 @@ describe('the reference agent', () => {
     const margins = [0.35, 0.2].map((skill) => {
       let goalDifference = 0;
       for (let seed = 31; seed < 55; seed++) {
-        const asCyan = new Match({
+        const asViolet = new Match({
           agents: {
-            ...referenceTeam('cyan', 1),
-            ...referenceTeam('yellow', skill),
+            ...referenceTeam('violet', 1),
+            ...referenceTeam('lime', skill),
           } as unknown as MatchAgents,
           halfSeconds: HALF,
           seed,
         }).run();
-        const asYellow = new Match({
+        const asLime = new Match({
           agents: {
-            ...referenceTeam('cyan', skill),
-            ...referenceTeam('yellow', 1),
+            ...referenceTeam('violet', skill),
+            ...referenceTeam('lime', 1),
           } as unknown as MatchAgents,
           halfSeconds: HALF,
           seed,
         }).run();
-        goalDifference += asCyan.score.cyan - asCyan.score.yellow;
-        goalDifference += asYellow.score.yellow - asYellow.score.cyan;
+        goalDifference += asViolet.score.violet - asViolet.score.lime;
+        goalDifference += asLime.score.lime - asLime.score.violet;
       }
       return goalDifference;
     });
@@ -331,8 +331,8 @@ describe('the reference agent', () => {
     for (let seed = 1; seed <= 6; seed++) {
       const result = new Match({
         agents: {
-          ...referenceTeam('cyan', 1),
-          ...referenceTeam('yellow', 1),
+          ...referenceTeam('violet', 1),
+          ...referenceTeam('lime', 1),
         } as unknown as MatchAgents,
         halfSeconds: HALF,
         seed,
@@ -364,7 +364,7 @@ describe('refereed play: a human starts each half; everything else resolves itse
     const m = refereedMatch();
     m.world.half = 1;
     m.resetAgents();
-    m.kickOff('cyan');
+    m.kickOff('violet');
     expect(m.world.running).toBe(true);
 
     // Clear the field and fire the ball at the goal - the same technique
@@ -375,7 +375,7 @@ describe('refereed play: a human starts each half; everything else resolves itse
     m.world.ball.vx = 3000;
     for (let i = 0; i < 200; i++) m.step(dt);
 
-    expect(m.world.score.cyan).toBe(1);
+    expect(m.world.score.violet).toBe(1);
     // Auto-resolved: play never stopped for a human to act on it.
     expect(m.world.running).toBe(true);
   });
@@ -393,7 +393,7 @@ describe('refereed play: a human starts each half; everything else resolves itse
       seed: 1,
     });
     m.resetAgents();
-    m.kickOff('cyan');
+    m.kickOff('violet');
 
     m.world.robots.forEach((r) => (r.removed = true));
     m.world.ball.x = 400;
@@ -403,14 +403,14 @@ describe('refereed play: a human starts each half; everything else resolves itse
 
     // A goal stops play instead of restarting it, because this match asked
     // to be told rather than have it handled automatically.
-    expect(m.world.score.cyan).toBe(1);
+    expect(m.world.score.violet).toBe(1);
     expect(m.world.running).toBe(false);
   });
 
   it('pause and resume toggle play and appear in the event log', () => {
     const m = refereedMatch();
     m.resetAgents();
-    m.kickOff('cyan');
+    m.kickOff('violet');
     m.pause();
     expect(m.world.running).toBe(false);
     expect(m.world.events.at(-1)?.kind).toBe('paused');
@@ -423,9 +423,9 @@ describe('refereed play: a human starts each half; everything else resolves itse
   it('a stood-down robot returns automatically once its penalty is served, just like a self-running match', () => {
     const m = refereedMatch();
     m.resetAgents();
-    m.kickOff('cyan');
-    m.removeRobot('cyan-1', '5.7.1', 'Testing a manual removal.');
-    const robot = m.world.robots.find((r) => r.id === 'cyan-1')!;
+    m.kickOff('violet');
+    m.removeRobot('violet-1', '5.7.1', 'Testing a manual removal.');
+    const robot = m.world.robots.find((r) => r.id === 'violet-1')!;
     expect(robot.removed).toBe(true);
 
     // Run the penalty all the way down.
@@ -436,29 +436,29 @@ describe('refereed play: a human starts each half; everything else resolves itse
   it('lets the referee still remove and return a robot by hand, on top of the automatic behaviour', () => {
     const m = refereedMatch();
     m.resetAgents();
-    m.kickOff('cyan');
-    m.removeRobot('cyan-1', 'unsporting conduct', 'Deliberately obstructing an opponent.');
-    const robot = m.world.robots.find((r) => r.id === 'cyan-1')!;
+    m.kickOff('violet');
+    m.removeRobot('violet-1', 'unsporting conduct', 'Deliberately obstructing an opponent.');
+    const robot = m.world.robots.find((r) => r.id === 'violet-1')!;
     expect(robot.removed).toBe(true);
 
     // A manual return still respects the 5.7.2 stand-down period.
-    expect(m.returnRobot('cyan-1')).toBe(false);
+    expect(m.returnRobot('violet-1')).toBe(false);
     robot.penaltyRemaining = 0;
-    expect(m.returnRobot('cyan-1')).toBe(true);
+    expect(m.returnRobot('violet-1')).toBe(true);
     expect(robot.removed).toBe(false);
   });
 
   it('correctScore mutates the score and is recorded with a reason', () => {
     const m = refereedMatch();
-    m.correctScore('cyan', 2, 'Goal miscounted by the scoreboard operator.');
-    expect(m.world.score.cyan).toBe(2);
+    m.correctScore('violet', 2, 'Goal miscounted by the scoreboard operator.');
+    expect(m.world.score.violet).toBe(2);
     expect(m.world.events.at(-1)?.kind).toBe('score-corrected');
 
     m.abandon('Field fault.');
     const result = m.result();
     expect(result.scoreCorrections).toEqual([
       {
-        team: 'cyan',
+        team: 'violet',
         from: 0,
         to: 2,
         reason: 'Goal miscounted by the scoreboard operator.',
@@ -470,7 +470,7 @@ describe('refereed play: a human starts each half; everything else resolves itse
   it('abandon ends the match and records the reason', () => {
     const m = refereedMatch();
     m.resetAgents();
-    m.kickOff('cyan');
+    m.kickOff('violet');
     for (let i = 0; i < 50; i++) m.step(dt);
     m.abandon('Safety issue on the field.');
 
@@ -491,7 +491,7 @@ describe('refereed play: a human starts each half; everything else resolves itse
     m.resume();
     expect(m.world.running).toBe(false);
 
-    m.kickOff('cyan');
+    m.kickOff('violet');
     m.pause();
     expect(m.world.running).toBe(false);
     m.resume(); // fine once this half has actually been kicked off
@@ -501,7 +501,7 @@ describe('refereed play: a human starts each half; everything else resolves itse
   it('requires a fresh kick-off after resetAgents, even mid-match', () => {
     const m = refereedMatch();
     m.resetAgents();
-    m.kickOff('cyan');
+    m.kickOff('violet');
     m.pause();
     // A new half (or any other resetAgents boundary) needs its own kick-off.
     m.resetAgents();
@@ -512,7 +512,7 @@ describe('refereed play: a human starts each half; everything else resolves itse
   it('endHalf stops just this half; endMatch stops the whole thing', () => {
     const half = refereedMatch();
     half.resetAgents();
-    half.kickOff('cyan');
+    half.kickOff('violet');
     half.endHalf();
     expect(half.consumeHalfEndRequest()).toBe(true);
     expect(half.world.running).toBe(false);
@@ -520,7 +520,7 @@ describe('refereed play: a human starts each half; everything else resolves itse
 
     const whole = refereedMatch();
     whole.resetAgents();
-    whole.kickOff('cyan');
+    whole.kickOff('violet');
     whole.endMatch();
     expect(whole.consumeHalfEndRequest()).toBe(true);
     expect(whole.world.running).toBe(false);

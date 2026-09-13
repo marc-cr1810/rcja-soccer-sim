@@ -52,6 +52,7 @@ from .field import (
     WALL_Z,
     WHEEL_RADIUS,
     goal_centre,
+    pass_lands_near,
 )
 
 #: Matches IR_REFERENCE_RANGE in the simulator: strength reads 1.0 at contact,
@@ -252,6 +253,26 @@ def spin_towards(error: float, yaw: "YawRate | GyroRate", kp: float = 1.4, kd: f
     return clamp(error * kp - yaw.rate * kd, -1.0, 1.0)
 
 
+def _teammate_said(s, key: str) -> list | None:
+    """The most recent list under `key` in a message from the team mate.
+
+    `message.body` is read through `Reading.__getattr__` the same as every
+    other nested field, which wraps a dict into another `Reading` rather than
+    handing back a plain `dict` - so it is read the way this library reads
+    any `Reading`, by `in` and by attribute, and never by the `.get()` a
+    plain dict would answer to. A body that is not a `Reading` at all (no
+    message this tick has one) is skipped rather than raising.
+    """
+    for message in getattr(s, "messages", []):
+        body = getattr(message, "body", None)
+        if body is None or key not in body:
+            continue
+        value = getattr(body, key)
+        if isinstance(value, list):
+            return value
+    return None
+
+
 def teammate_ball(s) -> tuple[float, float] | None:
     """Where the team mate last saw the ball, if it said (rule 4.2.5).
 
@@ -261,12 +282,9 @@ def teammate_ball(s) -> tuple[float, float] | None:
     message after 0.4 seconds, so whatever comes back here is recent by
     construction.
     """
-    for message in getattr(s, "messages", []):
-        body = getattr(message, "body", None)
-        if isinstance(body, dict) and isinstance(body.get("ball"), list):
-            spot = body["ball"]
-            if len(spot) == 2:
-                return float(spot[0]), float(spot[1])
+    spot = _teammate_said(s, "ball")
+    if spot is not None and len(spot) == 2:
+        return float(spot[0]), float(spot[1])
     return None
 
 
@@ -282,6 +300,54 @@ def relay_ball(bx: float | None, bz: float | None, confidence: float) -> list[fl
     if bx is None or bz is None or confidence < 1.0:
         return None
     return [round(bx), round(bz)]
+
+
+def relay_position(me_x: float, me_z: float, confidence: float) -> list[float] | None:
+    """This robot's own position, worth telling the team mate, or nothing.
+
+    A pass needs to know where the team mate actually is, not just where the
+    ball is - the same solidity gate as `relay_ball`, for the same reason: a
+    shaky fix handed over as if it were reliable is worse than admitting there
+    is nothing to say.
+    """
+    if confidence < 1.0:
+        return None
+    return [round(me_x), round(me_z)]
+
+
+def teammate_position(s) -> tuple[float, float] | None:
+    """Where the team mate last said it was, if it said (rule 4.2.5).
+
+    A pass aimed at a team mate's last-known ball sighting is aimed at where
+    the ball was, not at where the robot receiving it now stands - this is the
+    other half of `teammate_ball`, for passing rather than for finding.
+    """
+    spot = _teammate_said(s, "pos")
+    if spot is not None and len(spot) == 2:
+        return float(spot[0]), float(spot[1])
+    return None
+
+
+def pass_is_open(
+    s, heading: float, me_x: float, me_z: float, target_x: float, target_z: float,
+    min_range: float = 250.0, max_range: float = 1100.0,
+) -> bool:
+    """Whether firing along the current heading, right now, sends the ball to a team mate.
+
+    The same discipline a shot gets, aimed at a robot instead of a goal mouth:
+    checked against the heading the kicker will actually fire along, not the
+    line to wherever the team mate is standing, and re-checked every tick
+    while a spin controller brings the heading round - the pass fires the
+    instant this is true, the same way `shot_range` and `obstacle_range`
+    gate a shot. Too short is a nudge rather than a pass; too long is more
+    hope than a pass, and by the time it arrives the team mate has likely
+    moved off the spot it was last heard from.
+    """
+    reach = pass_lands_near(me_x, me_z, heading, target_x, target_z)
+    if reach is None or not (min_range <= reach <= max_range):
+        return False
+    blocker = obstacle_range(s, heading, me_x, me_z)
+    return blocker is None or blocker > reach - 150.0
 
 
 # ------------------------------------------------------------------ where am I
@@ -678,22 +744,44 @@ def steer_clear_of_edges(
 ) -> float:
     """Bend a direction of travel away from the boundary, and then forbid it.
 
-    Two mechanisms, because one is not enough. The push is proportional and
+    Two mechanisms, because one is not enough. The bend is proportional and
     starts early, so most of the time the robot simply curves away and nothing
     looks like an intervention. The stop is absolute and applies at the very
     edge: past it, the outward component of the command is deleted.
 
-    The stop is what stops rule 5.7.1.6. A proportional push alone loses, and
+    The bend only ever cancels the part of the requested direction pointing
+    further out; the part running along the boundary is left alone. Adding a
+    fixed inward push instead — which this used to do — fights a direction
+    that is mostly along the line rather than bending it, and can overpower
+    it outright: a robot working round a ball sitting on the touchline has to
+    point somewhat outward to get behind it at all, the old push could flip
+    that outward component to inward instead of just trimming it, and the
+    orbit logic immediately asked for outward again next tick. The result was
+    a robot visibly bouncing off the line rather than sliding along it. Fading
+    out only the outward part, in place of overpowering the whole direction,
+    is what turns that bounce into a curve.
+
+    The stop is what stops rule 5.7.1.6. A proportional bend alone loses, and
     loses in the worst way — a robot chasing a ball towards a touchline at
     full speed carries most of a metre of momentum past the point where the
-    push finally exceeds what it was asked to do, ends up wholly in the out
-    area, and is removed for thirty seconds. That is not a near miss; it is
-    the most expensive thing on the field, and it happens to a robot that was
-    only doing what it was told.
+    bend finally cancels all of what it was asked to do, ends up wholly in the
+    out area, and is removed for thirty seconds. That is not a near miss; it
+    is the most expensive thing on the field, and it happens to a robot that
+    was only doing what it was told.
     """
-    px, pz = keep_inside(x, z, margin)
-    wx = math.cos(travel) + px
-    wz = math.sin(travel) + pz
+    wx = math.cos(travel)
+    wz = math.sin(travel)
+
+    # 0 well inside the margin, 1 at the boundary: how much of the outward
+    # component to fade out. Only applied when the requested direction is
+    # actually pointing further out (`wx * x > 0` and the like) - a direction
+    # already heading back in is not the problem and is left untouched.
+    fade_x = clamp((abs(x) - (HALF_LENGTH - margin)) / margin, 0.0, 1.0)
+    if fade_x > 0 and wx * x > 0:
+        wx *= 1.0 - fade_x
+    fade_z = clamp((abs(z) - (HALF_WIDTH - margin)) / margin, 0.0, 1.0)
+    if fade_z > 0 and wz * z > 0:
+        wz *= 1.0 - fade_z
 
     # Past the stop, the command is not merely trimmed of its outward part, it
     # is turned around. Deleting the outward component leaves the robot
@@ -701,9 +789,9 @@ def steer_clear_of_edges(
     # come to rest from full speed, which is most of the way from the stop to
     # being wholly out. Driving inward spends those 140 mm braking instead.
     if abs(z) > stop_z:
-        wz = -math.copysign(1.8, z)
+        wz = -math.copysign(1.0, z)
     if abs(x) > stop_x:
-        wx = -math.copysign(1.8, x)
+        wx = -math.copysign(1.0, x)
 
     if abs(wx) < 1e-6 and abs(wz) < 1e-6:
         # Everything it wanted is forbidden. Head for the middle.

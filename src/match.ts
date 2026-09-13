@@ -42,13 +42,13 @@ const DRIBBLE_GRIP = 0.55;
 
 /** Keyed by the world's own robot ids. */
 export interface MatchAgents {
-  'cyan-1': Agent;
-  'cyan-2': Agent;
-  'yellow-1': Agent;
-  'yellow-2': Agent;
+  'violet-1': Agent;
+  'violet-2': Agent;
+  'lime-1': Agent;
+  'lime-2': Agent;
 }
 
-/** Robot number, 1 or 2, from an id like 'cyan-2'. */
+/** Robot number, 1 or 2, from an id like 'violet-2'. */
 function numberOf(id: string): number {
   return Number(id.slice(id.indexOf('-') + 1));
 }
@@ -66,7 +66,7 @@ export interface MatchOptions {
    */
   transports?: Partial<Record<string, Transport>>;
   /** Names for the scoreboard. Defaults to the colours. */
-  teams?: { cyan: string; yellow: string };
+  teams?: { violet: string; lime: string };
   league?: LeagueId;
   /** Seconds per half. Rule 5.2.1 says five minutes. */
   halfSeconds?: number;
@@ -175,29 +175,29 @@ export class Match {
     { kicker: boolean; dribbler: number; kickCooldown: number; say?: unknown }
   > = {};
   private readonly radios: Record<TeamId, TeamRadio> = {
-    cyan: new TeamRadio(),
-    yellow: new TeamRadio(),
+    violet: new TeamRadio(),
+    lime: new TeamRadio(),
   };
   private readonly halfSeconds: number;
-  readonly teams: { cyan: string; yellow: string };
+  readonly teams: { violet: string; lime: string };
   private sinceControl = 0;
   /**
    * Flips every physics tick. `control()` and `dribble()` both resolve
    * several robots against the same shared ball one at a time, and whichever
    * one goes last keeps more of its own influence on the result - proven with
    * a deterministic mirror-symmetric contest that came out perfectly even only
-   * once ball state stopped being progressively mutated tick to tick. Cyan is
+   * once ball state stopped being progressively mutated tick to tick. Violet is
    * always first in `this.slots` (built once, from `world.robots`, before any
    * kick-off ever happens), so a FIXED order would hand that edge to the same
    * team for the entire match regardless of which end it is defending -
-   * exactly the effect that turned up as a persistent cyan lead in both halves
+   * exactly the effect that turned up as a persistent violet lead in both halves
    * even after ends were made to swap. Flipping who goes first every tick
    * instead of once a match spreads the same edge over both teams equally,
    * inside a single half - the granularity a mercy rule needs.
    */
   private slotOrderFlipped = false;
   private readonly goals: { team: TeamId; at: number }[] = [];
-  private lastScore = { cyan: 0, yellow: 0 };
+  private lastScore = { violet: 0, lime: 0 };
   private readonly calls: Record<string, number> = {};
   private lastSeenEvent: unknown = null;
   private readonly observer: ((match: Match) => void) | undefined;
@@ -213,7 +213,7 @@ export class Match {
   constructor(opts: MatchOptions) {
     const league = getLeague(opts.league ?? 'open');
     this.halfSeconds = opts.halfSeconds ?? 300;
-    this.teams = opts.teams ?? { cyan: 'Cyan', yellow: 'Yellow' };
+    this.teams = opts.teams ?? { violet: 'Violet', lime: 'Lime' };
     this.refereed = opts.refereed ?? false;
     this.world = new World({
       league,
@@ -228,7 +228,7 @@ export class Match {
       autoResolve: opts.autoResolve,
       autoDamaged: opts.autoDamaged,
     });
-    this.world.resetRobots('cyan');
+    this.world.resetRobots('violet');
 
     this.observer = opts.observe;
 
@@ -410,7 +410,7 @@ export class Match {
       // Flip HERE, not once per physics step. control() runs every
       // PHYSICS_HZ/CONTROL_HZ steps - an even number - so a flip on every step
       // lands on the same parity every time control() looks at it, and the
-      // order never actually alternated: cyan-1 was polled first on every
+      // order never actually alternated: violet-1 was polled first on every
       // control cycle of every match. That is the fixed order this flip exists
       // to avoid, and for a program on a socket it is not a tie-break detail -
       // frames are written in poll order, so the last seat polled is the one
@@ -446,7 +446,7 @@ export class Match {
   }
 
   private recordGoals(): void {
-    for (const team of ['cyan', 'yellow'] as const) {
+    for (const team of ['violet', 'lime'] as const) {
       while (this.world.score[team] > this.lastScore[team]) {
         this.lastScore[team]++;
         this.goals.push({ team, at: this.world.clock });
@@ -643,7 +643,7 @@ export class Match {
       // Rule 1.4/5.4: the team that did not kick off the first half starts the
       // second, and sides swap. Swapping sides is the reason every pairing is
       // played twice in a tournament rather than trusting one match.
-      this.world.kickOff(half === 1 ? 'cyan' : 'yellow');
+      this.world.kickOff(half === 1 ? 'violet' : 'lime');
       this.resetAgents();
 
       this.world.running = true;

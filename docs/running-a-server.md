@@ -15,7 +15,7 @@ it.
 ## The three ways to fill the four seats
 
 **Built-in, the default.** No flags. Both sides are the reference agent, and
-`--opponent <bot>` swaps the yellow side for one of the deliberately poor
+`--opponent <bot>` swaps the lime side for one of the deliberately poor
 test robots (`naive-chaser`, `shover`, `waller`, `spinner`, ...) — useful for
 watching the referee actually do something, since e.g. a waller drives
 itself off the field within seconds.

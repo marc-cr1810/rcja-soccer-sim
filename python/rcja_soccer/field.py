@@ -90,13 +90,14 @@ def our_goal(direction: float) -> str:
 
 
 def other_side(team: str) -> str:
-    """The other team's name.
+    """The other team's id.
 
-    Only the names here are colours; the goals themselves are *places* that
-    keep their paint for the whole match, so which name a robot calls the goal
-    it is shooting at is a field fact found from the frame, not a team fact.
+    Team ids are the robot colours — violet or lime; the goals are *places*
+    whose paint lives at a fixed place for the whole match, so which name a
+    robot calls the goal it is shooting at is a field fact found from the
+    frame, not a team fact.
     """
-    return "yellow" if team == "cyan" else "cyan"
+    return "lime" if team == "violet" else "violet"
 
 
 def goal_centre(side: str) -> tuple[float, float]:
@@ -161,6 +162,31 @@ def shot_range(bx: float, bz: float, heading: float, side: str) -> float | None:
 def kick_lands_in_goal(bx: float, bz: float, heading: float, side: str) -> bool:
     """Whether a kick from here along this heading goes in, at any range."""
     return shot_range(bx, bz, heading, side) is not None
+
+
+def pass_lands_near(
+    bx: float, bz: float, heading: float, target_x: float, target_z: float, tolerance: float = 140.0
+) -> float | None:
+    """How far a kick from (bx, bz) along heading travels before passing near a teammate.
+
+    The same ray-cast `shot_range` uses, aimed at a robot instead of a goal
+    mouth: the kicker fires along the heading, not along the line to wherever
+    the program was aiming, so whether a pass finds a teammate is a question
+    about the heading, not about where the teammate happens to be standing.
+    None if the line never comes within `tolerance` of them, runs backwards,
+    or leaves the playing area before it gets there.
+    """
+    dx = math.cos(heading)
+    dz = math.sin(heading)
+    t = (target_x - bx) * dx + (target_z - bz) * dz
+    if t <= 0:
+        return None
+    miss = math.hypot(bx + dx * t - target_x, bz + dz * t - target_z)
+    if miss > tolerance:
+        return None
+    if is_out(bx + dx * t, bz + dz * t):
+        return None
+    return t
 
 
 def clear_is_safe(bx: float, bz: float, heading: float) -> bool:

@@ -282,7 +282,7 @@ export class MatchServer {
 
     for (const half of [1, 2] as const) {
       match.world.half = half;
-      match.world.kickOff(half === 1 ? 'cyan' : 'yellow');
+      match.world.kickOff(half === 1 ? 'violet' : 'lime');
       match.resetAgents();
       match.world.running = true;
 
@@ -335,7 +335,7 @@ export class MatchServer {
     const perControl = Math.max(1, Math.round(PHYSICS_HZ / CONTROL_HZ));
     for (const half of [1, 2] as const) {
       match.world.half = half;
-      match.world.kickOff(half === 1 ? 'cyan' : 'yellow');
+      match.world.kickOff(half === 1 ? 'violet' : 'lime');
       match.resetAgents();
       match.world.running = true;
       const until = match.world.clock + match.halfLength;
@@ -504,8 +504,8 @@ export class MatchServer {
     switch (action) {
       case 'kickoff': {
         const { team } = payload;
-        if (team !== 'cyan' && team !== 'yellow') {
-          this.respondJson(res, 400, { ok: false, reason: '"team" must be "cyan" or "yellow"' });
+        if (team !== 'violet' && team !== 'lime') {
+          this.respondJson(res, 400, { ok: false, reason: '"team" must be "violet" or "lime"' });
           return;
         }
         match.kickOff(team);
@@ -561,8 +561,8 @@ export class MatchServer {
       }
       case 'correct-score': {
         const { team, to, reason } = payload;
-        if (team !== 'cyan' && team !== 'yellow') {
-          this.respondJson(res, 400, { ok: false, reason: '"team" must be "cyan" or "yellow"' });
+        if (team !== 'violet' && team !== 'lime') {
+          this.respondJson(res, 400, { ok: false, reason: '"team" must be "violet" or "lime"' });
           return;
         }
         if (typeof to !== 'number' || typeof reason !== 'string' || reason.trim() === '') {

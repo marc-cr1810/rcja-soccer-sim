@@ -17,7 +17,7 @@ const ready = pythonAvailable && sandboxAvailable();
 const COAST_ROBOT = `
 import argparse
 parser = argparse.ArgumentParser()
-parser.add_argument("--team", default="cyan")
+parser.add_argument("--team", default="violet")
 parser.add_argument("--number", type=int, default=1)
 parser.add_argument("--name", default=None)
 parser.add_argument("--url", default="ws://localhost:8080/agent")
@@ -60,10 +60,10 @@ describe('resolveLineup', () => {
       'robot.py': COAST_ROBOT,
       token: 'test-token',
     });
-    const resolved = await resolveLineup(root, { cyan: 'Test Team', yellow: 'Yellow' });
-    expect(Object.keys(resolved)).toEqual(['cyan-1']);
-    expect(resolved['cyan-1']?.manifest.entry).toBe('robot.py');
-    expect(resolved['cyan-1']?.token).toBe('test-token');
+    const resolved = await resolveLineup(root, { violet: 'Test Team', lime: 'Lime' });
+    expect(Object.keys(resolved)).toEqual(['violet-1']);
+    expect(resolved['violet-1']?.manifest.entry).toBe('robot.py');
+    expect(resolved['violet-1']?.token).toBe('test-token');
   });
 
   it('skips a submission with no token file, same as a bad manifest', async () => {
@@ -72,13 +72,13 @@ describe('resolveLineup', () => {
       'manifest.json': JSON.stringify({ team: 'Test Team', robot: 1, entry: 'robot.py' }),
       'robot.py': COAST_ROBOT,
     });
-    const resolved = await resolveLineup(root, { cyan: 'Test Team', yellow: 'Yellow' });
+    const resolved = await resolveLineup(root, { violet: 'Test Team', lime: 'Lime' });
     expect(resolved).toEqual({});
   });
 
   it('leaves a slot unresolved when nothing was pushed for it', async () => {
     const root = await submissionsRoot();
-    const resolved = await resolveLineup(root, { cyan: 'Nobody', yellow: 'Nobody Else' });
+    const resolved = await resolveLineup(root, { violet: 'Nobody', lime: 'Nobody Else' });
     expect(resolved).toEqual({});
   });
 
@@ -89,14 +89,14 @@ describe('resolveLineup', () => {
       'manifest.json': JSON.stringify({ team: 'Test Team', robot: 2, entry: 'robot.py' }),
       'robot.py': COAST_ROBOT,
     });
-    const resolved = await resolveLineup(root, { cyan: 'Test Team', yellow: 'Yellow' });
+    const resolved = await resolveLineup(root, { violet: 'Test Team', lime: 'Lime' });
     expect(resolved).toEqual({});
   });
 
   it('ignores a folder with an unparseable manifest', async () => {
     const root = await submissionsRoot();
     await putSubmission(root, 'test-team', 1, { 'manifest.json': '{not json' });
-    const resolved = await resolveLineup(root, { cyan: 'Test Team', yellow: 'Yellow' });
+    const resolved = await resolveLineup(root, { violet: 'Test Team', lime: 'Lime' });
     expect(resolved).toEqual({});
   });
 });
@@ -129,19 +129,19 @@ describe.skipIf(!ready)('spawnLineup', () => {
       token: 'test-token-2',
     });
 
-    const resolved = await resolveLineup(root, { cyan: 'Test Team', yellow: 'Yellow' });
-    expect(Object.keys(resolved).sort()).toEqual(['cyan-1', 'cyan-2']);
+    const resolved = await resolveLineup(root, { violet: 'Test Team', lime: 'Lime' });
+    expect(Object.keys(resolved).sort()).toEqual(['violet-1', 'violet-2']);
 
     const lineup = await spawnLineup(server, resolved, { pythonLibDir: PYTHON_LIB_DIR });
     try {
-      expect(Object.keys(lineup.transports).sort()).toEqual(['cyan-1', 'cyan-2']);
-      expect(lineup.transports['cyan-1']?.connected).toBe(true);
+      expect(Object.keys(lineup.transports).sort()).toEqual(['violet-1', 'violet-2']);
+      expect(lineup.transports['violet-1']?.connected).toBe(true);
 
       // The whole point: these transports play a real match, mixed with the
-      // built-in agent filling the yellow side nobody pushed anything for.
+      // built-in agent filling the lime side nobody pushed anything for.
       const agents = {
-        ...referenceTeam('cyan'),
-        ...referenceTeam('yellow'),
+        ...referenceTeam('violet'),
+        ...referenceTeam('lime'),
       } as unknown as MatchAgents;
       const result = await server.play({
         agents,
@@ -149,7 +149,7 @@ describe.skipIf(!ready)('spawnLineup', () => {
         halfSeconds: 2,
         seed: 1,
       });
-      expect(result.slots['cyan-1']?.errors).toBe(0);
+      expect(result.slots['violet-1']?.errors).toBe(0);
     } finally {
       lineup.stop();
     }
@@ -163,7 +163,7 @@ describe.skipIf(!ready)('spawnLineup', () => {
       'robot.py': 'import sys\nsys.exit(1)\n',
       token: 'test-token',
     });
-    const resolved = await resolveLineup(root, { cyan: 'Crashy', yellow: 'Yellow' });
+    const resolved = await resolveLineup(root, { violet: 'Crashy', lime: 'Lime' });
 
     const logs: string[] = [];
     await expect(

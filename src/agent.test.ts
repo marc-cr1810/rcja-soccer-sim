@@ -23,7 +23,7 @@ function slot(tick: (f: SensorFrame) => ActuatorFrame | null | undefined) {
 
 const robot = (over: Partial<SensedRobot> = {}): SensedRobot => ({
   id: 'c1',
-  team: 'cyan',
+  team: 'violet',
   number: 1,
   x: 0,
   z: 0,
@@ -221,7 +221,7 @@ describe('perception hands over only what a sensor knows', () => {
 
   it('never hands over anything about the opponent', () => {
     const f = new Senses(1, MOTORS).read({
-      view: view({ robots: [robot(), robot({ id: 'y1', team: 'yellow', x: 900, z: 250 })] }),
+      view: view({ robots: [robot(), robot({ id: 'y1', team: 'lime', x: 900, z: 250 })] }),
       self: robot(),
       wheelSpeeds: [0, 0, 0, 0],
       omega: 0,

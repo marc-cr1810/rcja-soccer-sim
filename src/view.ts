@@ -20,7 +20,7 @@ import type { League } from './leagues';
 /** A robot, as far as drawing it is concerned. */
 export interface ViewRobot {
   id: string;
-  team: 'cyan' | 'yellow';
+  team: 'violet' | 'lime';
   x: number;
   z: number;
   /** Radians; 0 points towards +x. */
@@ -59,7 +59,7 @@ export interface ViewEvent {
   rule: string;
   message: string;
   at: number;
-  team?: 'cyan' | 'yellow';
+  team?: 'violet' | 'lime';
 }
 
 /**
@@ -76,16 +76,16 @@ export interface ViewFrame {
   clock: number;
   half: 1 | 2;
   running: boolean;
-  score: { cyan: number; yellow: number };
+  score: { violet: number; lime: number };
   ball: ViewBall;
   robots: ViewRobot[];
   /** Rule 4.2.5 traffic, for the comms lines the lab's renderer draws. */
   commsEnabled: boolean;
-  commsActivity: { cyan: number; yellow: number };
+  commsActivity: { violet: number; lime: number };
   /** The most recent calls, newest last. Enough for a banner, not a log. */
   events: ViewEvent[];
   /** Who is playing, for the scoreboard. */
-  teams: { cyan: string; yellow: string };
+  teams: { violet: string; lime: string };
 }
 
 /** Everything the renderer needs, and nothing else. */
@@ -96,14 +96,14 @@ export interface RenderView {
   commsEnabled: boolean;
   // Keyed explicitly rather than by string, so a renderer reading
   // commsActivity[team] gets a number rather than number | undefined.
-  commsActivity: { cyan: number; yellow: number };
+  commsActivity: { violet: number; lime: number };
 }
 
 /** The league is sent once, when a viewer joins, because it never changes mid-match. */
 export interface ViewHello {
   type: 'hello';
   league: League;
-  teams: { cyan: string; yellow: string };
+  teams: { violet: string; lime: string };
   halfSeconds: number;
 }
 

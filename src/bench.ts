@@ -55,7 +55,7 @@ export interface BenchOptions {
 }
 
 export const DEFAULT_OPTIONS: BenchOptions = {
-  team: 'cyan',
+  team: 'violet',
   opponent: 'reference',
   seeds: [1, 2, 3],
   halfSeconds: 90,
@@ -299,7 +299,7 @@ export function ballBlocked(
   return false;
 }
 
-/** The other robot on this one's own team, e.g. `cyan-1` -> `cyan-2`. */
+/** The other robot on this one's own team, e.g. `violet-1` -> `violet-2`. */
 export function partnerId(id: string): string {
   const dash = id.lastIndexOf('-');
   const team = id.slice(0, dash);
@@ -458,7 +458,7 @@ class Sampler {
       acc.travelled += Math.hypot(robot.x - acc.lastX, robot.z - acc.lastZ);
       acc.lastX = robot.x;
       acc.lastZ = robot.z;
-      const sign = robot.team === 'cyan' ? 1 : -1;
+      const sign = robot.team === 'violet' ? 1 : -1;
       if (robot.x * sign > THIRD) acc.attackThird++;
       if (robot.x * sign < -THIRD) acc.ownThird++;
 
@@ -528,7 +528,7 @@ class Sampler {
     }
 
     if (!this.shot) return;
-    const scored = world.score.cyan + world.score.yellow;
+    const scored = world.score.violet + world.score.lime;
     if (scored !== this.goalsSoFar) {
       this.goalsSoFar = scored;
       this.record(this.shot, 'goals');
@@ -714,7 +714,7 @@ function opponentAgents(opponent: string, side: TeamId): Record<string, unknown>
 }
 
 function seatsFor(team: BenchOptions['team']): string[] {
-  if (team === 'both') return ['cyan-1', 'cyan-2', 'yellow-1', 'yellow-2'];
+  if (team === 'both') return ['violet-1', 'violet-2', 'lime-1', 'lime-2'];
   return [`${team}-1`, `${team}-2`];
 }
 
@@ -731,9 +731,9 @@ export async function runBench(
 ): Promise<BenchResult> {
   const opts: BenchOptions = { ...DEFAULT_OPTIONS, ...partial };
   const seats = seatsFor(opts.team);
-  const testedSide: TeamId = opts.team === 'both' ? 'cyan' : opts.team;
-  const otherSide: TeamId = testedSide === 'cyan' ? 'yellow' : 'cyan';
-  const attackSign = testedSide === 'cyan' ? 1 : -1;
+  const testedSide: TeamId = opts.team === 'both' ? 'violet' : opts.team;
+  const otherSide: TeamId = testedSide === 'violet' ? 'lime' : 'violet';
+  const attackSign = testedSide === 'violet' ? 1 : -1;
 
   const server = new MatchServer({
     port: opts.port,
@@ -765,15 +765,15 @@ export async function runBench(
       samplers.push(sampler);
 
       const agents = {
-        ...(opts.team === 'both' ? referenceTeam('cyan') : {}),
+        ...(opts.team === 'both' ? referenceTeam('violet') : {}),
         ...(opts.team === 'both'
-          ? referenceTeam('yellow')
+          ? referenceTeam('lime')
           : { ...opponentAgents(opts.opponent, otherSide), ...referenceTeam(testedSide) }),
       } as unknown as MatchAgents;
 
       // Only the seats under test are driven from outside. Anything else that
       // happens to be connected is ignored rather than quietly replacing the
-      // opponent, which is what makes `--team cyan` mean what it says even
+      // opponent, which is what makes `--team violet` mean what it says even
       // when the launcher started all four robots.
       const all = server.agents.transports();
       const transports = Object.fromEntries(
@@ -887,7 +887,7 @@ function aggregate(
     const slot = slotReports[id];
     robots[id] = {
       id,
-      team: id.startsWith('cyan') ? 'cyan' : 'yellow',
+      team: id.startsWith('violet') ? 'violet' : 'lime',
       tested: seats.includes(id),
       meanX: Math.round(parts.reduce((a, p) => a + p.x, 0) / Math.max(1, samples)),
       meanZ: Math.round(parts.reduce((a, p) => a + p.z, 0) / Math.max(1, samples)),
@@ -996,7 +996,7 @@ function diagnose(r: BenchResult): Finding[] {
   const illegal = r.callsAgainstUs['illegal-kickoff'] ?? 0;
   const kickoffs = r.calls['kickoff'] ?? 0;
   if (illegal > 0.5) {
-    const side = r.tested[0]?.slice(0, r.tested[0].indexOf('-')) ?? 'cyan';
+    const side = r.tested[0]?.slice(0, r.tested[0].indexOf('-')) ?? 'violet';
     const ours = r.kickoffs.filter((k) => k.team === side);
     const bad = ours.filter((k) => k.resolution === 'illegal');
     const maxCarry = bad.length > 0 ? Math.max(...bad.map((k) => k.carryAtCall || k.maxCarry)) : 0;
@@ -1337,7 +1337,7 @@ export function formatBench(r: BenchResult, baseline?: BenchResult): string {
   if (ours.length > 0) {
     out.push(`  charged to you:      ${ours.map(([k, v]) => `${k} ${v}`).join('   ')}`);
   }
-  const side = r.tested[0]?.slice(0, r.tested[0].indexOf('-')) ?? 'cyan';
+  const side = r.tested[0]?.slice(0, r.tested[0].indexOf('-')) ?? 'violet';
   const kt = r.kickoffs.filter((k) => k.team === side);
   if (kt.length > 0) {
     const byRes = (res: string): number => kt.filter((k) => k.resolution === res).length;

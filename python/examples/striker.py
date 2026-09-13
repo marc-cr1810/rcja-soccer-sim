@@ -22,6 +22,13 @@ sees white can never take a shot. The line pushes; it does not interrupt.
 
 **A kick-off is a strike (rule 5.4.7).** Drive at the ball and fire the kicker;
 the referee wants the ball 50 mm clear, and pushing it never gets there.
+
+**Pinned deep in your own end, lay it off.** A robot standing over the ball
+right in front of its own goal, with an opponent's shell already blocking the
+lane forward, is not "about to dribble past it" - it is one stolen touch from
+conceding. The keeper is a legal, radioed-in outlet the same way it always
+was, just rarely worth using this far back; here it is the only thing worth
+using.
 """
 
 from __future__ import annotations
@@ -35,12 +42,23 @@ from pathlib import Path
 # Ensure rcja_soccer can be imported regardless of current working directory
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from rcja_soccer import Robot, clamp, drive, relay_ball, teammate_ball, wrap_angle
+from rcja_soccer import (
+    Robot,
+    clamp,
+    drive,
+    pass_is_open,
+    relay_ball,
+    relay_position,
+    teammate_ball,
+    teammate_position,
+    wrap_angle,
+)
 from rcja_soccer.field import (
     HALF_GOAL_WIDTH,
     HALF_LENGTH,
     HALF_WIDTH,
     in_penalty_box,
+    kick_lands_in_goal,
     shot_range,
 )
 from rcja_soccer.frame import GoalFrame
@@ -58,7 +76,7 @@ from rcja_soccer.sense import (
 )
 
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument("--team", default="cyan", choices=["cyan", "yellow"])
+parser.add_argument("--team", default="violet", choices=["violet", "lime"])
 parser.add_argument("--number", type=int, default=1, choices=[1, 2])
 parser.add_argument("--name", default=None)
 parser.add_argument("--url", default="ws://localhost:8080/agent")
@@ -79,6 +97,11 @@ frame = GoalFrame(TEAM)
 #: Inside the posts by enough that the ball fits and a keeper on the line has
 #: to actually move. The posts are at 225 mm.
 AIM_POST = 155.0
+
+#: How far up the field counts as "deep in our own end" for a backpass - the
+#: same scale `choose_aim` uses for "too central to have a wing of its own",
+#: pulled in tighter: this is only for the spot losing the ball is worst.
+BACKPASS_DEPTH = HALF_LENGTH * 0.3
 
 yaw = GyroRate()
 effort = WheelEffort()
@@ -193,7 +216,7 @@ def think(s, me):
             return robot.motors(
                 drive(bearing=travel, speed=0.55, spin=spin_towards(wrap_angle(frame.up_angle() - heading), yaw)),
                 dribbler=1.0,
-                say={"role": "striker", "ball": None, "held": False},
+                say={"role": "striker", "ball": None, "pos": relay_position(me_x, me_z, locator.confidence), "held": False},
             )
         bx, bz = told
     else:
@@ -283,7 +306,36 @@ def think(s, me):
     kick = holding and shot_on
     dribbler = 0.0 if kick else 1.0
 
-    if holding and not shot_on:
+    # -- pinned deep, lay it off ---------------------------------------------
+    # Only when there is actually somebody in the way (`not lane_clear`) and
+    # only this close to our own goal: further up the field, "blocked" is a
+    # defender to dribble round, not a reason to give the ball up.
+    outlet = teammate_position(s) if (holding and not lane_clear) else None
+    in_trouble = outlet is not None and frame.depth(me_x, me_z) < BACKPASS_DEPTH
+    # Standing still holding the ball while lining this up is only worth it
+    # for a moment - a lane that has not opened in getting on for a second is
+    # not about to, and dribbling round the defender beats waiting forever.
+    waited = me.get("backpass_wait", 0) + 1 if in_trouble else 0
+    me.backpass_wait = waited
+    backpass = in_trouble and waited <= 30
+
+    if backpass:
+        # Committed to the turn the moment the situation calls for it, the
+        # same way `spin` always chases `push` above - otherwise the heading
+        # never comes round to something `pass_is_open` can say yes to.
+        back_heading = math.atan2(outlet[1] - me_z, outlet[0] - me_x)
+        travel_field = back_heading
+        spin = spin_towards(wrap_angle(back_heading - heading), yaw)
+        speed = 0.0
+        clear_of_own_goal = not kick_lands_in_goal(me_x, me_z, heading, frame.my_colour)
+        if clear_of_own_goal and pass_is_open(s, heading, me_x, me_z, *outlet):
+            kick = True
+            dribbler = 0.0
+            state = "BACKPASS"
+            me.backpass_wait = 0
+        else:
+            state = "LINE_UP_BACKPASS"
+    elif holding and not shot_on:
         if reach is not None and not lane_clear:
             # Aimed right, but there is a robot in front. Carry on round it:
             # the heading stays on the goal, and an omni drive can travel
@@ -312,7 +364,12 @@ def think(s, me):
         drive(bearing=wrap_angle(travel_field - heading), speed=speed, spin=spin),
         dribbler=dribbler,
         kicker=kick,
-        say={"role": "striker", "ball": relay_ball(bx, bz, locator.confidence), "held": holding},
+        say={
+            "role": "striker",
+            "ball": relay_ball(bx, bz, locator.confidence),
+            "pos": relay_position(me_x, me_z, locator.confidence),
+            "held": holding,
+        },
     )
 
 
@@ -466,7 +523,8 @@ def say(me, state: str, distance: float | None = None) -> None:
         print(
             f"[{args.team}-{args.number} striker] {state:<14} {extra}"
             f"  at ({locator.x:7.0f},{locator.z:6.0f})"
-            f"  ball ({ball.x:7.0f},{ball.z:6.0f}) age {ball.age:.2f}",
+            f"  ball ({ball.x:7.0f},{ball.z:6.0f}) age {ball.age:.2f}"
+            f"  TRACE up=({frame.up_x:4.1f},{frame.up_z:4.1f}) my=({frame.my_x:6.0f},{frame.my_z:5.0f}) their=({frame.their_x:6.0f},{frame.their_z:5.0f}) mycol={frame.my_colour}",
             file=sys.stderr,
         )
 

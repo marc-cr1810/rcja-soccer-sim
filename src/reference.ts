@@ -293,7 +293,7 @@ export interface ReferenceOptions {
    * swap at half-time (rule 1.4/5.4), so attack direction is read fresh from
    * `frame.attackDirection` every tick instead.
    */
-  team: 'cyan' | 'yellow';
+  team: 'violet' | 'lime';
   number: 1 | 2;
   role?: Role;
   drive?: DriveSpec;
@@ -663,7 +663,7 @@ export class ReferenceAgent implements Agent {
 }
 
 /** A full team of two: a striker and a keeper. */
-export function referenceTeam(team: 'cyan' | 'yellow', skill = 1) {
+export function referenceTeam(team: 'violet' | 'lime', skill = 1) {
   return {
     [`${team}-1`]: new ReferenceAgent({ team, number: 1, role: 'striker', skill }),
     [`${team}-2`]: new ReferenceAgent({ team, number: 2, role: 'goalie', skill }),

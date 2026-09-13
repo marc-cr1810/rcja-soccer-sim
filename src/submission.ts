@@ -141,7 +141,7 @@ async function checkSyntheticTick(
   await new Promise<void>((resolve) => http.listen(socketPath, resolve));
   const url = `unix://${socketPath}?path=${encodeURIComponent(AGENT_PATH)}`;
 
-  const seatId = `cyan-${manifest.robot}`;
+  const seatId = `violet-${manifest.robot}`;
   const child = spawnSandboxed({
     entry: join(dir, manifest.entry),
     cwd: dir,
@@ -155,7 +155,7 @@ async function checkSyntheticTick(
     // once it's actually spawned for a match.
     args: [
       '--team',
-      'cyan',
+      'violet',
       '--number',
       String(manifest.robot),
       '--name',
@@ -221,7 +221,7 @@ async function checkSyntheticTick(
 
 function syntheticFrame(robotNumber: number) {
   const senses = new Senses(1, 4, true);
-  const self = { id: `cyan-${robotNumber}`, team: 'cyan', number: robotNumber, x: -500, z: 0, heading: 0 };
+  const self = { id: `violet-${robotNumber}`, team: 'violet', number: robotNumber, x: -500, z: 0, heading: 0 };
   return senses.read({
     view: {
       clock: 0,

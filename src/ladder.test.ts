@@ -86,13 +86,13 @@ describe('the ladder runs', () => {
 describe('the bots push on the rules they were written for', () => {
   /** Play one entry against another and report what the referee called. */
   function calls(home: Entry, away: Entry, seed = 3): Record<string, number> {
-    const [c1, c2] = home.make('cyan');
-    const [y1, y2] = away.make('yellow');
+    const [c1, c2] = home.make('violet');
+    const [y1, y2] = away.make('lime');
     const agents = {
-      'cyan-1': c1!,
-      'cyan-2': c2!,
-      'yellow-1': y1!,
-      'yellow-2': y2!,
+      'violet-1': c1!,
+      'violet-2': c2!,
+      'lime-1': y1!,
+      'lime-2': y2!,
     } satisfies MatchAgents;
     return new Match({ agents, halfSeconds: 120, seed }).run().calls;
   }

@@ -64,15 +64,15 @@ function num(flags: Map<string, string>, name: string, fallback: number): number
  * Until submitted programs can be loaded both sides are the reference agent,
  * which is what an organiser wants on the screen while the hall fills up.
  *
- * `--opponent` swaps the yellow side for one of the deliberately poor robots.
+ * `--opponent` swaps the lime side for one of the deliberately poor robots.
  * Not only for demonstrations: a waller drives itself off the field within
  * seconds, and that is the only quick way to watch a rule 5.7 stand-down
  * actually happen rather than waiting most of a match for one.
  */
 function agentsFor(opponent: string | undefined): MatchAgents {
-  const cyan = referenceTeam('cyan');
+  const violet = referenceTeam('violet');
   if (!opponent || opponent === 'reference') {
-    return { ...cyan, ...referenceTeam('yellow') } as unknown as MatchAgents;
+    return { ...violet, ...referenceTeam('lime') } as unknown as MatchAgents;
   }
   const bot = botRoster().find((b) => b.name === opponent);
   if (!bot) {
@@ -80,8 +80,8 @@ function agentsFor(opponent: string | undefined): MatchAgents {
     console.error(`  unknown opponent "${opponent}". try: ${names}`);
     process.exit(1);
   }
-  const [y1, y2] = bot.make('yellow');
-  return { ...cyan, 'yellow-1': y1!, 'yellow-2': y2! } as unknown as MatchAgents;
+  const [y1, y2] = bot.make('lime');
+  return { ...violet, 'lime-1': y1!, 'lime-2': y2! } as unknown as MatchAgents;
 }
 
 function viewerRoot(): string | undefined {
@@ -137,8 +137,8 @@ async function serve(flags: Map<string, string>): Promise<void> {
   const halfSeconds = num(flags, 'half', 300);
   const waitForAgents = flags.get('agents') === 'true';
   const teams = {
-    cyan: flags.get('home') ?? 'Cyan',
-    yellow: flags.get('away') ?? flags.get('opponent') ?? 'Yellow',
+    violet: flags.get('home') ?? 'Violet',
+    lime: flags.get('away') ?? flags.get('opponent') ?? 'Lime',
   };
 
   if (waitForAgents) {
@@ -158,9 +158,9 @@ async function serve(flags: Map<string, string>): Promise<void> {
   if (!waitForAgents && pythonLibDir()) {
     const libDir = pythonLibDir()!;
     const resolved = await resolveLineup(server.submissionsDirectory, teams);
-    const slots = ['cyan-1', 'cyan-2', 'yellow-1', 'yellow-2'] as const;
+    const slots = ['violet-1', 'violet-2', 'lime-1', 'lime-2'] as const;
     const origin = (id: string): string =>
-      resolved[id] ? `${teams[id.startsWith('cyan') ? 'cyan' : 'yellow']} (submission)` : 'built-in';
+      resolved[id] ? `${teams[id.startsWith('violet') ? 'violet' : 'lime']} (submission)` : 'built-in';
     console.log(`  lineup:    ${slots.map((id) => `${id}=${origin(id)}`).join('  ')}`);
 
     const ids = Object.keys(resolved);
@@ -191,8 +191,8 @@ async function serve(flags: Map<string, string>): Promise<void> {
     }
     console.log(
       refereed
-        ? `  ready: ${teams.cyan} v ${teams.yellow}  (seed ${seed}) — waiting for the referee to kick off`
-        : `  kick-off: ${teams.cyan} v ${teams.yellow}  (seed ${seed})`,
+        ? `  ready: ${teams.violet} v ${teams.lime}  (seed ${seed}) — waiting for the referee to kick off`
+        : `  kick-off: ${teams.violet} v ${teams.lime}  (seed ${seed})`,
     );
     const dropouts: string[] = [];
     const result = await server.play({
@@ -205,7 +205,7 @@ async function serve(flags: Map<string, string>): Promise<void> {
       refereed,
     });
     console.log(
-      `  full time: ${teams.cyan} ${result.score.cyan} — ${result.score.yellow} ${teams.yellow}` +
+      `  full time: ${teams.violet} ${result.score.violet} — ${result.score.lime} ${teams.lime}` +
         `   (${server.watching} watching)`,
     );
     if (waitForAgents) {
@@ -227,8 +227,8 @@ async function serve(flags: Map<string, string>): Promise<void> {
 
 function once(flags: Map<string, string>): void {
   const teams = {
-    cyan: flags.get('home') ?? 'Cyan',
-    yellow: flags.get('away') ?? flags.get('opponent') ?? 'Yellow',
+    violet: flags.get('home') ?? 'Violet',
+    lime: flags.get('away') ?? flags.get('opponent') ?? 'Lime',
   };
   const idealSensors = flags.get('ideal-sensors') === 'true';
   const started = Date.now();
@@ -243,7 +243,7 @@ function once(flags: Map<string, string>): void {
   const wall = (Date.now() - started) / 1000;
 
   console.log(
-    `\n  cyan ${teams.cyan}  ${result.score.cyan} — ${result.score.yellow}  ${teams.yellow} yellow`,
+    `\n  violet ${teams.violet}  ${result.score.violet} — ${result.score.lime}  ${teams.lime} lime`,
   );
   const faults = Object.values(result.slots).reduce((a, s) => a + s.errors + s.missed, 0);
   console.log(
@@ -292,9 +292,9 @@ function ladder(flags: Map<string, string>): void {
  */
 async function bench(flags: Map<string, string>): Promise<void> {
   const seeds = parseSeeds(flags.get('seeds') ?? '1-3');
-  const team = (flags.get('team') ?? 'cyan') as 'cyan' | 'yellow' | 'both';
-  if (!['cyan', 'yellow', 'both'].includes(team)) {
-    console.error(`  --team must be cyan, yellow or both, not "${team}"`);
+  const team = (flags.get('team') ?? 'violet') as 'violet' | 'lime' | 'both';
+  if (!['violet', 'lime', 'both'].includes(team)) {
+    console.error(`  --team must be violet, lime or both, not "${team}"`);
     process.exit(1);
   }
 
@@ -373,7 +373,7 @@ function usage(): void {
     ladder    play every bot against every other              [--half --rounds --seed]
     bench     measure your robot program and say what is wrong
 
-  --opponent puts a test robot on the yellow side instead of the reference
+  --opponent puts a test robot on the lime side instead of the reference
   agent: naive-chaser, shover, chaser+camper, spinner, waller, wanderer, statue
 
   --agents waits for four robot programs to connect on /agent before kicking
@@ -388,7 +388,7 @@ function usage(): void {
 
   bench flags:
     --spawn CMD     start your robots with CMD; {url} becomes the address
-    --team          cyan (default), yellow, or both for a mirror match
+    --team          violet (default), lime, or both for a mirror match
     --opponent      reference (default) or a bot name, as above
     --seeds 1-5     which matches to play: a range, a list, or one
     --half 90       seconds per half

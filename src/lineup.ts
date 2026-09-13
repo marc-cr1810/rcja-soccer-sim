@@ -33,11 +33,11 @@ export interface LineupEntry {
 /** Which of the four seats have a validated submission to load, and where it lives. */
 export async function resolveLineup(
   submissionsDir: string,
-  teams: { cyan: string; yellow: string },
+  teams: { violet: string; lime: string },
 ): Promise<Partial<Record<string, LineupEntry>>> {
   const out: Partial<Record<string, LineupEntry>> = {};
 
-  for (const side of ['cyan', 'yellow'] as const) {
+  for (const side of ['violet', 'lime'] as const) {
     for (const robot of [1, 2] as const) {
       const dir = join(submissionsDir, slugifyTeam(teams[side]), String(robot));
       let raw: Buffer;

@@ -2,8 +2,9 @@
 :root {
   --ink: #f2f5f0;
   --dim: #8a978f;
-  --cyan: #00a6c4;
-  --yellow: #f2c500;
+  /* Team colours match the robots: violet and lime. */
+  --violet: #8b5cf6;
+  --lime: #3fce5a;
   --ground: #0b120e;
   --panel: #121a15;
   --danger: #e2544a;
@@ -64,8 +65,8 @@ html, body {
 .side { display: flex; align-items: center; gap: 0.9rem; padding: 0 1rem; }
 .side .name { font-size: 1.3rem; font-weight: 600; letter-spacing: -0.01em; }
 .side .goals { font-size: 2.2rem; font-weight: 700; line-height: 1; }
-.side.cyan .name, .side.cyan .goals { color: var(--cyan); }
-.side.yellow .name, .side.yellow .goals { color: var(--yellow); }
+.side.violet .name, .side.violet .goals { color: var(--violet); }
+.side.lime .name, .side.lime .goals { color: var(--lime); }
 .middle {
   display: flex;
   flex-direction: column;
@@ -92,11 +93,11 @@ html, body {
   padding: 0.6rem 1rem;
   background: rgba(8, 14, 10, 0.9);
   border: 1px solid rgba(242, 245, 240, 0.18);
-  border-left: 4px solid var(--cyan);
+  border-left: 4px solid var(--violet);
   border-radius: 6px;
   font-size: 0.95rem;
 }
-.call[data-team="yellow"] { border-left-color: var(--yellow); }
+.call[data-team="lime"] { border-left-color: var(--lime); }
 .call[hidden] { display: none; }
 
 /* --- stand-down cards --- */
@@ -121,11 +122,11 @@ html, body {
   border-radius: 5px;
   font-variant-numeric: tabular-nums;
 }
-.sd-card.cyan { border-left-color: var(--cyan); }
-.sd-card.yellow { border-left-color: var(--yellow); }
+.sd-card.violet { border-left-color: var(--violet); }
+.sd-card.lime { border-left-color: var(--lime); }
 .sd-card .who { font-size: 0.9rem; font-weight: 600; flex: 1; }
-.sd-card.cyan .who { color: var(--cyan); }
-.sd-card.yellow .who { color: var(--yellow); }
+.sd-card.violet .who { color: var(--violet); }
+.sd-card.lime .who { color: var(--lime); }
 .sd-card .rule { font-size: 0.64rem; letter-spacing: 0.06em; color: var(--dim); }
 .sd-card .timer { font-size: 1.1rem; font-weight: 700; min-width: 2.6rem; text-align: right; }
 .sd-card .timer.ready { font-size: 0.75rem; font-weight: 600; color: #6fd39a; }

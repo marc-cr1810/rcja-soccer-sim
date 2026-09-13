@@ -22,13 +22,13 @@ describe('scoring (5.5.1)', () => {
   it('awards a goal when the ball strikes the back wall of the goal', () => {
     const w = world('open');
     w.robots.forEach((r) => (r.removed = true));
-    // Fire the ball down the middle at the yellow goal (+x), which cyan attacks.
+    // Fire the ball down the middle at the yellow goal (+x), which Violet attacks.
     w.ball.x = 400;
     w.ball.z = 0;
     w.ball.vx = 3000;
     run(w, 1.5);
 
-    expect(w.score.cyan).toBe(1);
+    expect(w.score.violet).toBe(1);
     expect(w.events.some((e) => e.kind === 'goal' && e.rule === '5.5.1')).toBe(true);
   });
 
@@ -40,7 +40,7 @@ describe('scoring (5.5.1)', () => {
     w.ball.vx = 3000;
     run(w, 1.5);
 
-    expect(w.score.cyan).toBe(0);
+    expect(w.score.violet).toBe(0);
   });
 
   it('keeps the ball inside the goal once it is in', () => {
@@ -76,7 +76,7 @@ describe('ball out of play (5.9.1)', () => {
     run(w, 1.5);
 
     expect(w.events.some((e) => e.kind === 'ball-out-of-play')).toBe(false);
-    expect(w.score.cyan).toBe(1);
+    expect(w.score.violet).toBe(1);
   });
 
   it('keeps a shot that clips the mouth edge in play, not out of play', () => {
@@ -95,7 +95,7 @@ describe('ball out of play (5.9.1)', () => {
     run(w, 2.5);
 
     expect(w.events.some((e) => e.kind === 'ball-out-of-play')).toBe(false);
-    expect(w.score.cyan).toBe(0);
+    expect(w.score.violet).toBe(0);
     // It stayed on the field at its own z, not teleported to a neutral point.
     expect(w.ball.z).toBeCloseTo(220, 3);
     expect(Math.abs(w.ball.x)).toBeLessThan(HALF_LENGTH);
@@ -113,7 +113,7 @@ describe('ball out of play (5.9.1)', () => {
     run(w, 2.5);
 
     expect(w.events.some((e) => e.kind === 'ball-out-of-play')).toBe(false);
-    expect(w.score.cyan).toBe(0);
+    expect(w.score.violet).toBe(0);
     expect(w.ball.z).toBeCloseTo(224, 3);
   });
 
@@ -140,20 +140,20 @@ describe('multiple defence (5.11.2)', () => {
   it('moves the outfield robot when a goalie is involved', () => {
     const w = world('open');
     const [, , y1, y2] = w.robots;
-    // Both yellow robots inside their own penalty area.
+    // Both lime robots inside their own penalty area.
     y1!.x = HALF_LENGTH - PENALTY_DEPTH + 40;
     y1!.z = -160;
     y2!.x = HALF_LENGTH - 60;
     y2!.z = 0;
     expect(y2!.isGoalie).toBe(true);
 
-    expect(w.multipleDefenceCandidates('yellow')).toHaveLength(2);
-    expect(w.suggestMultipleDefenceRemoval('yellow')?.id).toBe(y1!.id);
+    expect(w.multipleDefenceCandidates('lime')).toHaveLength(2);
+    expect(w.suggestMultipleDefenceRemoval('lime')?.id).toBe(y1!.id);
   });
 
   it('suggests nothing when only one robot is in the area', () => {
     const w = world('open');
-    expect(w.suggestMultipleDefenceRemoval('yellow')).toBeNull();
+    expect(w.suggestMultipleDefenceRemoval('lime')).toBeNull();
   });
 
   it('moves the penalized robot to (0, 0) facing its own goal', () => {
@@ -169,7 +169,7 @@ describe('multiple defence (5.11.2)', () => {
     y2!.x = HALF_LENGTH - 60;
     y2!.z = 0;
 
-    const ok = w.callMultipleDefence('yellow');
+    const ok = w.callMultipleDefence('lime');
     expect(ok).toBe(true);
     expect(y1!.x).toBe(0);
     expect(y1!.z).toBe(0);
@@ -182,7 +182,7 @@ describe('multiple defence (5.11.2)', () => {
   it('falls back to halfway neutral point if (0, 0) is occupied', () => {
     const w = world('open');
     const [c1, , y1, y2] = w.robots;
-    // Occupy (0, 0) with cyan robot
+    // Occupy (0, 0) with violet robot
     c1!.x = 0;
     c1!.z = 0;
 
@@ -191,7 +191,7 @@ describe('multiple defence (5.11.2)', () => {
     y2!.x = HALF_LENGTH - 60;
     y2!.z = 0;
 
-    const ok = w.callMultipleDefence('yellow');
+    const ok = w.callMultipleDefence('lime');
     expect(ok).toBe(true);
     expect(y1!.x).toBe(0);
     expect(Math.abs(y1!.z)).toBe(300); // Neutral point (0, ±300)
@@ -201,15 +201,15 @@ describe('multiple defence (5.11.2)', () => {
   it('does not treat an outfield robot in the wing of the penalty box as a multiple defence candidate', () => {
     const w = world('open');
     const [, , y1, y2] = w.robots;
-    // Both yellow in penalty box, but y1 is in the wing (|z| = 350 > 275 mm goal mouth corridor)
+    // Both lime in penalty box, but y1 is in the wing (|z| = 350 > 275 mm goal mouth corridor)
     y1!.x = HALF_LENGTH - PENALTY_DEPTH + 40;
     y1!.z = 350;
     y2!.x = HALF_LENGTH - 60;
     y2!.z = 0;
 
     // y1 is not directly blocking the goal mouth
-    expect(w.multipleDefenceCandidates('yellow')).toHaveLength(1);
-    expect(w.multipleDefenceCandidates('yellow')[0]!.id).toBe(y2!.id);
+    expect(w.multipleDefenceCandidates('lime')).toHaveLength(1);
+    expect(w.multipleDefenceCandidates('lime')[0]!.id).toBe(y2!.id);
   });
 
   it('does not trigger multiple defence if ball is in the opponent half', () => {
@@ -217,13 +217,13 @@ describe('multiple defence (5.11.2)', () => {
     w.running = true;
     w.sinceKickOff = 10;
     const [, , y1, y2] = w.robots;
-    // Yellow defenders directly blocking goal
+    // Lime defenders directly blocking goal
     y1!.x = HALF_LENGTH - PENALTY_DEPTH + 40;
     y1!.z = -100;
     y2!.x = HALF_LENGTH - 60;
     y2!.z = 0;
 
-    // Ball is far downfield in cyan's defending half (-600 mm)
+    // Ball is far downfield in violet's defending half (-600 mm)
     w.ball.x = -600;
     w.ball.z = 0;
 
@@ -247,7 +247,7 @@ describe('multiple defence (5.11.2)', () => {
     c2!.x = -700; c2!.z = 0;
     w.ball.x = 400; w.ball.z = 0;
 
-    // Yellow defenders directly blocking goal
+    // Lime defenders directly blocking goal
     y1!.x = HALF_LENGTH - PENALTY_DEPTH + 40;
     y1!.z = -100;
     y2!.x = HALF_LENGTH - 60;
@@ -280,7 +280,7 @@ describe('forcing (5.6.1.3 and 5.6.1.4)', () => {
     c2!.x = -800; c2!.z = -500;
     y1!.x = -500; y1!.z = -500;
 
-    // Cyan striker pushing Yellow goalie at edge of Yellow penalty box (615 mm to 915 mm)
+    // Violet striker pushing Lime goalie at edge of Yellow penalty box (615 mm to 915 mm)
     // Put y2 at 750 (inside box), c1 at 520, ball at 635
     for (let t = 0; t < 0.25; t += 1 / 120) {
       y2!.x = 750;
@@ -300,7 +300,7 @@ describe('forcing (5.6.1.3 and 5.6.1.4)', () => {
     w.step(1 / 120);
 
     // Goal must be disallowed!
-    expect(w.score.cyan).toBe(0);
+    expect(w.score.violet).toBe(0);
     expect(w.events.some((e) => e.rule === '5.6.1.3' && e.message.includes('Goal disallowed'))).toBe(true);
   });
 
@@ -310,13 +310,13 @@ describe('forcing (5.6.1.3 and 5.6.1.4)', () => {
     w.sinceKickOff = 10;
     const [c1, , y1, y2] = w.robots;
 
-    // Yellow defenders in box
+    // Lime defenders in box
     y1!.x = HALF_LENGTH - PENALTY_DEPTH + 40;
     y1!.z = -50;
     y2!.x = HALF_LENGTH - 60;
     y2!.z = 0;
 
-    // Cyan striker contacting defender with ball between them, driving in
+    // Violet striker contacting defender with ball between them, driving in
     for (let t = 0; t <= 1.1; t += 1 / 120) {
       c1!.x = y1!.x - 220;
       c1!.z = -50;
@@ -575,12 +575,12 @@ describe('damaged robots (5.7)', () => {
       inclined: false,
       autoDamaged: false,
     });
-    const robot = w.robots.find((r) => r.id === 'yellow-1')!;
+    const robot = w.robots.find((r) => r.id === 'lime-1')!;
     w.removeRobot(robot.id, '5.7.1.1', 'Not responding.');
     run(w, 31);
     w.returnRobot(robot.id);
 
-    // Yellow defends +x, so the robot must come back on that side.
+    // Lime defends +x, so the robot must come back on that side.
     expect(robot.x).toBeGreaterThan(0);
     expect(Math.abs(robot.x)).toBeGreaterThan(HALF_LENGTH - PENALTY_DEPTH - 1);
   });
@@ -629,7 +629,7 @@ describe('damaged robots (5.7)', () => {
     run(w, 5);
     const remainingBefore = robot.penaltyRemaining;
 
-    w.kickOff('yellow');
+    w.kickOff('lime');
 
     const same = w.robots.find((r) => r.id === robot.id)!;
     expect(same.removed).toBe(true);
@@ -642,9 +642,9 @@ describe('damaged robots (5.7)', () => {
 describe('kick-off placement (5.4.5)', () => {
   it('overlaps each non-kicking robot with its penalty box without sitting in it', () => {
     const w = world('open');
-    w.kickOff('cyan');
+    w.kickOff('violet');
 
-    for (const robot of w.robots.filter((r) => r.team === 'yellow')) {
+    for (const robot of w.robots.filter((r) => r.team === 'lime')) {
       const boxEdge = HALF_LENGTH - PENALTY_DEPTH;
       // 5.4.5: some part of the robot in the box.
       expect(robot.x + robot.radius, robot.id).toBeGreaterThan(boxEdge);
@@ -652,24 +652,24 @@ describe('kick-off placement (5.4.5)', () => {
 
     // ...but not so far in that the 5.11.1 detector reads a legal kick-off as
     // multiple defence. The goalie is allowed to be properly inside.
-    const outfield = w.robots.find((r) => r.id === 'yellow-1')!;
+    const outfield = w.robots.find((r) => r.id === 'lime-1')!;
     expect(outfield.x).toBeLessThan(HALF_LENGTH - PENALTY_DEPTH);
-    expect(w.suggestMultipleDefenceRemoval('yellow')).toBeNull();
+    expect(w.suggestMultipleDefenceRemoval('lime')).toBeNull();
   });
 
   it('does not raise multiple defence during the kick-off settle', () => {
     const w = world('open');
     w.running = true;
-    w.kickOff('cyan');
+    w.kickOff('violet');
     run(w, 2);
     expect(w.events.some((e) => e.kind === 'possible-multiple-defence')).toBe(false);
   });
 
   it('places the kicking-off robot close to the ball complying with rule 5.4.7', () => {
     const w = world('lightweight');
-    w.kickOff('cyan');
-    const cyanStriker = w.robots.find((r) => r.id === 'cyan-1')!;
-    const gap = distance(cyanStriker, w.ball) - (cyanStriker.radius + w.ball.radius);
+    w.kickOff('violet');
+    const violetStriker = w.robots.find((r) => r.id === 'violet-1')!;
+    const gap = distance(violetStriker, w.ball) - (violetStriker.radius + w.ball.radius);
     // In a kicking league, starts ~15 mm from the ball.
     expect(gap).toBeCloseTo(15, 0);
   });
@@ -678,7 +678,7 @@ describe('kick-off placement (5.4.5)', () => {
 describe('rule 5.7.1.6 is applied, not just reported', () => {
   it('removes a Lightweight robot that drives wholly into the out area alone', () => {
     const w = world('lightweight');
-    const robot = w.robots.find((r) => r.id === 'cyan-1')!;
+    const robot = w.robots.find((r) => r.id === 'violet-1')!;
     // Park every other robot far away so no opponent contact can be claimed.
     for (const other of w.robots) if (other !== robot) other.removed = true;
 
@@ -692,8 +692,8 @@ describe('rule 5.7.1.6 is applied, not just reported', () => {
 
   it('applies the exception and nudges back a robot an opponent pushed out', () => {
     const w = world('lightweight');
-    const pushed = w.robots.find((r) => r.id === 'cyan-1')!;
-    const pusher = w.robots.find((r) => r.id === 'yellow-1')!;
+    const pushed = w.robots.find((r) => r.id === 'violet-1')!;
+    const pusher = w.robots.find((r) => r.id === 'lime-1')!;
 
     pushed.x = 0;
     pushed.z = HALF_WIDTH + pushed.radius + 30;
@@ -712,7 +712,7 @@ describe('rule 5.7.1.6 is applied, not just reported', () => {
       inclined: false,
       autoDamaged: false,
     });
-    const robot = w.robots.find((r) => r.id === 'cyan-1')!;
+    const robot = w.robots.find((r) => r.id === 'violet-1')!;
     for (const other of w.robots) if (other !== robot) other.removed = true;
     robot.x = 0;
     robot.z = HALF_WIDTH + robot.radius + 40;
@@ -880,7 +880,7 @@ describe('lack of progress 5.6.1.1: nobody can get to the ball', () => {
     w.running = true;
     w.placeBall({ x: GOAL_MOUTH_X + 20, z: 0 });
     for (let t = 0; t < 6; t += 1 / 100) w.step(1 / 100);
-    expect(w.score.cyan + w.score.yellow).toBe(0);
+    expect(w.score.violet + w.score.lime).toBe(0);
   });
 
   it('still scores when the ball does reach the back wall', () => {

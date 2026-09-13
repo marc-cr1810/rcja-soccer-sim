@@ -159,9 +159,9 @@ describe.skipIf(!sandboxAvailable())('spawnSandboxed', () => {
       entry: join(dir, 'main.py'),
       cwd: dir,
       pythonLibDir: PYTHON_LIB_DIR,
-      args: ['--team', 'cyan', '--number', '1'],
+      args: ['--team', 'violet', '--number', '1'],
     });
     const { stdout } = await collect(child);
-    expect(stdout.trim()).toBe('--team cyan --number 1');
+    expect(stdout.trim()).toBe('--team violet --number 1');
   }, 10000);
 });

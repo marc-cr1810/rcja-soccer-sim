@@ -20,17 +20,17 @@
       <canvas id="field"></canvas>
 
       <div id="board" class="board">
-        <div class="side cyan">
-          <span class="name" id="cyan-name">Cyan</span>
-          <span class="goals" id="cyan-score">0</span>
+        <div class="side violet">
+          <span class="name" id="violet-name">Violet</span>
+          <span class="goals" id="violet-score">0</span>
         </div>
         <div class="middle">
           <span class="clock" id="clock">0:00</span>
           <span class="half" id="half">1st half</span>
         </div>
-        <div class="side yellow">
-          <span class="goals" id="yellow-score">0</span>
-          <span class="name" id="yellow-name">Yellow</span>
+        <div class="side lime">
+          <span class="goals" id="lime-score">0</span>
+          <span class="name" id="lime-name">Lime</span>
         </div>
       </div>
 
@@ -43,8 +43,8 @@
         <section class="group">
           <h2>Kick off</h2>
           <div class="row">
-            <button data-action="kickoff" data-team="cyan">Cyan kicks off</button>
-            <button data-action="kickoff" data-team="yellow">Yellow kicks off</button>
+            <button data-action="kickoff" data-team="violet">Violet kicks off</button>
+            <button data-action="kickoff" data-team="lime">Lime kicks off</button>
           </div>
           <button data-action="award-kickoff">Award kick-off to other side</button>
         </section>
@@ -73,8 +73,8 @@
           <h2>Correct the score</h2>
           <div class="row">
             <select id="correct-team">
-              <option value="cyan">Cyan</option>
-              <option value="yellow">Yellow</option>
+              <option value="violet">Violet</option>
+              <option value="lime">Lime</option>
             </select>
             <input id="correct-to" type="number" min="0" step="1" placeholder="new score" />
           </div>

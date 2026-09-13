@@ -38,7 +38,7 @@ export interface Entry {
    * every match needs its own, or the second match of a ladder starts with the
    * first one's memory.
    */
-  make(team: 'cyan' | 'yellow'): Agent[];
+  make(team: 'violet' | 'lime'): Agent[];
 }
 
 export interface Standing {
@@ -94,7 +94,7 @@ function blank(entry: Entry): Standing {
  * the field.
  *
  * Not a nicety. Kick-off placement, starting headings and which goal the camera
- * finds first all differ between cyan and yellow, so a single meeting measures
+ * finds first all differ between violet and lime, so a single meeting measures
  * the colours as much as the robots.
  */
 export function runLadder(entries: Entry[], opts: LadderOptions = {}): LadderSummary {
@@ -113,19 +113,19 @@ export function runLadder(entries: Entry[], opts: LadderOptions = {}): LadderSum
       for (const away of entries) {
         if (home === away) continue;
 
-        const [c1, c2] = home.make('cyan');
-        const [y1, y2] = away.make('yellow');
+        const [c1, c2] = home.make('violet');
+        const [y1, y2] = away.make('lime');
         const agents = {
-          'cyan-1': c1!,
-          'cyan-2': c2!,
-          'yellow-1': y1!,
-          'yellow-2': y2!,
+          'violet-1': c1!,
+          'violet-2': c2!,
+          'lime-1': y1!,
+          'lime-2': y2!,
         } satisfies MatchAgents;
 
         const seed = baseSeed + matches * 7919;
         const result = new Match({ agents, halfSeconds, seed }).run();
         matches++;
-        goals += result.score.cyan + result.score.yellow;
+        goals += result.score.violet + result.score.lime;
         for (const [kind, n] of Object.entries(result.calls)) {
           calls[kind] = (calls[kind] ?? 0) + n;
         }
@@ -134,16 +134,16 @@ export function runLadder(entries: Entry[], opts: LadderOptions = {}): LadderSum
         const a = table.get(away.name)!;
         h.played++;
         a.played++;
-        h.for += result.score.cyan;
-        h.against += result.score.yellow;
-        a.for += result.score.yellow;
-        a.against += result.score.cyan;
+        h.for += result.score.violet;
+        h.against += result.score.lime;
+        a.for += result.score.lime;
+        a.against += result.score.violet;
 
-        if (result.score.cyan > result.score.yellow) {
+        if (result.score.violet > result.score.lime) {
           h.won++;
           a.lost++;
           h.points += 3;
-        } else if (result.score.yellow > result.score.cyan) {
+        } else if (result.score.lime > result.score.violet) {
           a.won++;
           h.lost++;
           a.points += 3;
@@ -155,7 +155,7 @@ export function runLadder(entries: Entry[], opts: LadderOptions = {}): LadderSum
         }
 
         for (const [id, slot] of Object.entries(result.slots)) {
-          const side = id.startsWith('cyan') ? h : a;
+          const side = id.startsWith('violet') ? h : a;
           side.missed += slot.missed;
           side.errors += slot.errors;
         }

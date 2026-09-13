@@ -20,6 +20,14 @@ keeper facing up the field and firing blind puts the ball out over a sideline
 about as often as it clears it. The kick is gated on where the ball would
 actually end up, and the clearance is aimed at the wing with more room in it
 rather than straight back down the middle at the striker who just shot.
+
+**A clearance is a pass, when the striker is somewhere worth passing to.**
+Rule 4.2.5 gives every robot a radio, and the striker's own position is on it
+just as much as the ball is - so before falling back to "whichever wing has
+room", the keeper checks whether the striker has called in from further up
+the field with a clean line to it. Finding the ball again from a random point
+on a wing costs a striker several seconds it does not lose when the clearance
+lands at its feet.
 """
 
 from __future__ import annotations
@@ -32,7 +40,17 @@ from pathlib import Path
 # Ensure rcja_soccer can be imported regardless of current working directory
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from rcja_soccer import Robot, clamp, drive, relay_ball, teammate_ball, wrap_angle
+from rcja_soccer import (
+    Robot,
+    clamp,
+    drive,
+    pass_is_open,
+    relay_ball,
+    relay_position,
+    teammate_ball,
+    teammate_position,
+    wrap_angle,
+)
 from rcja_soccer.field import (
     HALF_LENGTH,
     HALF_WIDTH,
@@ -53,7 +71,7 @@ from rcja_soccer.sense import (
 )
 
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument("--team", default="cyan", choices=["cyan", "yellow"])
+parser.add_argument("--team", default="violet", choices=["violet", "lime"])
 parser.add_argument("--number", type=int, default=2, choices=[1, 2])
 parser.add_argument("--name", default=None)
 parser.add_argument("--url", default="ws://localhost:8080/agent")
@@ -182,10 +200,20 @@ def think(s, me):
     # ball out over a touchline — with nobody at home. Stay on the guard line
     # and let the kicker do the travelling.
     if holding:
-        aim = clearance_heading(me_x, me_z, frame.up_x, frame.up_z)
+        # An outlet is worth aiming at only if it is a genuine advance - a
+        # sideways or backward "pass" just hands the striker's own problem
+        # back to it - and `pass_is_open` re-checks the current heading every
+        # tick the same way the wing clearance's `safe` does below.
+        outlet = teammate_position(s)
+        passing = outlet is not None and frame.depth(*outlet) > frame.depth(me_x, me_z) + 250.0
+        if passing:
+            aim = math.atan2(outlet[1] - me_z, outlet[0] - me_x)
+            safe = pass_is_open(s, heading, me_x, me_z, *outlet)
+        else:
+            aim = clearance_heading(me_x, me_z, frame.up_x, frame.up_z)
+            blocker = obstacle_range(s, heading, me_x, me_z)
+            safe = clear_is_safe(bx, bz, heading) and (blocker is None or blocker > 380.0)
         error = wrap_angle(aim - heading)
-        blocker = obstacle_range(s, heading, me_x, me_z)
-        safe = clear_is_safe(bx, bz, heading) and (blocker is None or blocker > 380.0)
 
         # Drift back towards the guard spot while turning, so a clearance that
         # takes a moment to line up does not cost the position as well.
@@ -195,7 +223,10 @@ def think(s, me):
         travel = steer_clear_of_edges(
             math.atan2(home_z - me_z, home_x - me_x), me_x, me_z, 210.0, LEASH_X, LEASH_Z
         )
-        say(me, "CLEAR" if safe else "TURN_TO_CLEAR")
+        if passing:
+            say(me, "PASS" if safe else "TURN_TO_PASS")
+        else:
+            say(me, "CLEAR" if safe else "TURN_TO_CLEAR")
         return robot.motors(
             drive(
                 bearing=wrap_angle(travel - heading),
@@ -205,7 +236,12 @@ def think(s, me):
             # The roller has to let go for the kick to carry.
             dribbler=0.0 if safe else 1.0,
             kicker=safe,
-            say={"role": "goalie", "ball": relay_ball(bx, bz, locator.confidence), "held": True},
+            say={
+                "role": "goalie",
+                "ball": relay_ball(bx, bz, locator.confidence),
+                "pos": relay_position(me_x, me_z, locator.confidence),
+                "held": True,
+            },
         )
 
     # -- shoved onto the line: get back off it ------------------------------
@@ -217,7 +253,12 @@ def think(s, me):
         return robot.motors(
             drive(bearing=wrap_angle(travel - heading), speed=1.0, spin=square),
             dribbler=1.0,
-            say={"role": "goalie", "ball": relay_ball(bx, bz, locator.confidence), "held": False},
+            say={
+                "role": "goalie",
+                "ball": relay_ball(bx, bz, locator.confidence),
+                "pos": relay_position(me_x, me_z, locator.confidence),
+                "held": False,
+            },
         )
 
     # -- loose in the box: go and get it -----------------------------------
@@ -237,7 +278,12 @@ def think(s, me):
         return robot.motors(
             drive(bearing=wrap_angle(travel - heading), speed=1.0, spin=square),
             dribbler=1.0,
-            say={"role": "goalie", "ball": relay_ball(bx, bz, locator.confidence), "held": False},
+            say={
+                "role": "goalie",
+                "ball": relay_ball(bx, bz, locator.confidence),
+                "pos": relay_position(me_x, me_z, locator.confidence),
+                "held": False,
+            },
         )
 
     # -- otherwise: guard the line it is going to cross ---------------------
@@ -308,7 +354,12 @@ def hold(s, me, me_x, me_z, target_x, target_z, spin, heading, state, bx=None, b
     dx = target_x - me_x
     dz = target_z - me_z
     gap = math.hypot(dx, dz)
-    message = {"role": "goalie", "ball": relay_ball(bx, bz, locator.confidence), "held": False}
+    message = {
+        "role": "goalie",
+        "ball": relay_ball(bx, bz, locator.confidence),
+        "pos": relay_position(me_x, me_z, locator.confidence),
+        "held": False,
+    }
 
     if gap < 18.0:
         say(me, state)

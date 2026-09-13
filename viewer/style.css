@@ -2,8 +2,10 @@
 :root {
   --ink: #f2f5f0;
   --dim: #8a978f;
-  --cyan: #00a6c4;
-  --yellow: #f2c500;
+  /* The team colours match the robots on the carpet, and avoid the blue/yellow
+     goal paint. */
+  --violet: #8b5cf6;
+  --lime: #3fce5a;
   --ground: #0b120e;
 }
 
@@ -37,10 +39,18 @@ html, body {
 }
 
 .side { display: flex; align-items: center; gap: 0.9rem; padding: 0 1rem; }
+/* The three panels order to match the broadcast camera, where the cyan goal is
+   screen-left. Teams swap ends at half time, so the panels flip too - that way
+   a name always sits over the goal the team is defending. */
+.violet { order: 1; }
+.middle { order: 2; }
+.lime { order: 3; }
+.ends-swapped .violet { order: 3; }
+.ends-swapped .lime { order: 1; }
 .side .name { font-size: 1.5rem; font-weight: 600; letter-spacing: -0.01em; }
 .side .goals { font-size: 2.9rem; font-weight: 700; line-height: 1; }
-.side.cyan .name, .side.cyan .goals { color: var(--cyan); }
-.side.yellow .name, .side.yellow .goals { color: var(--yellow); }
+.side.violet .name, .side.violet .goals { color: var(--violet); }
+.side.lime .name, .side.lime .goals { color: var(--lime); }
 
 .middle {
   display: flex;
@@ -69,7 +79,7 @@ html, body {
   padding: 0.7rem 1.3rem;
   background: rgba(8, 14, 10, 0.9);
   border: 1px solid rgba(242, 245, 240, 0.18);
-  border-left: 4px solid var(--cyan);
+  border-left: 4px solid var(--violet);
   border-radius: 6px;
   font-size: 1.15rem;
   line-height: 1.35;
@@ -83,7 +93,7 @@ html, body {
   color: var(--dim);
   margin-bottom: 0.2rem;
 }
-.call[data-team="yellow"] { border-left-color: var(--yellow); }
+.call[data-team="lime"] { border-left-color: var(--lime); }
 .call[hidden] { display: none; }
 
 .status {
@@ -121,12 +131,12 @@ html, body {
   border-radius: 5px;
   font-variant-numeric: tabular-nums;
 }
-.sd-card.cyan { border-left-color: var(--cyan); }
-.sd-card.yellow { border-left-color: var(--yellow); }
+.sd-card.violet { border-left-color: var(--violet); }
+.sd-card.lime { border-left-color: var(--lime); }
 
 .sd-card .who { font-size: 0.95rem; font-weight: 600; flex: 1; }
-.sd-card.cyan .who { color: var(--cyan); }
-.sd-card.yellow .who { color: var(--yellow); }
+.sd-card.violet .who { color: var(--violet); }
+.sd-card.lime .who { color: var(--lime); }
 
 .sd-card .rule {
   font-size: 0.66rem;
@@ -169,4 +179,4 @@ html, body {
   background: var(--ink);
   border-color: var(--ink);
 }
-.cameras button:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+.cameras button:focus-visible { outline: 2px solid var(--violet); outline-offset: 2px; }

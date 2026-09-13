@@ -23,19 +23,19 @@ const PYTHON_LIB_DIR = resolve(import.meta.dirname, '../python');
 
 function agents(): MatchAgents {
   return {
-    ...referenceTeam('cyan'),
-    ...referenceTeam('yellow'),
+    ...referenceTeam('violet'),
+    ...referenceTeam('lime'),
   } as unknown as MatchAgents;
 }
 
 function played(seconds = 6) {
   const match = new Match({
     agents: agents(),
-    teams: { cyan: 'ACT-01', yellow: 'QLD-04' },
+    teams: { violet: 'ACT-01', lime: 'QLD-04' },
     halfSeconds: 60,
     seed: 3,
   });
-  match.world.kickOff('cyan');
+  match.world.kickOff('violet');
   match.world.running = true;
   for (let i = 0; i < seconds * 100; i++) match.step(1 / 100);
   return match;
@@ -44,14 +44,14 @@ function played(seconds = 6) {
 describe('the frame a viewer gets', () => {
   it('carries what a scoreboard and a renderer need', () => {
     const frame = played().snapshot();
-    expect(frame.teams).toEqual({ cyan: 'ACT-01', yellow: 'QLD-04' });
+    expect(frame.teams).toEqual({ violet: 'ACT-01', lime: 'QLD-04' });
     expect(frame.robots).toHaveLength(4);
     expect(frame.clock).toBeGreaterThan(0);
-    expect(typeof frame.score.cyan).toBe('number');
+    expect(typeof frame.score.violet).toBe('number');
     expect(frame.ball.radius).toBeGreaterThan(0);
     for (const robot of frame.robots) {
       expect(typeof robot.heading).toBe('number');
-      expect(['cyan', 'yellow']).toContain(robot.team);
+      expect(['violet', 'lime']).toContain(robot.team);
     }
   });
 
@@ -107,15 +107,15 @@ describe('a robot standing down under rule 5.7', () => {
   function untilRemoved() {
     const match = new Match({
       agents: {
-        ...referenceTeam('cyan'),
-        'yellow-1': waller,
-        'yellow-2': waller,
+        ...referenceTeam('violet'),
+        'lime-1': waller,
+        'lime-2': waller,
       } as unknown as MatchAgents,
-      teams: { cyan: 'ACT-01', yellow: 'WALLERS' },
+      teams: { violet: 'ACT-01', lime: 'WALLERS' },
       halfSeconds: 120,
       seed: 2,
     });
-    match.world.kickOff('cyan');
+    match.world.kickOff('violet');
     match.world.running = true;
     for (let i = 0; i < 120 * 100; i++) {
       match.step(1 / 100);
@@ -193,7 +193,7 @@ describe('the match server', () => {
     const { socket, messages } = await connect(port);
     await server.play({
       agents: agents(),
-      teams: { cyan: 'ACT-01', yellow: 'QLD-04' },
+      teams: { violet: 'ACT-01', lime: 'QLD-04' },
       halfSeconds: 2,
       seed: 1,
     });
@@ -203,7 +203,7 @@ describe('the match server', () => {
     expect(hello).toBeDefined();
     if (hello?.type === 'hello') {
       expect(hello.league.id).toBe('open');
-      expect(hello.teams.cyan).toBe('ACT-01');
+      expect(hello.teams.violet).toBe('ACT-01');
     }
     socket.close();
   });
@@ -212,7 +212,7 @@ describe('the match server', () => {
     // Somebody plugging a laptop into the projector at half time should see
     // the field at once, not a blank screen until the next thing happens.
     const { server, port } = await start();
-    void server.play({ agents: agents(), teams: { cyan: 'A', yellow: 'B' }, halfSeconds: 2 });
+    void server.play({ agents: agents(), teams: { violet: 'A', lime: 'B' }, halfSeconds: 2 });
     await new Promise((ok) => setTimeout(ok, 30));
     const { socket, messages } = await connect(port);
     await new Promise((ok) => setTimeout(ok, 80));
@@ -266,7 +266,7 @@ describe('the private agent socket', () => {
       ws.once('open', () => ok());
       ws.once('error', fail);
     });
-    ws.send(JSON.stringify({ type: 'join', protocol: PROTOCOL_VERSION, team: 'cyan', robot: 1 }));
+    ws.send(JSON.stringify({ type: 'join', protocol: PROTOCOL_VERSION, team: 'violet', robot: 1 }));
     const message = await new Promise<{ type: string }>((ok) => {
       ws.once('message', (data) => ok(JSON.parse(String(data)) as { type: string }));
     });
@@ -305,7 +305,7 @@ describe.skipIf(!sandboxAvailable())('POST /submit', () => {
   const ROBOT_PY = `
 import argparse
 parser = argparse.ArgumentParser()
-parser.add_argument("--team", default="cyan")
+parser.add_argument("--team", default="violet")
 parser.add_argument("--number", type=int, default=1)
 parser.add_argument("--name", default=None)
 parser.add_argument("--url", default="ws://localhost:8080/agent")
@@ -417,7 +417,7 @@ describe('a robot program that goes away', () => {
   /** A program that answers every frame with the same command. */
   function join(
     port: number,
-    team: 'cyan' | 'yellow',
+    team: 'violet' | 'lime',
     robot: 1 | 2,
     token?: string,
   ): Promise<{ socket: WebSocket; rejected: string | null }> {
@@ -454,8 +454,8 @@ describe('a robot program that goes away', () => {
     servers.push(server);
     const port = await server.listen();
 
-    const first = await join(port, 'cyan', 1);
-    const second = await join(port, 'cyan', 2);
+    const first = await join(port, 'violet', 1);
+    const second = await join(port, 'violet', 2);
     expect(first.rejected).toBeNull();
 
     const playing = server.play({
@@ -470,13 +470,13 @@ describe('a robot program that goes away', () => {
     await new Promise((ok) => setTimeout(ok, 200));
 
     const match = server.currentMatch!;
-    const robot = match.world.robots.find((r) => r.id === 'cyan-1')!;
+    const robot = match.world.robots.find((r) => r.id === 'violet-1')!;
     expect(robot.removed).toBe(true);
     expect(robot.removalRule).toBe('5.7.1');
-    expect(match.standDown('cyan-1')).toBeGreaterThan(20);
+    expect(match.standDown('violet-1')).toBeGreaterThan(20);
 
     // Coming straight back is refused, and the refusal says why.
-    const tooSoon = await join(port, 'cyan', 1);
+    const tooSoon = await join(port, 'violet', 1);
     expect(tooSoon.rejected).toContain('5.7.2');
     tooSoon.socket.close();
 
@@ -492,7 +492,7 @@ describe('a robot program that goes away', () => {
     servers.push(server);
     const port = await server.listen();
 
-    const first = await join(port, 'cyan', 1);
+    const first = await join(port, 'violet', 1);
     const playing = server.play({
       agents: agents(),
       transports: server.agents.transports(),
@@ -505,10 +505,10 @@ describe('a robot program that goes away', () => {
     // lands in the same seat rather than a new one.
     first.socket.close();
     await new Promise((ok) => setTimeout(ok, 50));
-    const again = await join(port, 'cyan', 1);
+    const again = await join(port, 'violet', 1);
     expect(again.rejected).toBeNull();
     expect(server.agents.filled).toBe(1);
-    expect(server.agents.report()['cyan-1']?.reconnects).toBe(1);
+    expect(server.agents.report()['violet-1']?.reconnects).toBe(1);
     again.socket.close();
   }, 20000);
 
@@ -521,7 +521,7 @@ describe('a robot program that goes away', () => {
     const server = new MatchServer({ port: 0, realtime: false, idealSensors: true });
     servers.push(server);
     const port = await server.listen();
-    const one = await join(port, 'cyan', 1);
+    const one = await join(port, 'violet', 1);
 
     const result = await server.play({
       agents: agents(),
@@ -530,7 +530,7 @@ describe('a robot program that goes away', () => {
       seed: 1,
     });
 
-    const slot = result.slots['cyan-1']!;
+    const slot = result.slots['violet-1']!;
     const cycles = 4 * 2 * 50;
     expect(slot.missed).toBeLessThan(cycles / 2);
     expect(slot.worstRun).toBeLessThan(25);
@@ -542,10 +542,10 @@ describe('a robot program that goes away', () => {
       const server = new MatchServer({ port: 0, realtime: false, idealSensors: true });
       servers.push(server);
       const port = await server.listen();
-      server.agents.expectToken('cyan-1', 'the-real-token');
+      server.agents.expectToken('violet-1', 'the-real-token');
 
-      const attempt = await join(port, 'cyan', 1);
-      expect(attempt.rejected).toContain('cyan-1');
+      const attempt = await join(port, 'violet', 1);
+      expect(attempt.rejected).toContain('violet-1');
       attempt.socket.close();
     });
 
@@ -553,9 +553,9 @@ describe('a robot program that goes away', () => {
       const server = new MatchServer({ port: 0, realtime: false, idealSensors: true });
       servers.push(server);
       const port = await server.listen();
-      server.agents.expectToken('cyan-1', 'the-real-token');
+      server.agents.expectToken('violet-1', 'the-real-token');
 
-      const attempt = await join(port, 'cyan', 1, 'not-it');
+      const attempt = await join(port, 'violet', 1, 'not-it');
       expect(attempt.rejected).not.toBeNull();
       attempt.socket.close();
     });
@@ -564,9 +564,9 @@ describe('a robot program that goes away', () => {
       const server = new MatchServer({ port: 0, realtime: false, idealSensors: true });
       servers.push(server);
       const port = await server.listen();
-      server.agents.expectToken('cyan-1', 'the-real-token');
+      server.agents.expectToken('violet-1', 'the-real-token');
 
-      const attempt = await join(port, 'cyan', 1, 'the-real-token');
+      const attempt = await join(port, 'violet', 1, 'the-real-token');
       expect(attempt.rejected).toBeNull();
       attempt.socket.close();
     });
@@ -575,17 +575,17 @@ describe('a robot program that goes away', () => {
       const server = new MatchServer({ port: 0, realtime: false, idealSensors: true });
       servers.push(server);
       const port = await server.listen();
-      server.agents.expectToken('cyan-1', 'the-real-token');
+      server.agents.expectToken('violet-1', 'the-real-token');
 
-      const first = await join(port, 'cyan', 1, 'the-real-token');
+      const first = await join(port, 'violet', 1, 'the-real-token');
       first.socket.close();
       await new Promise((ok) => setTimeout(ok, 50));
 
-      const wrong = await join(port, 'cyan', 1, 'not-it');
+      const wrong = await join(port, 'violet', 1, 'not-it');
       expect(wrong.rejected).not.toBeNull();
       wrong.socket.close();
 
-      const right = await join(port, 'cyan', 1, 'the-real-token');
+      const right = await join(port, 'violet', 1, 'the-real-token');
       expect(right.rejected).toBeNull();
       right.socket.close();
     });
@@ -597,7 +597,7 @@ describe('a robot program that goes away', () => {
       servers.push(server);
       const port = await server.listen();
 
-      const attempt = await join(port, 'cyan', 1);
+      const attempt = await join(port, 'violet', 1);
       expect(attempt.rejected).toBeNull();
       attempt.socket.close();
     });
@@ -678,7 +678,7 @@ describe('referee actions', () => {
     expect(server.currentMatch!.world.running).toBe(false);
     expect(server.currentMatch!.world.clock).toBe(0);
 
-    expect((await post(port, 'kickoff', TOKEN, { team: 'cyan' })).status).toBe(200);
+    expect((await post(port, 'kickoff', TOKEN, { team: 'violet' })).status).toBe(200);
     expect(server.currentMatch!.world.running).toBe(true);
 
     expect((await post(port, 'pause', TOKEN)).status).toBe(200);
@@ -699,20 +699,20 @@ describe('referee actions', () => {
   it('lets the referee correct the score, with a reason recorded against the match', async () => {
     const { server, port } = await start(TOKEN);
     const result = server.play({ agents: agents(), halfSeconds: 5, refereed: true, seed: 1 });
-    await post(port, 'kickoff', TOKEN, { team: 'cyan' });
+    await post(port, 'kickoff', TOKEN, { team: 'violet' });
 
     const corrected = await post(port, 'correct-score', TOKEN, {
-      team: 'cyan',
+      team: 'violet',
       to: 3,
       reason: 'scoreboard miscount',
     });
     expect(corrected.status).toBe(200);
-    expect(server.currentMatch!.world.score.cyan).toBe(3);
+    expect(server.currentMatch!.world.score.violet).toBe(3);
 
     await post(port, 'abandon', TOKEN, { reason: 'done' });
     const final = await result;
     expect(final.scoreCorrections).toEqual([
-      { team: 'cyan', from: 0, to: 3, reason: 'scoreboard miscount', at: expect.any(Number) },
+      { team: 'violet', from: 0, to: 3, reason: 'scoreboard miscount', at: expect.any(Number) },
     ]);
   });
 
@@ -722,12 +722,12 @@ describe('referee actions', () => {
     // self-running match uses.
     const { server, port } = await start(TOKEN);
     const result = server.play({ agents: agents(), halfSeconds: 5, refereed: true, seed: 1 });
-    await post(port, 'kickoff', TOKEN, { team: 'cyan' });
+    await post(port, 'kickoff', TOKEN, { team: 'violet' });
 
     expect(
-      (await post(port, 'remove-robot', TOKEN, { robotId: 'cyan-1', rule: '5.7.1', reason: 'testing' })).status,
+      (await post(port, 'remove-robot', TOKEN, { robotId: 'violet-1', rule: '5.7.1', reason: 'testing' })).status,
     ).toBe(200);
-    const robot = server.currentMatch!.world.robots.find((r) => r.id === 'cyan-1')!;
+    const robot = server.currentMatch!.world.robots.find((r) => r.id === 'violet-1')!;
     expect(robot.removed).toBe(true);
 
     // Serve the penalty out directly rather than waiting real seconds, and
@@ -750,21 +750,21 @@ describe('referee actions', () => {
       autoDamaged: false,
       seed: 1,
     });
-    await post(port, 'kickoff', TOKEN, { team: 'cyan' });
+    await post(port, 'kickoff', TOKEN, { team: 'violet' });
 
     expect(
-      (await post(port, 'remove-robot', TOKEN, { robotId: 'cyan-1', rule: '5.7.1', reason: 'testing' })).status,
+      (await post(port, 'remove-robot', TOKEN, { robotId: 'violet-1', rule: '5.7.1', reason: 'testing' })).status,
     ).toBe(200);
-    const robot = server.currentMatch!.world.robots.find((r) => r.id === 'cyan-1')!;
+    const robot = server.currentMatch!.world.robots.find((r) => r.id === 'violet-1')!;
     expect(robot.removed).toBe(true);
 
-    expect((await post(port, 'return-robot', TOKEN, { robotId: 'cyan-1' })).status).toBe(409);
+    expect((await post(port, 'return-robot', TOKEN, { robotId: 'violet-1' })).status).toBe(409);
 
     robot.penaltyRemaining = 0;
     await new Promise((ok) => setTimeout(ok, 30));
     expect(robot.removed).toBe(true); // still off - nothing auto-returns it in this mode
 
-    expect((await post(port, 'return-robot', TOKEN, { robotId: 'cyan-1' })).status).toBe(200);
+    expect((await post(port, 'return-robot', TOKEN, { robotId: 'violet-1' })).status).toBe(200);
     expect(robot.removed).toBe(false);
 
     await post(port, 'abandon', TOKEN, { reason: 'done' });
@@ -774,7 +774,7 @@ describe('referee actions', () => {
   it('end-half moves on to the second half rather than ending the match', async () => {
     const { server, port } = await start(TOKEN);
     const result = server.play({ agents: agents(), halfSeconds: 30, refereed: true, seed: 1 });
-    await post(port, 'kickoff', TOKEN, { team: 'cyan' });
+    await post(port, 'kickoff', TOKEN, { team: 'violet' });
 
     expect((await post(port, 'end-half', TOKEN)).status).toBe(200);
     await new Promise((ok) => setTimeout(ok, 30));
@@ -789,7 +789,7 @@ describe('referee actions', () => {
   it('end-match skips the second half entirely', async () => {
     const { server, port } = await start(TOKEN);
     const result = server.play({ agents: agents(), halfSeconds: 30, refereed: true, seed: 1 });
-    await post(port, 'kickoff', TOKEN, { team: 'cyan' });
+    await post(port, 'kickoff', TOKEN, { team: 'violet' });
 
     expect((await post(port, 'end-match', TOKEN)).status).toBe(200);
     const final = await result;
@@ -801,15 +801,15 @@ describe('referee actions', () => {
   it('a robot removed in the first half stays off across end-half into the second', async () => {
     const { server, port } = await start(TOKEN);
     const result = server.play({ agents: agents(), halfSeconds: 30, refereed: true, seed: 1 });
-    await post(port, 'kickoff', TOKEN, { team: 'cyan' });
-    await post(port, 'remove-robot', TOKEN, { robotId: 'cyan-1', rule: '5.7.1', reason: 'testing' });
+    await post(port, 'kickoff', TOKEN, { team: 'violet' });
+    await post(port, 'remove-robot', TOKEN, { robotId: 'violet-1', rule: '5.7.1', reason: 'testing' });
 
     await post(port, 'end-half', TOKEN);
     await new Promise((ok) => setTimeout(ok, 30));
     expect(server.currentMatch!.world.half).toBe(2);
 
-    await post(port, 'kickoff', TOKEN, { team: 'yellow' });
-    const robot = server.currentMatch!.world.robots.find((r) => r.id === 'cyan-1')!;
+    await post(port, 'kickoff', TOKEN, { team: 'lime' });
+    const robot = server.currentMatch!.world.robots.find((r) => r.id === 'violet-1')!;
     expect(robot.removed).toBe(true);
 
     await post(port, 'abandon', TOKEN, { reason: 'done' });

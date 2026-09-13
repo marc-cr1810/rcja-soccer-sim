@@ -21,7 +21,7 @@ import { PROTOCOL_VERSION, type ActuatorFrame, type SensorFrame } from './protoc
 export interface JoinMessage {
   type: 'join';
   protocol: number;
-  team: 'cyan' | 'yellow';
+  team: 'violet' | 'lime';
   /** 1 or 2. */
   robot: number;
   /** The team's name, for the scoreboard. */
@@ -190,7 +190,7 @@ export interface SeatReport {
 
 export interface Seat {
   transport: RemoteTransport;
-  team: 'cyan' | 'yellow';
+  team: 'violet' | 'lime';
   number: number;
   teamName: string;
 }
@@ -233,14 +233,14 @@ export class AgentGateway {
   }
 
   /** Team names as claimed by whoever connected, for the scoreboard. */
-  teamNames(): { cyan: string; yellow: string } {
-    const name = (team: 'cyan' | 'yellow'): string => {
+  teamNames(): { violet: string; lime: string } {
+    const name = (team: 'violet' | 'lime'): string => {
       for (const seat of this.seats.values()) {
         if (seat.team === team && seat.teamName) return seat.teamName;
       }
-      return team === 'cyan' ? 'Cyan' : 'Yellow';
+      return team === 'violet' ? 'Violet' : 'Lime';
     };
-    return { cyan: name('cyan'), yellow: name('yellow') };
+    return { violet: name('violet'), lime: name('lime') };
   }
 
   transports(): Partial<Record<string, Transport>> {
@@ -285,7 +285,7 @@ export class AgentGateway {
         reject(`protocol ${join.protocol}; this server speaks ${PROTOCOL_VERSION}`);
         return;
       }
-      if (join.team !== 'cyan' && join.team !== 'yellow') {
+      if (join.team !== 'violet' && join.team !== 'lime') {
         reject(`unknown team "${join.team}"`);
         return;
       }
@@ -357,7 +357,7 @@ export class AgentGateway {
         return;
       }
 
-      const teamName = join.name ?? (join.team === 'cyan' ? 'Cyan' : 'Yellow');
+      const teamName = join.name ?? (join.team === 'violet' ? 'Violet' : 'Lime');
       const transport = new RemoteTransport(`${teamName}/${id}`, id, socket, motorCount);
       this.seats.set(id, { transport, team: join.team, number: join.robot, teamName });
       // The seat is deliberately NOT freed when the socket closes. A seat is a

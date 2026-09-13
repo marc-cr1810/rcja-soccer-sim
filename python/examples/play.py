@@ -6,7 +6,7 @@ Starts four programs — a striker and a keeper for each team — and points the
 all at a match server. Both sides run the identical code, so whatever happens
 is the robots, not the matchup.
 
-    python play.py --only cyan
+    python play.py --only violet
 
 Starts one side, which is what a bench run wants: the other two robots are the
 opponent the bench is measuring you against, and it supplies them itself.
@@ -32,12 +32,12 @@ HERE = Path(__file__).parent
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--url", default="ws://localhost:8080/agent")
-parser.add_argument("--cyan", default="ACT-01", help="name for the cyan team")
-parser.add_argument("--yellow", default="QLD-04", help="name for the yellow team")
+parser.add_argument("--violet", default="ACT-01", help="name for the violet team")
+parser.add_argument("--lime", default="QLD-04", help="name for the lime team")
 parser.add_argument("--debug", action="store_true", help="stream live robot decision telemetry")
 parser.add_argument(
     "--only",
-    choices=["cyan", "yellow"],
+    choices=["violet", "lime"],
     default=None,
     help="start one side only, which is what a bench run of that side wants",
 )
@@ -46,10 +46,10 @@ args = parser.parse_args()
 #: Both sides, same two programs. Robot 1 attacks, robot 2 keeps goal - which
 #: is a choice, not a rule: 5.8 only says a team may nominate one goalie.
 LINE_UP = [
-    ("striker.py", "cyan", 1, args.cyan),
-    ("goalie.py", "cyan", 2, args.cyan),
-    ("striker.py", "yellow", 1, args.yellow),
-    ("goalie.py", "yellow", 2, args.yellow),
+    ("striker.py", "violet", 1, args.violet),
+    ("goalie.py", "violet", 2, args.violet),
+    ("striker.py", "lime", 1, args.lime),
+    ("goalie.py", "lime", 2, args.lime),
 ]
 
 if args.only:

@@ -50,7 +50,7 @@ it:
 import argparse
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--team", default="cyan", choices=["cyan", "yellow"])
+parser.add_argument("--team", default="violet", choices=["violet", "lime"])
 parser.add_argument("--number", type=int, default=1, choices=[1, 2])
 parser.add_argument("--name", default=None)
 parser.add_argument("--url", default="ws://localhost:8080/agent")
@@ -89,7 +89,7 @@ against a local server the same way you always have:
 
 ```bash
 npm run serve -- --agents            # in one terminal
-cd python && PYTHONPATH=. python3 myrobot/robot.py --team cyan   # in another
+cd python && PYTHONPATH=. python3 myrobot/robot.py --team violet   # in another
 ```
 
 or use `examples/play.py` / `npm run bench` to run it against the reference

@@ -25,9 +25,9 @@ const MM = 0.001;
 /**
  * Team colours, distinct from the goal paint (blue `0x00a6c4` / yellow
  * `0xf2c500`). RCJA rule 3.1 bars robots coloured orange, yellow or blue, so
- * the cyan-named team runs violet and the yellow-named team runs lime.
+ * the teams run violet and lime.
  */
-export const TEAM_COLOUR = { cyan: 0x8b5cf6, yellow: 0x3fce5a } as const;
+export const TEAM_COLOUR = { violet: 0x8b5cf6, lime: 0x3fce5a } as const;
 const DARK = 0x11161c;
 const METAL = 0xb9c2cc;
 const RUBBER = 0x1b1f24;

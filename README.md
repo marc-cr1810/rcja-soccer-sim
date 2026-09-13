@@ -179,7 +179,7 @@ counting past zero, because serving the time does not put a robot back on —
 short is the most consequential thing that happens in a match short of a goal,
 and until now the robot simply vanished with nothing to say why.
 
-`--opponent waller` puts a robot on the yellow side that drives itself off the
+`--opponent waller` puts a robot on the lime side that drives itself off the
 field, which is the quick way to watch a stand-down happen.
 
 ### The drivetrain is sized against the lab's own numbers
@@ -257,7 +257,7 @@ to go on.
 ## Measuring a robot
 
 ```bash
-npm run bench -- --spawn "python3 python/examples/play.py --only cyan --url {url}"
+npm run bench -- --spawn "python3 python/examples/play.py --only violet --url {url}"
 ```
 
 Starts your programs, plays them against the reference team at about ten times

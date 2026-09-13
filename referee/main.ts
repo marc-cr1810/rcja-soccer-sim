@@ -33,10 +33,10 @@ const standdown = document.getElementById('standdown')!;
 const log = document.getElementById('log')!;
 
 const board = {
-  cyanName: document.getElementById('cyan-name')!,
-  yellowName: document.getElementById('yellow-name')!,
-  cyanScore: document.getElementById('cyan-score')!,
-  yellowScore: document.getElementById('yellow-score')!,
+  violetName: document.getElementById('violet-name')!,
+  limeName: document.getElementById('lime-name')!,
+  violetScore: document.getElementById('violet-score')!,
+  limeScore: document.getElementById('lime-score')!,
   clock: document.getElementById('clock')!,
   half: document.getElementById('half')!,
 };
@@ -126,10 +126,10 @@ async function act(action: string, body?: unknown): Promise<boolean> {
 }
 
 function updateBoard(frame: ViewFrame): void {
-  board.cyanName.textContent = frame.teams.cyan;
-  board.yellowName.textContent = frame.teams.yellow;
-  board.cyanScore.textContent = String(frame.score.cyan);
-  board.yellowScore.textContent = String(frame.score.yellow);
+  board.violetName.textContent = frame.teams.violet;
+  board.limeName.textContent = frame.teams.lime;
+  board.violetScore.textContent = String(frame.score.violet);
+  board.limeScore.textContent = String(frame.score.lime);
   board.clock.textContent = formatClock(frame.clock, frame.half);
   board.half.textContent = frame.running
     ? frame.half === 1
@@ -157,7 +157,8 @@ function updateBoard(frame: ViewFrame): void {
       ...onField.map((r) => {
         const opt = document.createElement('option');
         opt.value = r.id;
-        opt.textContent = r.id;
+        const number = r.id.split('-')[1] ?? '';
+        opt.textContent = `${frame.teams[r.team]} ${number}`;
         return opt;
       }),
     );
@@ -185,8 +186,8 @@ function updateStandDown(frame: ViewFrame): void {
 
     const who = document.createElement('span');
     who.className = 'who';
-    const [teamName = '', number = ''] = robot.id.split('-');
-    who.textContent = `${teamName.charAt(0).toUpperCase()}${teamName.slice(1)} ${number}`;
+    const number = robot.id.split('-')[1] ?? '';
+    who.textContent = `${frame.teams[robot.team]} ${number}`;
 
     const rule = document.createElement('span');
     rule.className = 'rule';

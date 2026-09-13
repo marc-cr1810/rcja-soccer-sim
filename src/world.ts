@@ -36,7 +36,7 @@ import {
 } from './physics';
 import { openDrive, stepDrive, type DriveSpec } from './drive';
 
-export type TeamId = 'cyan' | 'yellow';
+export type TeamId = 'violet' | 'lime';
 
 export interface Robot extends Body {
   id: string;
@@ -264,11 +264,11 @@ export class World {
   clock = 0;
   half: 1 | 2 = 1;
   running = false;
-  score: Record<TeamId, number> = { cyan: 0, yellow: 0 };
+  score: Record<TeamId, number> = { violet: 0, lime: 0 };
   /** Rule 4.2.5 / 4.2.6: whether inter-robot communication is currently active. */
   commsEnabled: boolean;
   /** Timestamp of most recent packet sent per team, for visual feedback. */
-  commsActivity: Record<TeamId, number> = { cyan: -99, yellow: -99 };
+  commsActivity: Record<TeamId, number> = { violet: -99, lime: -99 };
 
   /**
    * Flips every physics tick. Robot-robot collisions and separation are
@@ -276,7 +276,7 @@ export class World {
    * behind, so a robot touching two others in the same tick (a keeper
    * shoved while also on the ball, say) resolves differently depending on
    * which pair goes first - and `actives` is always ordered
-   * cyan-1/cyan-2/yellow-1/yellow-2, never shuffled by which end either team
+   * violet-1/violet-2/lime-1/lime-2, never shuffled by which end either team
    * is currently defending. See `Match.slotOrderFlipped` for the sibling fix
    * this mirrors, and `pairOrder` below.
    */
@@ -292,16 +292,16 @@ export class World {
   /** How many times lack of progress has been called since the last restart (5.6.2). */
   lackOfProgressCount = 0;
   /** Suppresses the 5.11.1 detector per team so it reports once, not per frame. */
-  private multipleDefenceCooldown: Record<TeamId, number> = { cyan: 0, yellow: 0 };
+  private multipleDefenceCooldown: Record<TeamId, number> = { violet: 0, lime: 0 };
   /** Rule 5.11.1: Sustained duration both defenders have been directly blocking the goal. */
-  private multipleDefenceDwell: Record<TeamId, number> = { cyan: 0, yellow: 0 };
+  private multipleDefenceDwell: Record<TeamId, number> = { violet: 0, lime: 0 };
   /** Rule 5.6.1.3: Forcing detection variables. */
   private forcingDuration = 0;
   lastForcingTeam: TeamId | null = null;
   sinceForcing = 999;
   /** Seconds since the last kick-off, so 5.4.5 placement is not read as 5.11.1. */
   sinceKickOff = 0;
-  kickingOffTeam: TeamId = 'cyan';
+  kickingOffTeam: TeamId = 'violet';
   private kickOffPending = false;
   /**
    * Consecutive illegal kick-offs, whichever side committed them.
@@ -357,7 +357,7 @@ export class World {
 
   /** Which goal this team currently defends. Fixed for a half, not for the match. */
   defendingGoal(team: TeamId): GoalSide {
-    const first = team === 'cyan' ? 'cyan' : 'yellow';
+    const first = team === 'violet' ? 'cyan' : 'yellow';
     if (!this.endsSwapped) return first;
     return first === 'cyan' ? 'yellow' : 'cyan';
   }
@@ -368,7 +368,7 @@ export class World {
   }
 
   /** Rule 5.4: both teams on their defensive half, non-kicking team in the box. */
-  resetRobots(kickingOff: TeamId = 'cyan'): void {
+  resetRobots(kickingOff: TeamId = 'violet'): void {
     // A robot still serving a 5.7 stand-down does not get a free pass just
     // because some restart repositions everyone else - only returnRobot()
     // (5.7.4) brings it back, automatically or by a referee's hand. Without
@@ -430,8 +430,8 @@ export class World {
     const bRadius = this.ball.radius;
     const standoff = 15;
     const kickoffX = ROBOT_RADIUS + bRadius + standoff;
-    const cyanSign = sideSign('cyan');
-    const yellowSign = sideSign('yellow');
+    const violetSign = sideSign('violet');
+    const limeSign = sideSign('lime');
     // The waiting striker has to clear its own keeper as well as overlap the
     // box. At `boxEdge - 45` it sat 195 mm from the keeper on `goalieX`, and
     // two 110 mm robots need 220 - so the separation pass shoved them apart on
@@ -480,16 +480,16 @@ export class World {
       z: jitter(60),
     });
 
-    const cyanS = strikerFor('cyan', cyanSign);
-    const cyanK = keeperFor(cyanSign);
-    const yellowS = strikerFor('yellow', yellowSign);
-    const yellowK = keeperFor(yellowSign);
+    const violetS = strikerFor('violet', violetSign);
+    const violetK = keeperFor(violetSign);
+    const limeS = strikerFor('lime', limeSign);
+    const limeK = keeperFor(limeSign);
 
     this.robots = [
-      make('cyan-1', 'cyan', cyanS.x, cyanS.z, false),
-      make('cyan-2', 'cyan', cyanK.x, cyanK.z, true),
-      make('yellow-1', 'yellow', yellowS.x, yellowS.z, false),
-      make('yellow-2', 'yellow', yellowK.x, yellowK.z, true),
+      make('violet-1', 'violet', violetS.x, violetS.z, false),
+      make('violet-2', 'violet', violetK.x, violetK.z, true),
+      make('lime-1', 'lime', limeS.x, limeS.z, false),
+      make('lime-2', 'lime', limeK.x, limeK.z, true),
     ];
     // Whatever the draw, nobody starts inside anybody: the separation pass
     // would otherwise shove them apart before the whistle and the restart
@@ -516,8 +516,8 @@ export class World {
     this.sinceKickOff = 0;
     this.kickingOffTeam = kickingOff;
     this.kickOffPending = false;
-    this.multipleDefenceCooldown = { cyan: 0, yellow: 0 };
-    this.multipleDefenceDwell = { cyan: 0, yellow: 0 };
+    this.multipleDefenceCooldown = { violet: 0, lime: 0 };
+    this.multipleDefenceDwell = { violet: 0, lime: 0 };
     this.forcingDuration = 0;
     this.lastForcingTeam = null;
     this.sinceForcing = 999;
@@ -542,7 +542,7 @@ export class World {
     this.pairOrderFlipped = !this.pairOrderFlipped;
     if (this.running) this.clock += dt;
     this.sinceKickOff += dt;
-    for (const team of ['cyan', 'yellow'] as const) {
+    for (const team of ['violet', 'lime'] as const) {
       this.multipleDefenceCooldown[team] = Math.max(0, this.multipleDefenceCooldown[team] - dt);
     }
 
@@ -574,7 +574,7 @@ export class World {
     // first one move the ball out from under the second - or hand it a
     // head start - made whichever seat `actives` happened to reach last
     // (always the same one, since active robots are always ordered
-    // cyan-1/cyan-2/yellow-1/yellow-2) systematically win the ball's
+    // violet-1/violet-2/lime-1/lime-2) systematically win the ball's
     // outgoing velocity in a tie, with no such contest ever intended.
     const ballBefore = { ...this.ball };
     let ballDX = 0;
@@ -654,9 +654,9 @@ export class World {
     if (hit !== 'goal-back') return;
     const scoringSide: GoalSide = this.ball.x > 0 ? 'yellow' : 'cyan';
     // Whichever team does NOT currently defend that goal scored in it. Not a
-    // fixed cyan/yellow flip: which team defends which goal swaps at half-time
+    // fixed violet/lime flip: which team defends which goal swaps at half-time
     // (rule 1.4/5.4), even though the goals' own colours and places don't.
-    const scorer: TeamId = this.defendingGoal('cyan') === scoringSide ? 'yellow' : 'cyan';
+    const scorer: TeamId = this.defendingGoal('violet') === scoringSide ? 'lime' : 'violet';
 
     // Rule 5.6.1.3: If a goal is scored as a direct result of forcing, it will be disallowed!
     if (this.lastForcingTeam === scorer && this.sinceForcing < 0.8) {
@@ -682,9 +682,9 @@ export class World {
       kind: 'goal',
       rule: '5.5.1',
       team: scorer,
-      message: `Goal to ${scorer === 'cyan' ? 'Cyan' : 'Yellow'}. Ball struck the back wall of the goal.`,
+      message: `Goal to ${scorer === 'violet' ? 'Violet' : 'Lime'}. Ball struck the back wall of the goal.`,
     });
-    if (this.autoResolve) this.kickOff(scorer === 'cyan' ? 'yellow' : 'cyan');
+    if (this.autoResolve) this.kickOff(scorer === 'violet' ? 'lime' : 'violet');
     else this.running = false;
   }
 
@@ -804,9 +804,9 @@ export class World {
     const contesting = this.active().filter(
       (r) => distance(r, this.ball) < r.radius + this.ball.radius + 25,
     );
-    const hasCyan = contesting.some((r) => r.team === 'cyan');
-    const hasYellow = contesting.some((r) => r.team === 'yellow');
-    const isOpposingContest = hasCyan && hasYellow;
+    const hasViolet = contesting.some((r) => r.team === 'violet');
+    const hasLime = contesting.some((r) => r.team === 'lime');
+    const isOpposingContest = hasViolet && hasLime;
 
     // Rule 5.6.1.2: Ball stuck between MULTIPLE opposing robots in a scrum.
     if (isOpposingContest && ballSpd < 40) {
@@ -893,7 +893,7 @@ export class World {
       const ballDist = distance(attacker, this.ball);
       if (ballDist > attacker.radius + this.ball.radius + 25) continue;
 
-      const oppTeam: TeamId = attacker.team === 'cyan' ? 'yellow' : 'cyan';
+      const oppTeam: TeamId = attacker.team === 'violet' ? 'lime' : 'violet';
       const oppGoal = this.defendingGoal(oppTeam);
       const sign = oppGoal === 'cyan' ? -1 : 1;
       const facingGoal = Math.cos(attacker.heading) * sign > 0.3;
@@ -1059,7 +1059,7 @@ export class World {
       }
     }
 
-    for (const team of ['cyan', 'yellow'] as const) {
+    for (const team of ['violet', 'lime'] as const) {
       // Rule 5.4.5 legitimately puts both defenders on the box at kick-off, so
       // the detector stays quiet until play has actually developed.
       if (!this.running || this.sinceKickOff < 3) continue;
@@ -1087,7 +1087,7 @@ export class World {
 
         // Rule 5.6.1.4: Attacker using greater power to force two opposing robots
         // into their penalty box takes priority over Multiple Defence.
-        const oppTeam: TeamId = team === 'cyan' ? 'yellow' : 'cyan';
+        const oppTeam: TeamId = team === 'violet' ? 'lime' : 'violet';
         const sign = this.defendingGoal(team) === 'cyan' ? -1 : 1;
         const forcingOpponent = this.active().find((opp) => {
           if (opp.team !== oppTeam) return false;
@@ -1125,7 +1125,7 @@ export class World {
             kind: 'possible-multiple-defence',
             rule: '5.11.1',
             team,
-            message: `Two ${team === 'cyan' ? 'Cyan' : 'Yellow'} robots are directly blocking the goal in their penalty area and substantially affecting play (Rule 5.11.1). Move the non-goalie to centre.`,
+            message: `Two ${team === 'violet' ? 'Violet' : 'Lime'} robots are directly blocking the goal in their penalty area and substantially affecting play (Rule 5.11.1). Move the non-goalie to centre.`,
           });
           this.running = false;
         }
@@ -1336,7 +1336,7 @@ export class World {
       kind: 'kickoff',
       rule: '5.4',
       team,
-      message: `Kick-off to ${team === 'cyan' ? 'Cyan' : 'Yellow'}.`,
+      message: `Kick-off to ${team === 'violet' ? 'Violet' : 'Lime'}.`,
     });
   }
 
@@ -1380,7 +1380,7 @@ export class World {
 
     if (isCarrying) {
       const offendingTeam = this.kickingOffTeam;
-      const awardedTeam: TeamId = offendingTeam === 'cyan' ? 'yellow' : 'cyan';
+      const awardedTeam: TeamId = offendingTeam === 'violet' ? 'lime' : 'violet';
       this.kickOffPending = false;
 
       // Two re-takes is enough. Beyond that, play on: a restart nobody can
@@ -1399,7 +1399,7 @@ export class World {
         rule: '5.4.7',
         team: offendingTeam,
         robotId: striker.id,
-        message: `Illegal kick-off by ${offendingTeam === 'cyan' ? 'Cyan' : 'Yellow'}. Ball was carried without rolling 50 mm clear. Kick-off awarded to ${awardedTeam === 'cyan' ? 'Cyan' : 'Yellow'}.`,
+        message: `Illegal kick-off by ${offendingTeam === 'violet' ? 'Violet' : 'Lime'}. Ball was carried without rolling 50 mm clear. Kick-off awarded to ${awardedTeam === 'violet' ? 'Violet' : 'Lime'}.`,
       });
       if (this.autoResolve) {
         this.kickOff(awardedTeam);
@@ -1411,13 +1411,13 @@ export class World {
 
   callIllegalKickOff(): void {
     const offendingTeam = this.kickingOffTeam;
-    const awardedTeam: TeamId = offendingTeam === 'cyan' ? 'yellow' : 'cyan';
+    const awardedTeam: TeamId = offendingTeam === 'violet' ? 'lime' : 'violet';
     this.kickOffPending = false;
     this.emit({
       kind: 'illegal-kickoff',
       rule: '5.4.7',
       team: offendingTeam,
-      message: `Referee called illegal kick-off by ${offendingTeam === 'cyan' ? 'Cyan' : 'Yellow'}. Kick-off awarded to ${awardedTeam === 'cyan' ? 'Cyan' : 'Yellow'}.`,
+      message: `Referee called illegal kick-off by ${offendingTeam === 'violet' ? 'Violet' : 'Lime'}. Kick-off awarded to ${awardedTeam === 'violet' ? 'Violet' : 'Lime'}.`,
     });
     this.kickOff(awardedTeam);
   }
@@ -1439,7 +1439,7 @@ export function dribblerRecess(robot: Robot, ball: Body, league: League): number
 }
 
 export function labelFor(robot: Robot): string {
-  const team = robot.team === 'cyan' ? 'Cyan' : 'Yellow';
+  const team = robot.team === 'violet' ? 'Violet' : 'Lime';
   const n = robot.id.endsWith('1') ? '1' : '2';
   return `${team} ${n}`;
 }

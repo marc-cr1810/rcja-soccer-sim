@@ -22,10 +22,11 @@ const standdown = document.getElementById('standdown')!;
 const cameras = document.getElementById('cameras')!;
 
 const board = {
-  cyanName: document.getElementById('cyan-name')!,
-  yellowName: document.getElementById('yellow-name')!,
-  cyanScore: document.getElementById('cyan-score')!,
-  yellowScore: document.getElementById('yellow-score')!,
+  element: document.getElementById('board')!,
+  violetName: document.getElementById('violet-name')!,
+  limeName: document.getElementById('lime-name')!,
+  violetScore: document.getElementById('violet-score')!,
+  limeScore: document.getElementById('lime-score')!,
   clock: document.getElementById('clock')!,
   half: document.getElementById('half')!,
 };
@@ -125,9 +126,9 @@ function updateStandDown(frame: ViewFrame): void {
 
     const who = document.createElement('span');
     who.className = 'who';
-    // 'cyan-2' reads as nothing from twenty metres away; 'Cyan 2' reads.
-    const [team = '', number = ''] = robot.id.split('-');
-    who.textContent = `${team.charAt(0).toUpperCase()}${team.slice(1)} ${number}`;
+    // 'violet-2' reads as nothing from twenty metres away; 'Violet 2' reads.
+    const number = robot.id.split('-')[1] ?? '';
+    who.textContent = `${frame.teams[robot.team]} ${number}`;
 
     const rule = document.createElement('span');
     rule.className = 'rule';
@@ -148,10 +149,13 @@ function updateStandDown(frame: ViewFrame): void {
 }
 
 function updateBoard(frame: ViewFrame): void {
-  board.cyanName.textContent = frame.teams.cyan;
-  board.yellowName.textContent = frame.teams.yellow;
-  board.cyanScore.textContent = String(frame.score.cyan);
-  board.yellowScore.textContent = String(frame.score.yellow);
+  // Teams swap ends at half time, so the panels flip to keep each name over
+  // the goal the team is defending - the .violet/.lime order in the CSS.
+  board.element.classList.toggle('ends-swapped', frame.half === 2);
+  board.violetName.textContent = frame.teams.violet;
+  board.limeName.textContent = frame.teams.lime;
+  board.violetScore.textContent = String(frame.score.violet);
+  board.limeScore.textContent = String(frame.score.lime);
   board.clock.textContent = formatClock(frame.clock, frame.half);
   board.half.textContent = frame.running
     ? frame.half === 1
