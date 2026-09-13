@@ -58,8 +58,10 @@ from rcja_soccer import (
     clamp,
     drive,
     pass_is_open,
+    opening,
     relay_ball,
     relay_position,
+    shot_is_open,
     teammate_ball,
     teammate_position,
     teammate_says,
@@ -67,6 +69,7 @@ from rcja_soccer import (
     wrap_angle,
 )
 from rcja_soccer.field import (
+    BALL_RADIUS,
     CONTACT_RANGE,
     HALF_GOAL_WIDTH,
     HALF_LENGTH,
@@ -253,6 +256,28 @@ def think(s, me):
 
     # -- where to put it ----------------------------------------------------
     aim_x, aim_z = choose_aim(bx, bz, me_z, locator.confidence, frame)
+
+    # Where the goal is actually open beats a guess about where the keeper is.
+    #
+    # `choose_aim` picks the far post on the reasoning that a keeper sitting on
+    # the near one has further to travel - a good guess, and only a guess. The
+    # camera's blobs are not a guess: a robot in the mouth is not goal-coloured,
+    # so the colour is missing exactly where the shot would be saved, and what
+    # is left is the part of the goal that is genuinely open. Aim at the middle
+    # of the widest piece.
+    #
+    # Ignored deep in our own half, where `choose_aim` is not aiming at their
+    # goal at all - it is clearing up the wing, and the opposition's mouth is
+    # the wrong target from there whatever the camera can see of it.
+    seen = opening(s, frame.their_colour)
+    if seen is not None and frame.depth(bx, bz) >= HALF_LENGTH * 0.55:
+        gap_bearing, gap_width, gap_range = seen
+        # A gap the ball cannot get through is not a target. Six ball radii is
+        # 126 mm against a 42 mm ball - room to be wrong by a ball's width and
+        # still score.
+        if gap_width > BALL_RADIUS * 6:
+            aim_x = me_x + math.cos(heading + gap_bearing) * gap_range
+            aim_z = me_z + math.sin(heading + gap_bearing) * gap_range
     push = math.atan2(aim_z - bz, aim_x - bx)
 
     # Face the way the ball has to go. The kicker fires along the heading, so
@@ -352,7 +377,17 @@ def think(s, me):
     lane_clear = blocker is None or blocker > 430.0
     reach = shot_range(bx, bz, heading, frame.their_colour)
     close_enough = reach is not None and reach < (1100.0 if blocker is None else 800.0)
-    shot_on = reach is not None and lane_clear and close_enough
+    # And is the goal open where the kicker is pointing?
+    #
+    # `lane_clear` is the sonar's answer to a nearby but different question -
+    # "is there something in front of me" - and it is about the carpet rather
+    # than about the goal. It cannot tell a keeper filling the mouth from a
+    # team mate crossing in front of one, and it says nothing at all about the
+    # half of the goal the keeper is not covering. `shot_is_open` asks whether
+    # goal colour is actually visible along the heading, which is the fact that
+    # decides whether the shot goes in.
+    mouth_open = shot_is_open(s, frame.their_colour)
+    shot_on = reach is not None and lane_clear and close_enough and mouth_open
     kick = holding and shot_on
     dribbler = 0.0 if kick else 1.0
 

@@ -678,6 +678,85 @@ class BallTracker:
 # ------------------------------------------------------------- what is in front
 
 
+# ------------------------------------------------------------- goal openings
+
+
+#: Height of the crossbar, and therefore the number that turns a blob's
+#: apparent height back into a range. Matches CROSSBAR_HEIGHT in the simulator.
+CROSSBAR_HEIGHT = 140.0
+
+
+def goal_blobs(s, colour: str) -> list:
+    """The raw colour blobs the camera resolved on one goal, widest first.
+
+    This is the camera's honest output and not an answer to anything. Each blob
+    is an arc of the horizon that came back the colour of a goal: ``start`` and
+    ``end`` in the robot's own frame, and ``height``, how tall it looked.
+
+    An empty list does not mean the goal is somewhere else. It means nothing
+    goal-coloured was visible at all, which on a field this size means a robot
+    is standing across the whole mouth.
+    """
+    camera = getattr(s, "camera", None)
+    blobs = getattr(camera, "goal_blobs", None) if camera is not None else None
+    found = getattr(blobs, colour, None) if blobs is not None else None
+    if not found:
+        return []
+    return sorted(found, key=lambda b: b.end - b.start, reverse=True)
+
+
+def opening(s, colour: str) -> tuple[float, float, float] | None:
+    """The widest gap in a goal: where it is, how wide, and how far.
+
+    Returns ``(bearing, width_mm, range_mm)`` in the robot's frame, or ``None``
+    when the camera resolved no goal colour at all.
+
+    Width is converted from the arc the blob covers, which is the number worth
+    having: 37 degrees of goal means nothing on its own, 450 mm of goal means
+    a shot fits and 80 mm means it does not. Range comes off the blob's
+    *height*, because a goal seen from the side is foreshortened across its
+    width but not up its height - so ranging off the width of a blob that a
+    keeper has already cut in half is wrong twice over.
+    """
+    blobs = goal_blobs(s, colour)
+    if not blobs:
+        return None
+    best = blobs[0]
+    arc = best.end - best.start
+    bearing = wrap_angle((best.start + best.end) / 2.0)
+    height = getattr(best, "height", 0.0) or 1e-6
+    distance = CROSSBAR_HEIGHT / height
+    return bearing, 2.0 * distance * math.tan(arc / 2.0), distance
+
+
+def shot_is_open(s, colour: str, clearance: float = 2.5) -> bool:
+    """Whether the kicker, fired now, has open goal in front of it.
+
+    The kicker fires along the robot's heading, and the heading is bearing zero
+    in the robot's own frame - so the whole question is whether zero falls
+    inside one of the goal's blobs, far enough from either edge for the ball to
+    pass. ``clearance`` is that margin, in ball radii.
+
+    This is a different question from :func:`obstacle_range`'s, and a better
+    one. A sonar says "something is 400 mm ahead of me"; it cannot tell a
+    keeper in the goal mouth from a team mate crossing in front of one. This
+    says "the goal is not visible where I am pointing", which is the fact that
+    actually decides whether the shot scores - and it says it about the goal
+    itself rather than about the carpet in between.
+    """
+    blobs = goal_blobs(s, colour)
+    if not blobs:
+        return False
+    for b in blobs:
+        height = getattr(b, "height", 0.0) or 1e-6
+        distance = CROSSBAR_HEIGHT / height
+        # The ball needs this much arc to fit through at that distance.
+        margin = math.atan2(BALL_RADIUS * clearance, max(distance, 1.0))
+        if b.start + margin <= 0.0 <= b.end - margin:
+            return True
+    return False
+
+
 def obstacle_range(s, heading: float, x: float, z: float, offset: float = 0.0) -> float | None:
     """How far away the robot in the way is, or None if the way is clear.
 
