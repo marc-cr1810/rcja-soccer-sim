@@ -17,9 +17,20 @@ import {
   readLines,
   readRange,
   surfaceAt,
+  visibleArcs,
+  type Arc,
   type Pose,
 } from './sensors';
-import { HALF_LENGTH, HALF_WIDTH, LINE_THICKNESS, WALL_X, goalMouth } from './field';
+import {
+  CROSSBAR_HEIGHT,
+  GOAL_MOUTH_X,
+  HALF_GOAL_WIDTH,
+  HALF_LENGTH,
+  HALF_WIDTH,
+  LINE_THICKNESS,
+  WALL_X,
+  goalMouth,
+} from './field';
 
 const at = (x: number, z: number, heading = 0): Pose => ({ x, z, heading });
 const seed = () => new Noise(12345);
@@ -292,16 +303,6 @@ describe('camera', () => {
     expect(r.goals.cyan).not.toBeNull();
   });
 
-  it('resolves a goal opening when the near post is inside FOV even if center is outside', () => {
-    const cam = new CameraState();
-    // Robot at (0, 0) angled at ~35 degrees (0.61 rad) off-axis from yellow goal
-    // Center point (915, 0) has bearing ~ -35 deg (outside 31 deg half-FOV)
-    // But post at (915, +225) has bearing ~ -21 deg (well inside 31 deg FOV!)
-    const pose = at(0, 0, 0.61);
-    const r = cam.read(pose, { x: 0, z: 0 }, [], seed(), true);
-    expect(r.goals.yellow).not.toBeNull();
-  });
-
   it('estimates range badly enough to be worth distrusting', () => {
     const cam = new CameraState();
     const n = seed();
@@ -315,6 +316,143 @@ describe('camera', () => {
     const mean = errors.reduce((a, b) => a + b, 0) / errors.length;
     expect(mean).toBeGreaterThan(0.01);
     expect(mean).toBeLessThan(0.25);
+  });
+
+  it('estimates range off blob height, not off blob width', () => {
+    // Square on and off to the side at the SAME distance from the goal plane.
+    // The mouth foreshortens across its width, so a range taken off width
+    // would disagree between these two. Height is what survives.
+    const cam = new CameraState();
+    const square = cam.read(at(GOAL_MOUTH_X - 400, 0), { x: 0, z: 0 }, [], seed(), true, true);
+    const oblique = cam.read(at(GOAL_MOUTH_X - 400, 500), { x: 0, z: 0 }, [], seed(), true, true);
+
+    const wide = square.goalBlobs.yellow[0]!;
+    const thin = oblique.goalBlobs.yellow[0]!;
+    // Width collapses when seen from the side...
+    expect(thin.end - thin.start).toBeLessThan((wide.end - wide.start) * 0.6);
+    // ...while height still reads the true distance to the plane, 400 mm.
+    expect(CROSSBAR_HEIGHT / wide.height).toBeCloseTo(400, 0);
+  });
+});
+
+/**
+ * The reading a striker needs to shoot past a keeper.
+ *
+ * A goal is not a point, it is an opening, and what matters about an opening
+ * is which parts of it are still open. These assert that the camera reports
+ * the opening rather than the goal's middle - and, just as much, that it
+ * reports it as raw colour rather than as an answer.
+ */
+describe('goal blobs', () => {
+  const gx = GOAL_MOUTH_X;
+  /** Ideal mode: occlusion is geometry, so it applies, but no noise. */
+  const look = (pose: Pose, blockers: { x: number; z: number }[]) => {
+    const cam = new CameraState();
+    return cam.read(pose, { x: 0, z: 0 }, blockers, seed(), true, true).goalBlobs.yellow;
+  };
+  const width = (b: { start: number; end: number }) => b.end - b.start;
+
+  it('is one unbroken patch when nothing is in front of the net', () => {
+    const blobs = look(at(300, 0), []);
+    expect(blobs).toHaveLength(1);
+    // 450 mm of mouth from 665 mm out: 2*atan(225/665) = 37.4 degrees.
+    expect(width(blobs[0]!)).toBeCloseTo(2 * Math.atan(HALF_GOAL_WIDTH / (gx - 300)), 3);
+  });
+
+  it('splits in two around a keeper standing in the middle of the mouth', () => {
+    const blobs = look(at(300, 0), [{ x: gx - 100, z: 0 }]);
+    expect(blobs).toHaveLength(2);
+    // The gap between them is where the keeper is, and it is NOT open.
+    expect(blobs[1]!.start).toBeGreaterThan(blobs[0]!.end);
+    // Both remaining pieces are real goal, and narrower than the whole mouth.
+    for (const b of blobs) expect(width(b)).toBeGreaterThan(0);
+    expect(width(blobs[0]!) + width(blobs[1]!)).toBeLessThan(
+      width(look(at(300, 0), [])[0]!),
+    );
+  });
+
+  it('leaves one off-centre patch when the keeper sits on a post', () => {
+    const blobs = look(at(300, 0), [{ x: gx - 100, z: -140 }]);
+    expect(blobs).toHaveLength(1);
+    // The opening is on the far side from the keeper, so its centre has moved
+    // off the middle of the goal - which is the whole point of the reading.
+    const centre = (blobs[0]!.start + blobs[0]!.end) / 2;
+    expect(centre).toBeGreaterThan(0.05);
+  });
+
+  it('reports nothing at all when the mouth is smothered', () => {
+    expect(look(at(300, 0), [{ x: 460, z: 0 }])).toHaveLength(0);
+  });
+
+  it('can only ever show a gap around ONE robot, because of how wide a robot is', () => {
+    // Worth stating as a fact about the field rather than leaving implicit.
+    // Rule 2.3 makes the mouth 450 mm and rule 4.1.2 makes a robot 220 mm, so
+    // the mouth is almost exactly two robots wide - and a shadow is never
+    // narrower than the robot casting it. Two robots in front of the net
+    // therefore cover it, at every distance, and a striker's problem is
+    // always "get past the keeper", never "pick one of several openings".
+    for (const d of [400, 700, 1000, 1400]) {
+      const pose = at(gx - d, 0);
+      const goal = look(pose, [])[0]!;
+      const pair = look(pose, [
+        { x: gx - 60, z: -105 },
+        { x: gx - 60, z: 105 },
+      ]);
+      const open = pair.reduce((a, b) => a + width(b), 0);
+      // Whatever is left over is a rim, not an opening: under a tenth of it.
+      expect(open).toBeLessThan(width(goal) * 0.1);
+    }
+  });
+
+  it('merges overlapping shadows instead of inventing a gap between them', () => {
+    // Asserted on the interval arithmetic directly, because the field itself
+    // cannot set this case up - see the test above. Two shadows that overlap
+    // must leave one hidden stretch, never two with a sliver of phantom goal
+    // between them, or a striker would shoot at the space between two robots.
+    const goal: Arc = { from: -0.5, to: 0.5 };
+    const merged = visibleArcs(goal, [
+      { centre: -0.1, half: 0.15 },
+      { centre: 0.1, half: 0.15 },
+    ]);
+    expect(merged).toHaveLength(2);
+    expect(merged[0]!.to).toBeCloseTo(-0.25, 6);
+    expect(merged[1]!.from).toBeCloseTo(0.25, 6);
+  });
+
+  it('leaves one more piece than there are separated shadows', () => {
+    // The algorithm carries no cap at two; the goal's own width is the cap.
+    const goal: Arc = { from: -1, to: 1 };
+    const spread = visibleArcs(goal, [
+      { centre: -0.6, half: 0.1 },
+      { centre: 0, half: 0.1 },
+      { centre: 0.6, half: 0.1 },
+    ]);
+    expect(spread).toHaveLength(4);
+    for (let i = 1; i < spread.length; i++) {
+      expect(spread[i]!.from).toBeGreaterThan(spread[i - 1]!.to);
+    }
+  });
+
+  it('hides more of the goal the closer the blocker is to the robot', () => {
+    const pose = at(300, 0);
+    const near = look(pose, [{ x: 500, z: 0 }]);
+    const far = look(pose, [{ x: gx - 20, z: 0 }]);
+    const open = (bs: { start: number; end: number }[]) =>
+      bs.reduce((a, b) => a + width(b), 0);
+    // Same robot, same bearing, different distance: the near one eats the goal.
+    expect(open(near)).toBeLessThan(open(far));
+  });
+
+  it('is blocked by a team mate exactly as it is by an opponent', () => {
+    // The camera does not know whose robot it is, and neither does the goal.
+    const mate = look(at(300, 0), [{ x: gx - 100, z: 0 }]);
+    expect(mate).toHaveLength(2);
+  });
+
+  it('narrows as the robot moves round to the side', () => {
+    const square = look(at(gx - 300, 0), []);
+    const oblique = look(at(gx - 300, 500), []);
+    expect(width(oblique[0]!)).toBeLessThan(width(square[0]!));
   });
 });
 

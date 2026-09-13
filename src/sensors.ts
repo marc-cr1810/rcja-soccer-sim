@@ -14,7 +14,9 @@
  */
 
 import {
-  GOAL_WIDTH,
+  CROSSBAR_HEIGHT,
+  GOAL_MOUTH_X,
+  HALF_GOAL_WIDTH,
   HALF_LENGTH,
   HALF_WIDTH,
   LINE_THICKNESS,
@@ -29,6 +31,7 @@ import {
 import { wrapAngle } from './drive';
 import type {
   BallReading,
+  Blob,
   CameraReading,
   LineReading,
   RangeReading,
@@ -469,10 +472,140 @@ export const CAMERA_BEARING_NOISE = 0.02;
 /** Range from a monocular camera is an estimate off apparent size, and poor. */
 export const CAMERA_RANGE_ERROR = 0.09;
 
+const TAU = 2 * Math.PI;
+
+// ------------------------------------------------------- arcs of the horizon
+
+/**
+ * A stretch of the horizon, stored unwrapped so `to - from` is its width.
+ *
+ * Keeping it unwrapped rather than folding both ends into −π..π is what makes
+ * the arithmetic below readable: an arc that straddles the seam behind the
+ * robot is still one interval here, not two special cases.
+ */
+export interface Arc {
+  from: number;
+  to: number;
+}
+
+/** The SHORT way round between two bearings, ordered so width is `to - from`. */
+function arcBetween(a: number, b: number): Arc {
+  const d = wrapAngle(b - a);
+  return d >= 0 ? { from: a, to: a + d } : { from: b, to: b - d };
+}
+
+/**
+ * The arc a goal mouth covers, taken from its posts.
+ *
+ * Not from the centre of the mouth, which is the whole difference: a goal has
+ * a width, and the width is the thing a robot wants. It shrinks as the robot
+ * backs off and foreshortens as the robot moves round to the side, both of
+ * which fall straight out of the two bearings.
+ *
+ * The posts sit on the goal plane at `GOAL_MOUTH_X`, which is where
+ * `physics.ts`, `world.ts` and the renderer all agree the goal is. (The
+ * `Sighting` below still ranges to `goalMouth()`, 50 mm nearer, because moving
+ * it is a change to what every existing robot is told and belongs with the
+ * slice that reworks that reading rather than with this one.)
+ */
+export function goalArc(pose: Pose, side: 'cyan' | 'yellow'): Arc | null {
+  const gx = side === 'cyan' ? -GOAL_MOUTH_X : GOAL_MOUTH_X;
+  // Standing on or past the goal plane, the posts are no longer in front and
+  // the short arc between them stops meaning the mouth. A 220 mm robot cannot
+  // fit inside a 74 mm goal, so this is a guard rather than a case.
+  if (Math.abs(pose.x) >= Math.abs(gx)) return null;
+  return arcBetween(
+    bearingTo(pose, gx, -HALF_GOAL_WIDTH),
+    bearingTo(pose, gx, HALF_GOAL_WIDTH),
+  );
+}
+
+/** A robot's shadow on the horizon: where it is, and how much it hides. */
+export interface Shadow {
+  centre: number;
+  half: number;
+}
+
+/**
+ * How much of the horizon a robot blots out, from here.
+ *
+ * Falls off with distance, which is the part that matters in play: a defender
+ * that closes on the striker hides far more of the goal than the same robot
+ * sitting back on its own line, so rushing the shot works for a reason the
+ * geometry supplies rather than one the simulator asserts.
+ */
+function shadowOf(pose: Pose, b: { x: number; z: number }): Shadow | null {
+  const r = rangeTo(pose, b.x, b.z);
+  if (r <= 1) return null;
+  return {
+    centre: bearingTo(pose, b.x, b.z),
+    half: Math.asin(Math.min(1, ROBOT_RADIUS / r)),
+  };
+}
+
+/**
+ * What is left of an arc once the shadows are taken out of it.
+ *
+ * One robot in the middle of the mouth leaves two pieces, two robots leave
+ * three, and three robots across the face of the goal leave four — the count
+ * is however many shadows actually landed on it, plus one, and there is no cap
+ * here because there is no cap on the field either.
+ *
+ * Overlapping shadows collapse into one on their own: the running `open` mark
+ * only ever moves forwards, so two robots standing shoulder to shoulder hide
+ * one stretch of goal rather than leaving a phantom sliver between them.
+ */
+export function visibleArcs(goal: Arc, shadows: readonly Shadow[]): Arc[] {
+  const width = goal.to - goal.from;
+  if (width <= 0) return [];
+
+  const cuts: { lo: number; hi: number }[] = [];
+  for (const s of shadows) {
+    const rc = wrapAngle(s.centre - goal.from);
+    // A shadow sitting across the seam from the goal arrives here a full turn
+    // away from it, so try it shifted either way. At most one shift can land.
+    for (const turn of [-TAU, 0, TAU]) {
+      const lo = Math.max(0, rc + turn - s.half);
+      const hi = Math.min(width, rc + turn + s.half);
+      if (hi > lo) cuts.push({ lo, hi });
+    }
+  }
+
+  cuts.sort((a, b) => a.lo - b.lo);
+  const out: Arc[] = [];
+  let open = 0;
+  for (const c of cuts) {
+    if (c.lo > open) out.push({ from: goal.from + open, to: goal.from + c.lo });
+    open = Math.max(open, c.hi);
+  }
+  if (open < width) out.push({ from: goal.from + open, to: goal.to });
+  return out;
+}
+
+/**
+ * Blobs draw from their own stream, never from the camera's.
+ *
+ * `perception.ts` gives the reason and this is the case it was written for: if
+ * a new reading draws from a stream an existing reading already uses, every
+ * number after it shifts, and ADDING a sensor silently changes what every
+ * other sensor said. That is not a theory here — wiring the blobs into the
+ * camera's own stream moved the ball sighting enough to change match results,
+ * which is exactly the kind of change a season's replays cannot survive.
+ */
+const BLOB_STREAM = 0x7c;
+
 export class CameraState {
+  private readonly blobNoise: Noise;
   private sinceFrame = Infinity;
+
+  /** @param seed Match seed mixed with the robot's identity, as `Senses` does. */
+  constructor(seed = 0) {
+    this.blobNoise = new Noise((seed ^ BLOB_STREAM) >>> 0);
+  }
+
   private last: CameraReading = {
     goals: { cyan: null, yellow: null },
+    goalBlobs: { cyan: [], yellow: [] },
     ball: null,
     fresh: false,
   };
@@ -515,58 +648,86 @@ export class CameraState {
       };
     };
 
+    /**
+     * The whole mouth as a single point. The easy reading, and the one that
+     * cannot answer "is there a gap in it" — see `seeGoalBlobs` for that.
+     *
+     * The camera sees all the way round, so there is no field of view to clip
+     * against and nothing occludes this: it is a wide target high on the wall.
+     */
     const seeGoal = (side: 'cyan' | 'yellow'): Sighting | null => {
       const mouth = goalMouth(side);
       const bCenter = bearingTo(pose, mouth.x, mouth.z);
       const trueRange = rangeTo(pose, mouth.x, mouth.z);
-
       if (ideal) {
-        return {
-          bearing: wrapAngle(bCenter),
-          range: Math.max(0, trueRange),
-        };
+        return { bearing: wrapAngle(bCenter), range: Math.max(0, trueRange) };
       }
-
-      if (CAMERA_FOV >= 2 * Math.PI) {
-        return {
-          bearing: wrapAngle(bCenter + noise.gaussian(CAMERA_BEARING_NOISE)),
-          range: Math.max(0, trueRange * (1 + noise.gaussian(CAMERA_RANGE_ERROR))),
-        };
-      }
-
-      const halfW = GOAL_WIDTH / 2;
-      // Check whether the goal is roughly in the forward hemisphere
-      const headingToGoal = Math.atan2(mouth.z - pose.z, mouth.x - pose.x);
-      const diff = wrapAngle(headingToGoal - pose.heading);
-      if (Math.abs(diff) > Math.PI / 2 + CAMERA_FOV / 2) return null;
-
-      const bLeft = bCenter + wrapAngle(bearingTo(pose, mouth.x, mouth.z - halfW) - bCenter);
-      const bRight = bCenter + wrapAngle(bearingTo(pose, mouth.x, mouth.z + halfW) - bCenter);
-      const spanMin = Math.min(bLeft, bRight);
-      const spanMax = Math.max(bLeft, bRight);
-
-      const fovHalf = CAMERA_FOV / 2;
-      const visMin = Math.max(spanMin, -fovHalf);
-      const visMax = Math.min(spanMax, fovHalf);
-
-      if (visMin > visMax) return null;
-
-      const visBearing = (visMin + visMax) / 2;
-      // Estimate range to the visible portion of the goal opening
-      const dx = mouth.x - pose.x;
-      const beamFieldAngle = wrapAngle(pose.heading + visBearing);
-      const cosA = Math.cos(beamFieldAngle);
-      const range = Math.abs(cosA) > 1e-3 ? Math.abs(dx / cosA) : trueRange;
-
       return {
-        bearing: wrapAngle(visBearing + noise.gaussian(CAMERA_BEARING_NOISE)),
-        range: Math.max(0, range * (1 + noise.gaussian(CAMERA_RANGE_ERROR))),
+        bearing: wrapAngle(bCenter + noise.gaussian(CAMERA_BEARING_NOISE)),
+        range: Math.max(0, trueRange * (1 + noise.gaussian(CAMERA_RANGE_ERROR))),
       };
     };
 
+    /**
+     * The same goal as the colour blobs a vision pipeline would actually emit.
+     *
+     * Every robot on the field cuts into this, the team mate included — the
+     * same list that blocks the infrared ring. A mate parked on the goal line
+     * genuinely blinds its own striker, which is the coordination problem
+     * arriving through a second sensor.
+     */
+    const seeGoalBlobs = (side: 'cyan' | 'yellow'): Blob[] => {
+      const arc = goalArc(pose, side);
+      if (!arc) return [];
+
+      const gx = side === 'cyan' ? -GOAL_MOUTH_X : GOAL_MOUTH_X;
+      const shadows: Shadow[] = [];
+      for (const b of blockers) {
+        // Only something between the robot and the goal plane can hide it.
+        // Depth here is simply x, because the goal IS a plane of constant x.
+        if (Math.abs(gx - b.x) >= Math.abs(gx - pose.x)) continue;
+        if (Math.sign(gx - b.x) !== Math.sign(gx - pose.x)) continue;
+        const s = shadowOf(pose, b);
+        if (s) shadows.push(s);
+      }
+
+      // Most of the time nothing is in front of the goal at all, and the
+      // interval arithmetic has nothing to do. Worth skipping: this runs for
+      // both goals on every camera frame of every robot.
+      const pieces = shadows.length === 0 ? [arc] : visibleArcs(arc, shadows);
+
+      const out: Blob[] = [];
+      for (const seen of pieces) {
+        const from = seen.from + (ideal ? 0 : this.blobNoise.gaussian(CAMERA_BEARING_NOISE));
+        const to = seen.to + (ideal ? 0 : this.blobNoise.gaussian(CAMERA_BEARING_NOISE));
+        // A patch thinner than the noise on its own edges is not something a
+        // blob detector resolves; it is one bright pixel that may not be there.
+        if (to - from < CAMERA_BEARING_NOISE) continue;
+
+        // Height comes off the goal plane along the blob's own bearing, so a
+        // blob near the edge of a goal seen from the side is correctly further
+        // away than one near the middle.
+        const centre = wrapAngle(pose.heading + (seen.from + seen.to) / 2);
+        const cos = Math.cos(centre);
+        const dist =
+          Math.abs(cos) > 1e-3 ? Math.abs((gx - pose.x) / cos) : rangeTo(pose, gx, 0);
+        const height = CROSSBAR_HEIGHT / Math.max(dist, 1);
+
+        out.push({
+          start: wrapAngle(from),
+          end: wrapAngle(from) + (to - from),
+          height: Math.max(
+            0,
+            height * (1 + (ideal ? 0 : this.blobNoise.gaussian(CAMERA_RANGE_ERROR))),
+          ),
+        });
+      }
+      return out;
+    };
+
     this.last = {
-      // A goal is a wide target high on the wall; a robot does not hide it.
       goals: { cyan: seeGoal('cyan'), yellow: seeGoal('yellow') },
+      goalBlobs: { cyan: seeGoalBlobs('cyan'), yellow: seeGoalBlobs('yellow') },
       ball: see(ball.x, ball.z, true),
       fresh: true,
     };

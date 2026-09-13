@@ -54,12 +54,17 @@ describe('the ladder runs', () => {
     expect(origins['waller']).toBe('generated');
   });
 
+  // Every ordered pairing of the whole roster at 20 s a half is seconds of
+  // real work, and it sat at about 4.7 of vitest's default 5 - close enough
+  // that an unlucky scheduling hiccup failed it rather than anything in the
+  // simulator. The assertions here are about robots not erroring, not about
+  // how fast the machine is, so give it room to be slow.
   it('survives the whole roster of bad robots', () => {
     const entries = botRoster().map((b) => bot(b.name, b.make));
     const s = runLadder(entries, { halfSeconds: 20, seed: 2 });
     expect(s.matches).toBe(entries.length * (entries.length - 1));
     for (const row of s.table) expect(row.errors).toBe(0);
-  });
+  }, 60000);
 
   it('gives fresh programs to every match', () => {
     // Entries are factories precisely so state cannot leak between matches.

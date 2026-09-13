@@ -85,7 +85,7 @@ export class Senses {
   private readonly gyroNoise: Noise;
 
   private readonly compass = new CompassState();
-  private readonly camera = new CameraState();
+  private readonly camera: CameraState;
   private readonly encoders: EncoderState;
   private readonly gyro = new GyroState();
   readonly idealSensors: boolean;
@@ -102,6 +102,9 @@ export class Senses {
     this.rangeNoise = new Noise(seed ^ Stream.Range);
     this.cameraNoise = new Noise(seed ^ Stream.Camera);
     this.gyroNoise = new Noise(seed ^ Stream.Gyro);
+    // The camera owns its blob stream, kept apart from `cameraNoise` so that
+    // adding the blobs did not shift the sightings that were already there.
+    this.camera = new CameraState(seed);
     this.encoders = new EncoderState(motorCount);
     this.idealSensors = idealSensors;
   }

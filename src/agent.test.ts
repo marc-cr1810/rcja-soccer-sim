@@ -235,11 +235,28 @@ describe('perception hands over only what a sensor knows', () => {
     // only way to know one is there is to notice it blocking something.
     expect(json).not.toContain('y1');
     expect(json).not.toContain('robots');
-    expect(json).not.toContain('900');
-    expect(json).not.toContain('250');
+
+    // The coordinates are checked as NUMBERS rather than as text. Searching
+    // the serialised frame for '900' matches the digits wherever they fall,
+    // including in the decimals of a bearing that says nothing whatever about
+    // where the opponent is - a blob edge of 0.10202319789000686 tripped this
+    // once. What must never appear is the coordinate itself.
+    const numbers: number[] = [];
+    const walk = (v: unknown): void => {
+      if (typeof v === 'number') numbers.push(v);
+      else if (Array.isArray(v)) v.forEach(walk);
+      else if (v && typeof v === 'object') Object.values(v).forEach(walk);
+    };
+    walk(f);
+    expect(numbers).not.toContain(900);
+    expect(numbers).not.toContain(250);
     // 'yellow' does appear — but as the name of a goal on the far wall, which
     // a camera can obviously see, not as anything about the opposing team.
     expect(Object.keys(f.camera.goals).sort()).toEqual(['cyan', 'yellow']);
+    // The blobs are the one reading that DOES carry a trace of an opponent -
+    // but only as a shadow on the goal, never as a position. A robot has to
+    // infer that something is there from the goal being cut in two.
+    expect(Object.keys(f.camera.goalBlobs).sort()).toEqual(['cyan', 'yellow']);
   });
 
   it('is blocked by a team mate, not only by an opponent', () => {

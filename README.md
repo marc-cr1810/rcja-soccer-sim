@@ -199,7 +199,7 @@ standing in for a motor all along.
 
 ### The sensors are defined by how they fail
 
-- **IR ball seeker** — 16 sectors, inverse-square strength, and **occlusion**: a
+- **IR ball seeker** — 24 sectors, inverse-square strength, and **occlusion**: a
   robot in the way returns `null`. Possession is about having a clear line, not
   being close, which is why a robot that drives straight at the ball gets shut
   out by a defender standing still.
@@ -209,7 +209,13 @@ standing in for a motor all along.
   tick; its bias random-walks like the compass's drift does, but a bias in a
   *rate* only costs you anything once you integrate it into a heading of your
   own, at which point it is worse than the compass ever gets.
-- **Camera** — 30 fps against a 50 Hz loop, with a `fresh` flag.
+- **Camera** — 30 fps against a 50 Hz loop, with a `fresh` flag. Each goal
+  arrives twice: as one bearing and range, and as the raw **colour blobs** a
+  Pixy or an OpenMV would emit. A robot in front of the net is not goal-coloured,
+  so it cuts the arc, and a goal with a keeper in the middle of it arrives as two
+  blobs with a gap between them — where that opening is, and whether it is worth
+  shooting at, is the program's to work out. Range comes off blob *height*, which
+  an oblique view foreshortens and blob width does not.
 - **Ultrasonics** — lose the echo entirely past 65° of incidence. A robot needs
   opposite beams to agree before it trusts either, because an obstruction can
   only make a reading *short*.

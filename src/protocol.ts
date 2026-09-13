@@ -76,9 +76,63 @@ export interface Sighting {
   range: number;
 }
 
+/**
+ * One unbroken patch of goal colour, the way a blob detector reports it.
+ *
+ * A Pixy or an OpenMV does not hand a team a target, it hands them blobs, and
+ * this is the same thing in the one dimension an omnidirectional camera has:
+ * an arc of the horizon that came back the colour of a goal. Anything standing
+ * in front of the goal is not that colour, so it cuts the arc — which is why a
+ * goal with a keeper in the middle of it arrives here as TWO blobs with a gap
+ * between them, and a goal with nothing in front of it arrives as one.
+ *
+ * Nothing decides for the program what any of that means. Where the opening
+ * is, whether it is wide enough to shoot through, whether a narrow blob is a
+ * post or a keeper's elbow — all of it is the program's to work out, because
+ * on real hardware all of it is the team's to work out.
+ *
+ * `start` is wrapped to −π..π and `end` is always `start` plus the width, so
+ * `end` can exceed π rather than wrapping behind it. That way the two things a
+ * program actually wants are subtraction:
+ *
+ *     width  = blob.end - blob.start
+ *     centre = wrapAngle((blob.start + blob.end) / 2)
+ *
+ * They are `start`/`end` rather than the more natural `from`/`to` because
+ * `from` is a reserved word in Python, and half the programs that read this
+ * protocol are Python. `blob.from` is not an expression a team can write.
+ */
+export interface Blob {
+  /** The edge at the lower bearing, robot-frame radians, −π..π. */
+  start: number;
+  /** The other edge. Always greater than `start`; may exceed π. */
+  end: number;
+  /**
+   * How tall the patch looks, radians.
+   *
+   * The honest way to get a range out of a blob. A goal seen from the side is
+   * foreshortened across its width but not up its height, so the crossbar
+   * subtends `CROSSBAR_HEIGHT / range` from anywhere — and a blob that a robot
+   * has cut in half is narrower than the goal but no shorter. Range off the
+   * width of a blob is wrong twice over; range off its height is
+   *
+   *     range ≈ 140 / blob.height
+   */
+  height: number;
+}
+
 export interface CameraReading {
   /** Null when the goal is outside the field of view or was not resolved. */
   goals: { cyan: Sighting | null; yellow: Sighting | null };
+  /**
+   * The same two goals as raw colour blobs, occluded by whatever is standing
+   * in front of them. Empty when the goal is completely hidden.
+   *
+   * `goals` above is a convenience laid over this: one bearing, one range, the
+   * whole mouth treated as a point. It is the easier reading and it is the one
+   * that cannot answer "is there a gap", because a point has no width to lose.
+   */
+  goalBlobs: { cyan: Blob[]; yellow: Blob[] };
   /** Open League's passive orange ball, when the camera can pick it out. */
   ball: Sighting | null;
   /** True only on the frames the camera actually updated. */
