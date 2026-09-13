@@ -28,6 +28,14 @@ room", the keeper checks whether the striker has called in from further up
 the field with a clean line to it. Finding the ball again from a random point
 on a wing costs a striker several seconds it does not lose when the clearance
 lands at its feet.
+
+**Knowing when it has been picked up.** A 5.7.1.6 return or a 5.11 reposition
+teleports the robot without a word of warning in the protocol - one tick it
+is wherever the ball left it, the next it is on a corner of its own box. A
+position fix jumping further than any drive on this table could manage in
+one tick is the tell; treated as a reset, the same as a kick-off, so a ball
+estimate from the spot this robot used to occupy is not carried into the
+spot it is standing in now.
 """
 
 from __future__ import annotations
@@ -49,6 +57,7 @@ from rcja_soccer import (
     relay_position,
     teammate_ball,
     teammate_position,
+    teleported,
     wrap_angle,
 )
 from rcja_soccer.field import (
@@ -142,7 +151,15 @@ def think(s, me):
     # is built. It is estimated from the previous fix against the fixed goals.
     drift.update(locator.x, locator.z, heading, s)
     heading = drift.corrected(heading)
+    prev_x, prev_z, prev_confidence = locator.x, locator.z, locator.confidence
     me_x, me_z = locator.update(s, heading)
+    if teleported(prev_x, prev_z, prev_confidence, me_x, me_z):
+        # Picked up and set down somewhere else - a 5.7.1.6 return or a 5.11
+        # reposition, neither of which the protocol announces. A ball
+        # estimate built from where this robot used to be is an estimate of a
+        # ball near a robot that is no longer there.
+        ball.reset()
+        yaw.reset()
     frame.update(s, heading, me_x, me_z)
     ball.update(s, heading, me_x, me_z)
     holding = s.ball_gate.held

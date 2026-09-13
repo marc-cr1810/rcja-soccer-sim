@@ -23,12 +23,23 @@ sees white can never take a shot. The line pushes; it does not interrupt.
 **A kick-off is a strike (rule 5.4.7).** Drive at the ball and fire the kicker;
 the referee wants the ball 50 mm clear, and pushing it never gets there.
 
-**Pinned deep in your own end, lay it off.** A robot standing over the ball
-right in front of its own goal, with an opponent's shell already blocking the
-lane forward, is not "about to dribble past it" - it is one stolen touch from
-conceding. The keeper is a legal, radioed-in outlet the same way it always
-was, just rarely worth using this far back; here it is the only thing worth
-using.
+**Pinned deep in your own end, lay it off - sideways, not backward.** A robot
+standing over the ball right in front of its own goal, with an opponent's
+shell already blocking the lane forward, is not "about to dribble past it" -
+it is one stolen touch from conceding. The keeper is a legal, radioed-in
+outlet the same way it always was, just rarely worth using this far back;
+here it is the only thing worth using. But a robot that spins round to face
+its own goal and fires reads as attacking it, whatever the geometry actually
+checks out to - so this only ever fires when the keeper is enough to one
+side that the pass is a sideways lay-off, never a shot straight back at the
+own net.
+
+**Knowing when it has been picked up.** A 5.7.1.6 return or a 5.11 reposition
+teleports the robot with no word of warning in the protocol. A position fix
+jumping further than any drive on this table could manage in one tick is the
+tell, and it is treated as a reset, the same as a kick-off - a ball estimate
+built from the spot this robot used to occupy is not carried into the spot
+it is standing in now.
 """
 
 from __future__ import annotations
@@ -51,6 +62,7 @@ from rcja_soccer import (
     relay_position,
     teammate_ball,
     teammate_position,
+    teleported,
     wrap_angle,
 )
 from rcja_soccer.field import (
@@ -130,7 +142,16 @@ def think(s, me):
     heading = s.compass.heading
     drift.update(locator.x, locator.z, heading, s)
     heading = drift.corrected(heading)
+    prev_x, prev_z, prev_confidence = locator.x, locator.z, locator.confidence
     me_x, me_z = locator.update(s, heading)
+    if teleported(prev_x, prev_z, prev_confidence, me_x, me_z):
+        # Picked up and set down somewhere else - a 5.7.1.6 return or a 5.11
+        # reposition, neither of which the protocol announces. Everything
+        # tracked from the ball's own motion is now an estimate of a ball
+        # near a robot that is no longer there.
+        ball.reset()
+        yaw.reset()
+        effort.reset()
     frame.update(s, heading, me_x, me_z)
     ball.update(s, heading, me_x, me_z)
     holding = s.ball_gate.held
@@ -311,7 +332,15 @@ def think(s, me):
     # only this close to our own goal: further up the field, "blocked" is a
     # defender to dribble round, not a reason to give the ball up.
     outlet = teammate_position(s) if (holding and not lane_clear) else None
-    in_trouble = outlet is not None and frame.depth(me_x, me_z) < BACKPASS_DEPTH
+    back_heading = math.atan2(outlet[1] - me_z, outlet[0] - me_x) if outlet is not None else 0.0
+    # However safe the geometry, a robot that spins round to face its own
+    # goal and fires reads as attacking it - so this is restricted to a lay-
+    # off that is actually sideways, not just a backward pass that happens
+    # not to score. `pass_is_open`'s own-goal check still applies on top;
+    # this is about how it looks, not just whether it is safe.
+    straight_back = wrap_angle(frame.up_angle() + math.pi)
+    sideways_enough = outlet is not None and abs(wrap_angle(back_heading - straight_back)) > math.radians(40)
+    in_trouble = sideways_enough and frame.depth(me_x, me_z) < BACKPASS_DEPTH
     # Standing still holding the ball while lining this up is only worth it
     # for a moment - a lane that has not opened in getting on for a second is
     # not about to, and dribbling round the defender beats waiting forever.
@@ -323,7 +352,6 @@ def think(s, me):
         # Committed to the turn the moment the situation calls for it, the
         # same way `spin` always chases `push` above - otherwise the heading
         # never comes round to something `pass_is_open` can say yes to.
-        back_heading = math.atan2(outlet[1] - me_z, outlet[0] - me_x)
         travel_field = back_heading
         spin = spin_towards(wrap_angle(back_heading - heading), yaw)
         speed = 0.0
@@ -523,8 +551,7 @@ def say(me, state: str, distance: float | None = None) -> None:
         print(
             f"[{args.team}-{args.number} striker] {state:<14} {extra}"
             f"  at ({locator.x:7.0f},{locator.z:6.0f})"
-            f"  ball ({ball.x:7.0f},{ball.z:6.0f}) age {ball.age:.2f}"
-            f"  TRACE up=({frame.up_x:4.1f},{frame.up_z:4.1f}) my=({frame.my_x:6.0f},{frame.my_z:5.0f}) their=({frame.their_x:6.0f},{frame.their_z:5.0f}) mycol={frame.my_colour}",
+            f"  ball ({ball.x:7.0f},{ball.z:6.0f}) age {ball.age:.2f}",
             file=sys.stderr,
         )
 

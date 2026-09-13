@@ -491,6 +491,29 @@ class Locator:
         return self.x, self.z
 
 
+def teleported(
+    prev_x: float, prev_z: float, prev_confidence: float, new_x: float, new_z: float, jump: float = 300.0
+) -> bool:
+    """Whether a position fix moved further in one tick than any real drive could.
+
+    Nothing in the protocol says a robot was just picked up and set down
+    somewhere else - returned from a 5.7.1.6 removal onto a corner of its own
+    box, or moved aside for rule 5.11's multiple defence - so this is read off
+    the one thing that cannot happen by driving: the fix jumping further in a
+    single ~20 ms tick than the fastest drive on this table could cover.
+    Worth checking every tick and acting on it the way a kick-off reset does -
+    a ball estimate or a turn-rate reading from before the move is an estimate
+    of a robot that is no longer there.
+
+    `prev_confidence` guards the very first fix of all, before there is a
+    "before" to jump from - a fresh `Locator` starts at (0, 0), and its first
+    real fix is not a teleport just because it usually is not zero.
+    """
+    if prev_confidence <= 0.0:
+        return False
+    return math.hypot(new_x - prev_x, new_z - prev_z) > jump
+
+
 # ---------------------------------------------------------------- where is it
 
 
