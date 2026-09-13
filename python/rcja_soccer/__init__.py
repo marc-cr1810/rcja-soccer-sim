@@ -48,6 +48,7 @@ from .sense import (
     steer_clear_of_edges,
     teammate_ball,
     teammate_position,
+    teammate_says,
     teleported,
 )
 
@@ -79,6 +80,7 @@ __all__ = [
     "steer_clear_of_edges",
     "teammate_ball",
     "teammate_position",
+    "teammate_says",
     "teleported",
     "wrap_angle",
 ]

@@ -61,6 +61,7 @@ from rcja_soccer import (
     wrap_angle,
 )
 from rcja_soccer.field import (
+    CONTACT_RANGE,
     HALF_LENGTH,
     HALF_WIDTH,
     PENALTY_DEPTH,
@@ -237,13 +238,25 @@ def think(s, me):
         home_x, home_z = guard_x, guard_z
         home_z = clamp(me_z, -POST_CLAMP, POST_CLAMP)
         gap = math.hypot(home_x - me_x, home_z - me_z)
+        # Holding it, so the edge test has to follow the ball in the dribbler
+        # rather than the chassis - a keeper that drifts back to its spot with
+        # the ball held out in front can walk it over its own end line.
         travel = steer_clear_of_edges(
-            math.atan2(home_z - me_z, home_x - me_x), me_x, me_z, 210.0, LEASH_X, LEASH_Z
+            math.atan2(home_z - me_z, home_x - me_x),
+            me_x,
+            me_z,
+            210.0,
+            LEASH_X,
+            LEASH_Z,
+            carry=CONTACT_RANGE,
+            heading=heading,
+            attack_x=frame.up_x,
         )
         if passing:
-            say(me, "PASS" if safe else "TURN_TO_PASS")
+            state = "PASS" if safe else "TURN_TO_PASS"
         else:
-            say(me, "CLEAR" if safe else "TURN_TO_CLEAR")
+            state = "CLEAR" if safe else "TURN_TO_CLEAR"
+        say(me, state)
         return robot.motors(
             drive(
                 bearing=wrap_angle(travel - heading),
@@ -253,12 +266,7 @@ def think(s, me):
             # The roller has to let go for the kick to carry.
             dribbler=0.0 if safe else 1.0,
             kicker=safe,
-            say={
-                "role": "goalie",
-                "ball": relay_ball(bx, bz, locator.confidence),
-                "pos": relay_position(me_x, me_z, locator.confidence),
-                "held": True,
-            },
+            say=report(state, me_x, me_z, held=True),
         )
 
     # -- shoved onto the line: get back off it ------------------------------
@@ -270,12 +278,7 @@ def think(s, me):
         return robot.motors(
             drive(bearing=wrap_angle(travel - heading), speed=1.0, spin=square),
             dribbler=1.0,
-            say={
-                "role": "goalie",
-                "ball": relay_ball(bx, bz, locator.confidence),
-                "pos": relay_position(me_x, me_z, locator.confidence),
-                "held": False,
-            },
+            say=report("OFF_THE_LINE", me_x, me_z, held=False),
         )
 
     # -- loose in the box: go and get it -----------------------------------
@@ -291,16 +294,16 @@ def think(s, me):
         travel = steer_clear_of_edges(
             math.atan2(chase_z - me_z, chase_x - me_x), me_x, me_z, 210.0, LEASH_X, LEASH_Z
         )
-        say(me, "SMOTHER", math.hypot(bx - me_x, bz - me_z))
+        reach = math.hypot(bx - me_x, bz - me_z)
+        say(me, "SMOTHER", reach)
         return robot.motors(
             drive(bearing=wrap_angle(travel - heading), speed=1.0, spin=square),
             dribbler=1.0,
-            say={
-                "role": "goalie",
-                "ball": relay_ball(bx, bz, locator.confidence),
-                "pos": relay_position(me_x, me_z, locator.confidence),
-                "held": False,
-            },
+            # The one state where the net is actually empty: this keeper has
+            # left its line to go and get the ball. Saying so is what lets the
+            # striker drop in and screen the mouth instead of carrying on
+            # attacking a ball its own keeper is already committed to.
+            say=report("SMOTHER", me_x, me_z, held=False, claim=reach, off_line=True),
         )
 
     # -- otherwise: guard the line it is going to cross ---------------------
@@ -311,6 +314,41 @@ def think(s, me):
     target_x, _ = frame.from_our_goal(GUARD_DIST + step)
     state = "GUARD" if ball.speed() < 350 else "TRACK_SHOT"
     return hold(s, me, me_x, me_z, target_x, target_z, square, heading, state, bx, bz)
+
+
+def report(
+    intent: str,
+    me_x: float,
+    me_z: float,
+    held: bool,
+    claim: float | None = None,
+    off_line: bool = False,
+) -> dict:
+    """What this robot puts on the radio (rule 4.2.5).
+
+    One place, so every branch says the same things. Beyond the ball and its own
+    position, a keeper has one thing to say that nothing else on the field can
+    work out: whether it is still in front of its goal. `off_line` is that, and
+    it is the difference between a team mate that keeps attacking while the net
+    stands open and one that drops in to screen it.
+
+    The ball is sent as seen rather than with a velocity to project it by:
+    that was tried and measured worse, because a ball that has bounced since
+    the sighting is not travelling the way it was.
+    """
+    return {
+        "role": "goalie",
+        "ball": (
+            relay_ball(ball.x, ball.z, locator.confidence)
+            if ball.seen
+            else None
+        ),
+        "pos": relay_position(me_x, me_z, locator.confidence),
+        "held": held,
+        "intent": intent,
+        "claim": round(claim) if claim is not None else None,
+        "off_line": off_line,
+    }
 
 
 def intercept_z(
@@ -371,12 +409,13 @@ def hold(s, me, me_x, me_z, target_x, target_z, spin, heading, state, bx=None, b
     dx = target_x - me_x
     dz = target_z - me_z
     gap = math.hypot(dx, dz)
-    message = {
-        "role": "goalie",
-        "ball": relay_ball(bx, bz, locator.confidence),
-        "pos": relay_position(me_x, me_z, locator.confidence),
-        "held": False,
-    }
+    message = report(
+        state,
+        me_x,
+        me_z,
+        held=False,
+        claim=math.hypot(bx - me_x, bz - me_z) if bx is not None and bz is not None else None,
+    )
 
     if gap < 18.0:
         say(me, state)

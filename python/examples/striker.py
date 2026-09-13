@@ -62,13 +62,16 @@ from rcja_soccer import (
     relay_position,
     teammate_ball,
     teammate_position,
+    teammate_says,
     teleported,
     wrap_angle,
 )
 from rcja_soccer.field import (
+    CONTACT_RANGE,
     HALF_GOAL_WIDTH,
     HALF_LENGTH,
     HALF_WIDTH,
+    PENALTY_DEPTH,
     in_penalty_box,
     kick_lands_in_goal,
     shot_range,
@@ -109,6 +112,11 @@ frame = GoalFrame(TEAM)
 #: Inside the posts by enough that the ball fits and a keeper on the line has
 #: to actually move. The posts are at 225 mm.
 AIM_POST = 155.0
+
+#: How far either side of the goal centre a covering striker ever stands when
+#: it is screening an empty net. The posts are at 225 mm, so anything wider is
+#: a robot watching the shot go past it rather than standing in the way.
+POST_SCREEN = 190.0
 
 #: How far up the field counts as "deep in our own end" for a backpass - the
 #: same scale `choose_aim` uses for "too central to have a wing of its own",
@@ -237,7 +245,7 @@ def think(s, me):
             return robot.motors(
                 drive(bearing=travel, speed=0.55, spin=spin_towards(wrap_angle(frame.up_angle() - heading), yaw)),
                 dribbler=1.0,
-                say={"role": "striker", "ball": None, "pos": relay_position(me_x, me_z, locator.confidence), "held": False},
+                say=report("SEARCH", me_x, me_z, held=False),
             )
         bx, bz = told
     else:
@@ -253,9 +261,16 @@ def think(s, me):
     spin = spin_towards(wrap_angle(push - heading), yaw)
 
     # Stay out of our own box while the keeper is working it (rule 5.11).
+    #
+    # `off_line` is the part that matters. A keeper that has gone out to smother
+    # a loose ball has left the net open behind it, and until now nothing at all
+    # stood in front of that net - this robot carried on attacking a ball its own
+    # keeper was already committed to. Hearing it said, the cover drops onto the
+    # line between the ball and our goal instead of the loose screening spot.
     keeper_active = teammate_is_keeping(s)
+    keeper_off_line = bool(teammate_says(s, "off_line", False))
     if keeper_active and in_penalty_box(bx, bz, frame.my_colour, slack=60.0) and not holding:
-        return cover(s, me, me_x, me_z, bz, heading, spin, frame)
+        return cover(s, me, me_x, me_z, bz, heading, spin, frame, keeper_off_line)
 
     # -- curve round behind it, then drive through it ----------------------
     # Keep the push on the field. Most of the balls that go out in a match are
@@ -266,6 +281,7 @@ def think(s, me):
 
     range_to_ball = math.hypot(bx - me_x, bz - me_z)
     to_ball = math.atan2(bz - me_z, bx - me_x)
+
 
     # One number decides the whole approach: how far round the ball the robot
     # is from where it ought to be. Zero means it is directly behind the ball
@@ -305,7 +321,20 @@ def think(s, me):
     speed = 1.0 if (holding or aligned) else clamp(1.15 - abs(swing) * 0.35, 0.6, 1.0)
 
     # The edges, as a force. Zero in open play, decisive on the line.
-    travel_field = steer_clear_of_edges(travel_field, me_x, me_z, 190.0 if holding else 150.0)
+    #
+    # While the ball is in the dribbler the thing that has to stay on the field
+    # is the ball, not the chassis - it rides a robot's radius in front, so a
+    # robot that keeps only itself inside the touchline dribbles the ball over
+    # it and hands back possession on a rule 5.9.2 neutral point.
+    travel_field = steer_clear_of_edges(
+        travel_field,
+        me_x,
+        me_z,
+        190.0 if holding else 150.0,
+        carry=CONTACT_RANGE if holding else 0.0,
+        heading=heading,
+        attack_x=frame.up_x,
+    )
     if not holding and keeper_active:
         travel_field = leave_room_for_the_keeper(travel_field, me_x, me_z, frame)
 
@@ -370,7 +399,10 @@ def think(s, me):
             # sideways while it does.
             side = -1.0 if me_z > 0 else 1.0
             travel_field = wrap_angle(push + side * 1.15)
-            travel_field = steer_clear_of_edges(travel_field, me_x, me_z, 190.0)
+            travel_field = steer_clear_of_edges(
+                travel_field, me_x, me_z, 190.0,
+                carry=CONTACT_RANGE, heading=heading, attack_x=frame.up_x,
+            )
             speed = 0.9
             state = "DRIBBLE_ROUND"
         elif reach is not None:
@@ -392,13 +424,40 @@ def think(s, me):
         drive(bearing=wrap_angle(travel_field - heading), speed=speed, spin=spin),
         dribbler=dribbler,
         kicker=kick,
-        say={
-            "role": "striker",
-            "ball": relay_ball(bx, bz, locator.confidence),
-            "pos": relay_position(me_x, me_z, locator.confidence),
-            "held": holding,
-        },
+        say=report(state, me_x, me_z, held=holding, claim=range_to_ball),
     )
+
+
+def report(
+    intent: str, me_x: float, me_z: float, held: bool, claim: float | None = None
+) -> dict:
+    """What this robot puts on the radio (rule 4.2.5).
+
+    One place, so every branch says the same things and a branch cannot quietly
+    stop saying one of them. Three kinds of thing go on the wire:
+
+    - **What it can see.** The ball - only first-hand sightings, because
+      relaying back what the other robot just told us would turn one stale
+      reading into a loop of them.
+    - **Where it is.** For aiming a pass at the robot rather than at its last
+      ball sighting.
+    - **What it is doing.** `intent` and `claim` - the state it is in and how
+      far it is from the ball. Position says where a robot is; those two say
+      what it is about to do about it, which is the thing the other robot cannot
+      work out for itself and the thing it needs to not duplicate the effort.
+    """
+    return {
+        "role": "striker",
+        "ball": (
+            relay_ball(ball.x, ball.z, locator.confidence)
+            if ball.seen
+            else None
+        ),
+        "pos": relay_position(me_x, me_z, locator.confidence),
+        "held": held,
+        "intent": intent,
+        "claim": round(claim) if claim is not None else None,
+    }
 
 
 def leave_room_for_the_keeper(
@@ -471,18 +530,30 @@ def choose_aim(
     return frame.their_x, clamp(post, -HALF_GOAL_WIDTH + 70, HALF_GOAL_WIDTH - 70)
 
 
-def cover(s, me, me_x, me_z, bz, heading, spin, frame: GoalFrame):
+def cover(s, me, me_x, me_z, bz, heading, spin, frame: GoalFrame, guard_mouth: bool = False):
     """Wait outside our own box while the keeper deals with it.
 
     Rule 5.11 makes two robots defending one goal a call the referee has to
     make, and the keeper is better placed than we are. Sit on the edge of the
     box, square on, ready for the clearance.
+
+    `guard_mouth` is the keeper saying it has left its line. The net behind it
+    is open, so the waiting spot tightens onto the mouth: closer in, and clamped
+    to the posts rather than wandering 300 mm either side of them, which is wide
+    enough to watch a shot go past. Still *outside* the box - the whole point of
+    waiting here is that rule 5.11.1 is about two robots inside it, and the
+    referee's remedy is to pick one of them up.
     """
-    wait_x, _ = frame.from_our_goal(390.0)
-    wait_z = clamp(bz * 0.6, -300.0, 300.0)
+    if guard_mouth:
+        wait_x, _ = frame.from_our_goal(PENALTY_DEPTH + 40.0)
+        wait_z = clamp(bz * 0.5, -POST_SCREEN, POST_SCREEN)
+    else:
+        wait_x, _ = frame.from_our_goal(390.0)
+        wait_z = clamp(bz * 0.6, -300.0, 300.0)
     gap = math.hypot(wait_x - me_x, wait_z - me_z)
     travel = math.atan2(wait_z - me_z, wait_x - me_x)
-    say(me, "COVER")
+    state = "COVER_MOUTH" if guard_mouth else "COVER"
+    say(me, state)
     return robot.motors(
         drive(
             bearing=wrap_angle(travel - heading),
@@ -490,7 +561,7 @@ def cover(s, me, me_x, me_z, bz, heading, spin, frame: GoalFrame):
             spin=spin,
         ),
         dribbler=1.0,
-        say={"role": "striker", "ball": None, "held": False},
+        say=report(state, me_x, me_z, held=False),
     )
 
 
@@ -533,11 +604,22 @@ def unstick(s, me, me_x, me_z, travel, speed, spin, state, push, holding):
 
 
 def teammate_is_keeping(s) -> bool:
-    for message in getattr(s, "messages", []):
-        body = getattr(message, "body", None)
-        if isinstance(body, dict) and body.get("role") == "goalie":
-            return True
-    return False
+    """Whether the other robot is playing as the keeper.
+
+    Read through `teammate_says` rather than by hand. A message body arrives as
+    a `Reading`, not a `dict` - `Reading` exists to let `s.camera.goals.yellow`
+    read the way it is written on paper - so the obvious `isinstance(body, dict)
+    and body.get("role")` is False for every message ever sent, and this
+    returned False for the whole of every match.
+
+    Nothing announced that. It just quietly switched off every behaviour that
+    depended on knowing the keeper was there: staying out of our own box while
+    the keeper works it (`cover`), and leaving it room when we are in there
+    anyway (`leave_room_for_the_keeper`, which is rule 5.11.1 avoidance). Two
+    robots defending one goal is a call the referee has to make, and we were
+    making it easy.
+    """
+    return teammate_says(s, "role") == "goalie"
 
 
 def say(me, state: str, distance: float | None = None) -> None:

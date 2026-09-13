@@ -44,6 +44,7 @@ from .drive import clamp, wrap_angle
 from .field import (
     BALL_RADIUS,
     CONTACT_RANGE,
+    HALF_GOAL_WIDTH,
     HALF_LENGTH,
     HALF_WIDTH,
     MOUNT_RADIUS,
@@ -253,8 +254,8 @@ def spin_towards(error: float, yaw: "YawRate | GyroRate", kp: float = 1.4, kd: f
     return clamp(error * kp - yaw.rate * kd, -1.0, 1.0)
 
 
-def _teammate_said(s, key: str) -> list | None:
-    """The most recent list under `key` in a message from the team mate.
+def _teammate_said(s, key: str) -> object | None:
+    """The freshest value under `key` from the team mate.
 
     `message.body` is read through `Reading.__getattr__` the same as every
     other nested field, which wraps a dict into another `Reading` rather than
@@ -262,15 +263,47 @@ def _teammate_said(s, key: str) -> list | None:
     any `Reading`, by `in` and by attribute, and never by the `.get()` a
     plain dict would answer to. A body that is not a `Reading` at all (no
     message this tick has one) is skipped rather than raising.
+
+    **Freshest, not first.** The link holds every packet sent inside its 0.4 s
+    memory and hands them over oldest first, so taking the first match took the
+    *stalest* reading in the window rather than the newest - up to 0.4 s out of
+    date, which at the speed a struck ball travels is most of a metre. Both
+    robots were steering by it.
+
+    Freshness is the whole of the fix, and it is nearly all of what there is to
+    win. Measured over three matches, 95% of the packets a robot reads are less
+    than 50 ms old, and at that age a relayed sighting is already within about
+    100 mm of the ball. Carrying it forward by its own age using a relayed
+    velocity was tried and made it worse at every age band that was old enough
+    for the projection to do anything - 829 mm of error became 959 mm on the
+    oldest packets - because a ball that bounced since the sighting is not
+    traveling the way it was, and a confident wrong answer beats an honestly
+    stale one only when the thing being predicted holds still.
     """
+    best: object | None = None
+    best_age: float | None = None
     for message in getattr(s, "messages", []):
         body = getattr(message, "body", None)
         if body is None or key not in body:
             continue
         value = getattr(body, key)
-        if isinstance(value, list):
-            return value
-    return None
+        if value is None:
+            continue
+        age = float(getattr(message, "age", 0.0) or 0.0)
+        if best_age is None or age < best_age:
+            best, best_age = value, age
+    return best
+
+
+def teammate_says(s, key: str, default=None):
+    """Whatever the team mate last broadcast under `key`, freshest first.
+
+    The general form of `teammate_ball` and `teammate_position`, for the parts
+    of a message that are a single value rather than a coordinate pair: what
+    the other robot is *doing*, rather than what it can see.
+    """
+    value = _teammate_said(s, key)
+    return default if value is None else value
 
 
 def teammate_ball(s) -> tuple[float, float] | None:
@@ -281,11 +314,14 @@ def teammate_ball(s) -> tuple[float, float] | None:
     the commonest way to lose the ball, not the rarest. The link expires a
     message after 0.4 seconds, so whatever comes back here is recent by
     construction.
+
+    Taken as sent, not projected forward - see `_teammate_said` for the
+    measurement that settled it.
     """
     spot = _teammate_said(s, "ball")
-    if spot is not None and len(spot) == 2:
-        return float(spot[0]), float(spot[1])
-    return None
+    if not isinstance(spot, list) or len(spot) < 2:
+        return None
+    return float(spot[0]), float(spot[1])
 
 
 def relay_ball(bx: float | None, bz: float | None, confidence: float) -> list[float] | None:
@@ -296,6 +332,10 @@ def relay_ball(bx: float | None, bz: float | None, confidence: float) -> list[fl
     apart. `bx`/`bz` are usually built from this robot's own `me_x, me_z` at
     the moment of sighting, so a bad position fix produces a bad ball estimate
     that would otherwise be handed to the other robot as if it were reliable.
+
+    A position and nothing else. Sending the velocity too, so the receiver
+    could age the sighting forward, was tried and measured worse - the note on
+    `_teammate_said` has the numbers.
     """
     if bx is None or bz is None or confidence < 1.0:
         return None
@@ -323,9 +363,9 @@ def teammate_position(s) -> tuple[float, float] | None:
     other half of `teammate_ball`, for passing rather than for finding.
     """
     spot = _teammate_said(s, "pos")
-    if spot is not None and len(spot) == 2:
-        return float(spot[0]), float(spot[1])
-    return None
+    if not isinstance(spot, list) or len(spot) < 2:
+        return None
+    return float(spot[0]), float(spot[1])
 
 
 def pass_is_open(
@@ -756,6 +796,12 @@ def keep_inside(x: float, z: float, margin: float = 150.0) -> tuple[float, float
 EDGE_STOP_Z = HALF_WIDTH - 25.0
 EDGE_STOP_X = HALF_LENGTH + 15.0
 
+#: The same two stops, for a ball being carried rather than for the chassis.
+#: Both are inside the line by the ball's own radius, because rule 5.9.1 tests
+#: the ball's centre and a ball sitting exactly on the line is already out.
+BALL_STOP_Z = HALF_WIDTH - BALL_RADIUS
+BALL_STOP_X = HALF_LENGTH - BALL_RADIUS
+
 
 def steer_clear_of_edges(
     travel: float,
@@ -764,6 +810,9 @@ def steer_clear_of_edges(
     margin: float = 150.0,
     stop_x: float = EDGE_STOP_X,
     stop_z: float = EDGE_STOP_Z,
+    carry: float = 0.0,
+    heading: float = 0.0,
+    attack_x: float | None = None,
 ) -> float:
     """Bend a direction of travel away from the boundary, and then forbid it.
 
@@ -791,7 +840,43 @@ def steer_clear_of_edges(
     out area, and is removed for thirty seconds. That is not a near miss; it
     is the most expensive thing on the field, and it happens to a robot that
     was only doing what it was told.
+
+    `carry` says the robot is holding the ball, and everything above is then
+    applied to the ball instead of to the chassis. Without it both mechanisms
+    protect the wrong object: the ball rides in the dribbler about 130 mm in
+    front of the robot's centre, so a robot steering itself neatly inside the
+    touchline walks the ball straight over it, and the absolute stop never
+    fires because the robot itself was legal the whole way. That is not a rare
+    corner - it was the single commonest way this striker lost possession,
+    worth roughly eleven rule 5.9.2 restarts a match.
     """
+    if carry > 0.0:
+        # Along the *heading*, not along `travel`: an omni drive travels
+        # sideways while still facing up the field, and the ball stays in
+        # front of the dribbler rather than in front of the motion.
+        ball_x = x + math.cos(heading) * carry
+        ball_z = z + math.sin(heading) * carry
+        z = ball_z
+        stop_z = min(stop_z, BALL_STOP_Z)
+        # The end line is not symmetric with the touchline: the chassis stop
+        # deliberately sits *outside* it, because the goal mouth is outside it
+        # and a striker that will not cross the goal line cannot score. Pushing
+        # the ball over the end line is out of play only where there is no
+        # mouth to go into, so the ball takes over that test only when it is
+        # lined up on the woodwork rather than on the opening.
+        #
+        # And only at the end actually being attacked, when the caller says
+        # which that is. There is a mouth at both ends, but putting the ball
+        # through the near one is a goal and putting it through your own is at
+        # best a restart - so exempting both ends buys one goal and pays for it
+        # with a stream of balls walked over our own end line.
+        in_mouth = abs(ball_z) <= HALF_GOAL_WIDTH - BALL_RADIUS
+        if attack_x is not None and ball_x * attack_x <= 0:
+            in_mouth = False
+        if not in_mouth:
+            x = ball_x
+            stop_x = min(stop_x, BALL_STOP_X)
+
     wx = math.cos(travel)
     wz = math.sin(travel)
 
@@ -858,10 +943,19 @@ def push_keeps_ball_in(ball_x: float, ball_z: float, push: float, reach: float =
     The ball leaving the playing area is rule 5.9's business and it costs a
     neutral-point restart. Most of those are not wild shots — they are a robot
     steadily dribbling the ball over a touchline it never looked at.
+
+    Only the far end of the push is tested, because the playing area is a
+    rectangle: a straight line that starts inside it and ends inside it never
+    left it in between.
+
+    "Inside" means inside by the ball's own radius. Rule 5.9.1 tests the
+    centre, so a push that parks the ball exactly on the line has not kept it
+    in play, it has put it out by a rounding error - and the ball is still
+    rolling when it gets there.
     """
     return (
-        abs(ball_x + math.cos(push) * reach) <= HALF_LENGTH
-        and abs(ball_z + math.sin(push) * reach) <= HALF_WIDTH
+        abs(ball_x + math.cos(push) * reach) <= HALF_LENGTH - BALL_RADIUS
+        and abs(ball_z + math.sin(push) * reach) <= HALF_WIDTH - BALL_RADIUS
     )
 
 

@@ -71,6 +71,7 @@ export interface RobotTelemetry {
   team: TeamId;
   /** Whether this robot is one of the programs under test. */
   tested: boolean;
+  /** Mean distance up the field towards the goal this robot's team attacks. */
   meanX: number;
   meanZ: number;
   /** Per cent of the match with the ball against the dribbler. */
@@ -161,6 +162,7 @@ export interface KickTelemetry {
 }
 
 export interface BallTelemetry {
+  /** Mean distance up the field towards the goal the tested side attacks. */
   meanX: number;
   inTestedAttackThird: number;
   inTestedOwnThird: number;
@@ -355,12 +357,27 @@ class Sampler {
     trace: string[];
   } | null = null;
 
-  constructor(private readonly attackSign: number) {}
+  constructor(private readonly testedSide: TeamId) {}
+
+  /**
+   * Which way is "up the field" for this team, right now.
+   *
+   * Not a constant, and this is the whole point: rule 1.4/5.4 swaps the ends at
+   * half-time, so a fixed `violet ? 1 : -1` names a direction on the carpet
+   * rather than a direction of attack, and is wrong for the entire second half.
+   * Taking it per tick from the world is what makes "the attacking third" mean
+   * the same thing in both halves — otherwise a keeper that never leaves its
+   * own goal measures as spending half the match in the opposition's.
+   */
+  private attackSignFor(world: World, team: TeamId): number {
+    return world.attackingGoal(team) === 'yellow' ? 1 : -1;
+  }
 
   step(match: Match): void {
     const world = match.world;
     if (!world.running) return;
     const ball = world.ball;
+    const testedSign = this.attackSignFor(world, this.testedSide);
 
     // Referee calls, read out of a ring buffer that drops its oldest entries,
     // so identity rather than an index is what says whether one is new.
@@ -406,9 +423,11 @@ class Sampler {
     this.trackKick(match);
 
     this.ballSamples++;
-    this.ballX += ball.x;
-    if (ball.x * this.attackSign > THIRD) this.ballAttack++;
-    if (ball.x * this.attackSign < -THIRD) this.ballOwn++;
+    // Signed towards the goal under attack, not towards +x, so the two halves
+    // average together instead of cancelling out.
+    this.ballX += ball.x * testedSign;
+    if (ball.x * testedSign > THIRD) this.ballAttack++;
+    if (ball.x * testedSign < -THIRD) this.ballOwn++;
 
     for (const robot of world.robots) {
       const acc = this.robots.get(robot.id) ?? blank(robot.x, robot.z);
@@ -418,7 +437,7 @@ class Sampler {
         continue;
       }
       acc.samples++;
-      acc.x += robot.x;
+      acc.x += robot.x * this.attackSignFor(world, robot.team);
       acc.z += robot.z;
       const gap = Math.hypot(ball.x - robot.x, ball.z - robot.z);
       if (gap < robot.radius + ball.radius + NEAR_BALL) acc.nearBall++;
@@ -458,7 +477,7 @@ class Sampler {
       acc.travelled += Math.hypot(robot.x - acc.lastX, robot.z - acc.lastZ);
       acc.lastX = robot.x;
       acc.lastZ = robot.z;
-      const sign = robot.team === 'violet' ? 1 : -1;
+      const sign = this.attackSignFor(world, robot.team);
       if (robot.x * sign > THIRD) acc.attackThird++;
       if (robot.x * sign < -THIRD) acc.ownThird++;
 
@@ -733,7 +752,6 @@ export async function runBench(
   const seats = seatsFor(opts.team);
   const testedSide: TeamId = opts.team === 'both' ? 'violet' : opts.team;
   const otherSide: TeamId = testedSide === 'violet' ? 'lime' : 'violet';
-  const attackSign = testedSide === 'violet' ? 1 : -1;
 
   const server = new MatchServer({
     port: opts.port,
@@ -761,7 +779,7 @@ export async function runBench(
     const slotReports: Record<string, { missed: number; worstRun: number; errors: number }> = {};
 
     for (const seed of opts.seeds) {
-      const sampler = new Sampler(attackSign);
+      const sampler = new Sampler(testedSide);
       samplers.push(sampler);
 
       const agents = {
@@ -1141,7 +1159,7 @@ function diagnose(r: BenchResult): Finding[] {
         severity: 'medium',
         subject: striker.id,
         code: 'never-attacks',
-        message: `in the attacking third only ${striker.attackThird}% of the match (mean x ${striker.meanX} mm).`,
+        message: `in the attacking third only ${striker.attackThird}% of the match (${striker.meanX} mm up the field on average).`,
       });
     }
   }
@@ -1163,7 +1181,7 @@ function diagnose(r: BenchResult): Finding[] {
         severity: 'medium',
         subject: keeper.id,
         code: 'wandering-keeper',
-        message: `in the attacking third ${keeper.attackThird}% of the match (mean x ${keeper.meanX} mm).`,
+        message: `in the attacking third ${keeper.attackThird}% of the match (${keeper.meanX} mm up the field on average).`,
         advice:
           'The goal it left is bigger than the ball it is chasing. A keeper that ' +
           'dribbles its own clearance up the field is a keeper that is not in goal.',
@@ -1369,7 +1387,7 @@ export function formatBench(r: BenchResult, baseline?: BenchResult): string {
       `   (${r.ball.overSideline} sideline, ${r.ball.overEndline} end line, ${r.ball.outWhileFast} while travelling fast)`,
   );
   out.push(
-    `  ball mean x:         ${r.ball.meanX} mm   in your attacking third ${r.ball.inTestedAttackThird}%` +
+    `  ball up-field:       ${r.ball.meanX} mm   in your attacking third ${r.ball.inTestedAttackThird}%` +
       `   in your own ${r.ball.inTestedOwnThird}%`,
   );
 
@@ -1388,7 +1406,7 @@ export function formatBench(r: BenchResult, baseline?: BenchResult): string {
 
   // -- per robot ------------------------------------------------------------
   out.push('');
-  out.push(row('', 'poss%', 'near%', 'attack%', 'own%', 'out%', 'stall%', 'mean x'));
+  out.push(row('', 'poss%', 'near%', 'attack%', 'own%', 'out%', 'stall%', 'up-field'));
   for (const id of Object.keys(r.robots).sort()) {
     const q = r.robots[id]!;
     const mark = q.tested ? '*' : ' ';

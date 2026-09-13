@@ -165,6 +165,29 @@ describe('what the bench measures', () => {
     expect(finding.advice).toBeTruthy();
   }, 40000);
 
+  it('measures the attacking third the same way in both halves', async () => {
+    /*
+     * Rule 1.4/5.4 swaps the ends at half-time, so which way is "up the field"
+     * is a property of the half, not of the team. The harness used to decide it
+     * once per match from the team colour, which made every second-half sample
+     * come out backwards: a keeper that never left its own goal measured as
+     * spending half the match in the opposition's third, and the harness
+     * reported a wandering keeper that was standing perfectly still.
+     *
+     * Both sides park, so nothing moves all match and the only thing that can
+     * move these numbers is the sign.
+     */
+    const result = await local('statue', `node -e "${inlineAgent(0, 0)}" -- {url}`);
+    const keeper = result.robots['violet-2']!;
+    expect(keeper.ownThird).toBeGreaterThan(60);
+    expect(keeper.attackThird).toBeLessThan(5);
+    // And "up-field" is signed towards the goal being attacked, so a keeper
+    // sitting on its own line reads as deeply negative rather than averaging
+    // the two halves out to nothing.
+    expect(keeper.meanX).toBeLessThan(-300);
+    expect(result.findings.map((f) => f.code)).not.toContain('wandering-keeper');
+  }, 40000);
+
   it('notices a program that never answers', async () => {
     // A program that connects and then says nothing is the commonest way a
     // robot is broken, and it looks exactly like a robot that is very slow.
