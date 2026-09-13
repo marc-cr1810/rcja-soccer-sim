@@ -57,6 +57,7 @@ from rcja_soccer import (
     relay_position,
     teammate_ball,
     teammate_position,
+    teammate_says,
     teleported,
     wrap_angle,
 )
@@ -97,6 +98,12 @@ robot = Robot(team=args.team, number=args.number, name=args.name, token=args.tok
 #: no ref-fed attack direction is involved.
 TEAM = args.team
 frame = GoalFrame(TEAM)
+
+#: How long the keeper will hold the ball waiting for the striker to get open,
+#: in ticks of a 50 Hz loop. About a second and a half: long enough for a
+#: striker most of the way across its own half to arrive and turn, short enough
+#: that the scrum clock in 5.6.1.2 rarely gets started.
+PASS_PATIENCE = 75
 
 #: How far off the goal line to guard. Far enough forward to cut the angle down
 #: and to keep clear of rule 5.7.1.2's goal area, which starts at 965 mm; close
@@ -230,9 +237,28 @@ def think(s, me):
         # tick the same way the wing clearance's `safe` does below.
         outlet = teammate_position(s)
         passing = outlet is not None and frame.depth(*outlet) > frame.depth(me_x, me_z) + 250.0
+
+        # A pass wants a RECEIVER, not merely a team mate who happens to be up
+        # the field. The striker says `ready` once it is both somewhere useful
+        # and facing this way, and until it does the ball is held.
+        #
+        # Not indefinitely. Holding the ball is not itself a lack-of-progress
+        # call - rule 5.6.1.1 wants the nearest robot 400 mm away and a keeper
+        # with the ball is at zero, and 5.6.1.2 wants robots from BOTH teams on
+        # it. That second one is the way this bites: a keeper sitting on the
+        # ball invites an opponent over, and the moment one is touching it too
+        # the four-second scrum clock starts. Measured, waiting costs about 0.2
+        # extra calls a match. So when the patience runs out this goes back to
+        # being an ordinary clearance.
+        mate_ready = bool(teammate_says(s, "ready", False))
+        waited = me.get("pass_wait", 0) + 1 if passing else 0
+        me.pass_wait = waited
+        if passing and not mate_ready and waited > PASS_PATIENCE:
+            passing = False
+
         if passing:
             aim = math.atan2(outlet[1] - me_z, outlet[0] - me_x)
-            safe = pass_is_open(s, heading, me_x, me_z, *outlet)
+            safe = pass_is_open(s, heading, me_x, me_z, *outlet) and mate_ready
         else:
             aim = clearance_heading(me_x, me_z, frame.up_x, frame.up_z)
             blocker = obstacle_range(s, heading, me_x, me_z)

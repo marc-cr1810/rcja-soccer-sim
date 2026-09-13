@@ -87,6 +87,7 @@ from rcja_soccer.sense import (
     Locator,
     WheelEffort,
     back_inside,
+    keep_inside,
     obstacle_range,
     spin_towards,
     steer_ball_inside,
@@ -120,6 +121,15 @@ AIM_POST = 155.0
 #: it is screening an empty net. The posts are at 225 mm, so anything wider is
 #: a robot watching the shot go past it rather than standing in the way.
 POST_SCREEN = 190.0
+
+#: Where a striker stands to take a pass from its own keeper.
+#:
+#: Far enough up the field that the keeper will actually play it - the keeper
+#: refuses any outlet that is not a genuine advance - clear of our own penalty
+#: box so rule 5.11 never enters into it, and out on a wing, because a ball
+#: played up the middle is played through everybody.
+RECEIVE_DEPTH = PENALTY_DEPTH + 520.0
+RECEIVE_WING = HALF_WIDTH * 0.55
 
 #: How far up the field counts as "deep in our own end" for a backpass - the
 #: same scale `choose_aim` uses for "too central to have a wing of its own",
@@ -241,6 +251,17 @@ def think(s, me):
             ),
             dribbler=1.0,
         )
+
+    # -- our keeper wants to pass -------------------------------------------
+    # It announces the pass on the radio and nothing was listening, so the
+    # keeper aimed at a robot busy orbiting the ball the keeper was holding.
+    if (
+        not holding
+        and teammate_is_keeping(s)
+        and teammate_says(s, "held", False)
+        and teammate_says(s, "intent") in ("PASS", "TURN_TO_PASS")
+    ):
+        return receive(s, me, me_x, me_z, heading, yaw, frame)
 
     # -- no ball ------------------------------------------------------------
     if not ball.seen:
@@ -471,7 +492,12 @@ def think(s, me):
 
 
 def report(
-    intent: str, me_x: float, me_z: float, held: bool, claim: float | None = None
+    intent: str,
+    me_x: float,
+    me_z: float,
+    held: bool,
+    claim: float | None = None,
+    ready: bool = False,
 ) -> dict:
     """What this robot puts on the radio (rule 4.2.5).
 
@@ -499,7 +525,55 @@ def report(
         "held": held,
         "intent": intent,
         "claim": round(claim) if claim is not None else None,
+        "ready": ready,
     }
+
+
+def receive(s, me, me_x, me_z, heading, yaw, frame):
+    """Get open for the keeper's pass, and say so once we are.
+
+    The keeper aims its outlet at wherever this robot happens to be standing.
+    Until now that was usually a robot orbiting the very ball the keeper was
+    holding, so the pass went into the keeper's own feet or straight to an
+    opponent. A pass nobody is waiting for is a giveaway with extra steps.
+
+    Two things have to be true before it is worth playing, and the keeper can
+    see neither for itself: this robot has to be somewhere useful, and it has
+    to be *facing* the keeper, because a dribbler only catches what arrives in
+    front of it. `ready` says both, and the keeper holds until it hears it.
+    """
+    keeper = teammate_position(s)
+
+    # Up the field from our own goal, out on the wing this robot is already
+    # nearer. The tie-break comes from the frame rather than a fixed sign, so
+    # the two ends of the field stay the same game.
+    cx, cz = frame.from_our_goal(RECEIVE_DEPTH)
+    wing = math.copysign(RECEIVE_WING, me_z if abs(me_z) > 60 else frame.up_x)
+    spot_x, spot_z = keep_inside(cx - frame.up_z * wing, cz + frame.up_x * wing, 200.0)
+
+    gap = math.hypot(spot_x - me_x, spot_z - me_z)
+    travel = math.atan2(spot_z - me_z, spot_x - me_x)
+
+    # Face the keeper, not the spot being driven to: the ball arrives from the
+    # keeper, and a dribbler pointing anywhere else will not take it.
+    face = (
+        math.atan2(keeper[1] - me_z, keeper[0] - me_x)
+        if keeper is not None
+        else wrap_angle(frame.up_angle() + math.pi)
+    )
+    error = wrap_angle(face - heading)
+    ready = gap < 150.0 and abs(error) < 0.35
+
+    say(me, "RECEIVE")
+    return robot.motors(
+        drive(
+            bearing=wrap_angle(travel - heading),
+            speed=0.0 if gap < 70.0 else clamp(gap / 260.0, 0.3, 1.0),
+            spin=spin_towards(error, yaw),
+        ),
+        dribbler=1.0,
+        say=report("RECEIVE", me_x, me_z, held=False, ready=ready),
+    )
 
 
 def leave_room_for_the_keeper(
