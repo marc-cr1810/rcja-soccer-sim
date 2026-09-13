@@ -37,6 +37,7 @@ const out = spots.map(([x, z, heading]) => {
     view,
     self,
     wheelSpeeds: [0, 0, 0, 0],
+    omega: 0,
     held: false,
     messages: [],
     attackDirection: 1,

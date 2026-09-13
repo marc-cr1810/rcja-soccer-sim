@@ -205,13 +205,14 @@ export function readIr(
 // ------------------------------------------------------------------- compass
 
 /**
- * Compass and gyro, fused the way a team would fuse them.
+ * The heading a fused compass+gyro would give a team - not the raw gyro
+ * itself, see `GyroState` below for that.
  *
- * The error that matters is not the noise, it is the drift: a gyro integrated
- * over a five-minute half walks away from north, and a robot that trusts it
- * blindly ends up defending the wrong goal. Slow enough to be invisible in
- * testing and fast enough to matter by the end of a half, which is exactly the
- * bug teams actually hit.
+ * The error that matters is not the noise, it is the drift: a heading
+ * integrated from a gyro over a five-minute half walks away from north, and a
+ * robot that trusts it blindly ends up defending the wrong goal. Slow enough
+ * to be invisible in testing and fast enough to matter by the end of a half,
+ * which is exactly the bug teams actually hit.
  */
 const COMPASS_NOISE = 0.012;
 /**
@@ -244,6 +245,56 @@ export class CompassState {
       return wrapAngle(heading);
     }
     return wrapAngle(heading + this.drift + noise.gaussian(COMPASS_NOISE));
+  }
+}
+
+// --------------------------------------------------------------------- gyro
+
+/**
+ * The raw gyroscope, unfused with anything.
+ *
+ * Unlike the compass, this is a rate, not an angle, and a rate does not
+ * drift the way an angle does - there is nothing here to wrap. What it has
+ * instead is a bias that wanders, the way a cheap MEMS gyro's zero-rate
+ * output actually does. Read every tick as an instantaneous rate - a damping
+ * term, say - and the bias barely matters; it is a small constant offset on
+ * a number nothing ever accumulates. Integrate it into a heading, the way a
+ * strategy might integrate the compass, and the bias compounds every tick
+ * instead of being bounded by one: over a five-minute half that is a heading
+ * error worse than the compass ever produces, from a sensor that looked
+ * perfectly steady in a thirty-second test.
+ */
+const GYRO_NOISE = 0.05;
+/**
+ * Tuned, the same way `DRIFT_RATE` was, by running it out over many seeds: a
+ * thirty-second test walks the bias about two and a half degrees if
+ * integrated, invisible next to the noise on any one reading. A five-minute
+ * half walks it close to sixty degrees on average, and past a full
+ * half-turn on an unlucky seed - both several times worse than the compass
+ * ever gets, which is the point: read the rate directly, the way `sense.py`'s
+ * `YawRate` reads the encoders, and none of this is ever felt.
+ */
+const GYRO_BIAS_DRIFT_RATE = 0.0004;
+
+export class GyroState {
+  bias = 0;
+  private target = 0;
+
+  step(dt: number, noise: Noise, ideal = false): void {
+    if (ideal) {
+      this.bias = 0;
+      this.target = 0;
+      return;
+    }
+    this.target += noise.gaussian(GYRO_BIAS_DRIFT_RATE * 8) * dt;
+    this.bias += (this.target - this.bias) * Math.min(1, dt * 0.5);
+  }
+
+  read(trueOmega: number, noise: Noise, ideal = false): number {
+    if (ideal) {
+      return trueOmega;
+    }
+    return trueOmega + this.bias + noise.gaussian(GYRO_NOISE);
   }
 }
 

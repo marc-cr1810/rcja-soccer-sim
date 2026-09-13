@@ -232,6 +232,7 @@ function syntheticFrame(robotNumber: number) {
     },
     self,
     wheelSpeeds: [0, 0, 0, 0],
+    omega: 0,
     held: false,
     messages: [],
     attackDirection: 1,

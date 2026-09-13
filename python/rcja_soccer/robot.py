@@ -31,7 +31,7 @@ from .drive import coast as _coast
 #: The wire contract this library speaks. The server refuses a mismatch, which
 #: is a season boundary rather than a typo: the frame shape changed and this
 #: program was written against the old one.
-PROTOCOL_VERSION = 2
+PROTOCOL_VERSION = 3
 
 DEFAULT_URL = "ws://localhost:8080/agent"
 

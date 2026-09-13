@@ -335,6 +335,7 @@ export class Match {
         view,
         self: { id: robot.id, team: robot.team, number, x: robot.x, z: robot.z, heading: robot.heading },
         wheelSpeeds: robot.wheelSpeeds,
+        omega: robot.omega,
         held,
         messages: this.world.commsEnabled ? this.radios[robot.team].deliver(number, this.world.clock) : [],
         attackDirection: this.world.attackingGoal(robot.team) === 'yellow' ? 1 : -1,

@@ -14,7 +14,7 @@
  */
 
 /** Protocol version. Bumped when a frame changes shape; the server refuses a mismatch. */
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 
 /** What the infrared ring can see of the ball. Null when nothing is detected. */
 export interface BallReading {
@@ -30,6 +30,20 @@ export interface BallReading {
 /** Heading from the compass, in FIELD radians: 0 faces the yellow goal. */
 export interface CompassReading {
   heading: number;
+}
+
+/**
+ * Angular velocity from the gyroscope, radians/second. Positive turns the
+ * same way a positive heading change does - towards the robot's left.
+ *
+ * A direct rate measurement, not an angle: it does not drift the way a
+ * heading does, because nothing is ever integrated on the sensor itself.
+ * It still has a bias that wanders (see `GyroState` in sensors.ts), and that
+ * bias only costs a program anything once the program integrates the rate
+ * into a heading of its own - which is a worse bet than it looks.
+ */
+export interface GyroReading {
+  rate: number;
 }
 
 /**
@@ -127,6 +141,7 @@ export interface SensorFrame {
 
   ball: BallReading | null;
   compass: CompassReading;
+  gyro: GyroReading;
   lines: LineReading[];
   range: RangeReading;
   /** Accumulated wheel rotation per motor, radians. Drifts, by design. */

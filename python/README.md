@@ -81,6 +81,7 @@ ball position and no map: a real robot does not have those, so neither do you.
 |---|---|
 | `s.ball` | `.bearing` and `.strength`, or **`None`**. See below. |
 | `s.compass.heading` | Your heading in field terms. 0 faces the yellow goal. |
+| `s.gyro.rate` | Angular velocity, rad/s. Raw, not fused — see below. |
 | `s.lines` | Eight sensors round the rim: `.bearing`, `.surface`, `.value`. |
 | `s.range` | `.front` `.back` `.left` `.right` — mm to a wall, or `None`. |
 | `s.encoders` | Accumulated wheel rotation, one per motor. |
@@ -95,7 +96,7 @@ ball position and no map: a real robot does not have those, so neither do you.
 `me` is yours. Anything you put on it survives to the next tick, and it is
 cleared at every kick-off.
 
-## Seven things that will catch you out
+## Eight things that will catch you out
 
 **`s.ball` is `None` a lot.** The infrared ring sees nothing at all when a robot
 stands between you and the ball — not a weak reading, nothing. A robot that
@@ -133,6 +134,16 @@ ball before it drives at it.
 
 **The compass drifts.** Slowly enough that you will not see it in a thirty
 second test, and far enough to matter by the end of a five minute half.
+
+**The gyro looks steadier than the compass, and is not.** `s.gyro.rate` is a
+direct rate, fine to read every tick — a damping term, say, the way the
+example robots use `YawRate`. It has a bias that random-walks, the same as
+the compass's drift. Read it as a rate and the bias is nothing, a small
+constant offset that never accumulates. Integrate it into a heading of your
+own instead — trusting a gyro the way you'd trust the compass — and that
+bias compounds every tick you integrate over. By the end of a half that is
+a heading error considerably worse than the compass ever produces, from a
+sensor that looked perfectly steady in a thirty-second test.
 
 **A kick-off is a strike, not a carry.** Rule 5.4.7 wants the ball to roll
 50 mm clear, and pushing never gets there — a shoved ball travels with you and

@@ -15,6 +15,7 @@ import {
   CameraState,
   CompassState,
   EncoderState,
+  GyroState,
   Noise,
   readIr,
   readLines,
@@ -47,6 +48,8 @@ export interface SenseInput {
   self: SensedRobot;
   /** Per-motor surface speed from the last drive step, mm/s. */
   wheelSpeeds: readonly number[];
+  /** True angular velocity from the last drive step, rad/s. What the gyro measures, before its own error. */
+  omega: number;
   /** Whether the dribbler currently holds the ball. */
   held: boolean;
   /** Messages already filtered for age and sender by the radio link. */
@@ -70,6 +73,7 @@ const enum Stream {
   Lines = 0x3b,
   Range = 0x47,
   Camera = 0x59,
+  Gyro = 0x65,
 }
 
 export class Senses {
@@ -78,10 +82,12 @@ export class Senses {
   private readonly lineNoise: Noise;
   private readonly rangeNoise: Noise;
   private readonly cameraNoise: Noise;
+  private readonly gyroNoise: Noise;
 
   private readonly compass = new CompassState();
   private readonly camera = new CameraState();
   private readonly encoders: EncoderState;
+  private readonly gyro = new GyroState();
   readonly idealSensors: boolean;
 
   /**
@@ -95,16 +101,18 @@ export class Senses {
     this.lineNoise = new Noise(seed ^ Stream.Lines);
     this.rangeNoise = new Noise(seed ^ Stream.Range);
     this.cameraNoise = new Noise(seed ^ Stream.Camera);
+    this.gyroNoise = new Noise(seed ^ Stream.Gyro);
     this.encoders = new EncoderState(motorCount);
     this.idealSensors = idealSensors;
   }
 
   read(input: SenseInput): SensorFrame {
-    const { view, self, wheelSpeeds, held, messages, attackDirection, dt } = input;
+    const { view, self, wheelSpeeds, omega, held, messages, attackDirection, dt } = input;
     const ideal = this.idealSensors;
 
     this.compass.step(dt, this.compassNoise, ideal);
     this.encoders.step(wheelSpeeds, dt);
+    this.gyro.step(dt, this.gyroNoise, ideal);
     const fresh = this.camera.step(dt, ideal);
 
     // Every robot but this one can get in the way of the infrared, including
@@ -124,6 +132,7 @@ export class Senses {
       } satisfies KickoffReading,
       ball: readIr(self, view.ball, { blockers, ideal }, this.ir),
       compass: { heading: this.compass.read(self.heading, this.compassNoise, ideal) },
+      gyro: { rate: this.gyro.read(omega, this.gyroNoise, ideal) },
       lines: readLines(self, this.lineNoise, ideal),
       range: readRange(self, this.rangeNoise, blockers, ideal),
       encoders: this.encoders.read(ideal),

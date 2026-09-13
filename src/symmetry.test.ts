@@ -133,6 +133,7 @@ function frames(seq: Pose[], attackDirection: 1 | -1, held: boolean, rotated: bo
       view,
       self,
       wheelSpeeds: [100, -100, 100, -100],
+      omega: 0,
       held,
       messages: [],
       attackDirection,

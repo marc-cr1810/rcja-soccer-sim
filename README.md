@@ -203,8 +203,12 @@ standing in for a motor all along.
   robot in the way returns `null`. Possession is about having a clear line, not
   being close, which is why a robot that drives straight at the ball gets shut
   out by a defender standing still.
-- **Compass/gyro** — drift tuned to be invisible in a thirty-second test and to
-  matter by the end of a half.
+- **Compass** — a fused heading whose drift is tuned to be invisible in a
+  thirty-second test and to matter by the end of a half.
+- **Gyro** — a raw angular rate, not fused with anything. Fine to read every
+  tick; its bias random-walks like the compass's drift does, but a bias in a
+  *rate* only costs you anything once you integrate it into a heading of your
+  own, at which point it is worse than the compass ever gets.
 - **Camera** — 30 fps against a 50 Hz loop, with a `fresh` flag.
 - **Ultrasonics** — lose the echo entirely past 65° of incidence. A robot needs
   opposite beams to agree before it trusts either, because an obstruction can

@@ -116,6 +116,7 @@ function run(seq: Pose[], team: 'cyan' | 'yellow', attackDirection: 1 | -1): Sen
       view,
       self,
       wheelSpeeds: [100, -100, 100, -100],
+      omega: 0,
       held: HELD,
       messages: [{ from: 2, body: { role: 'goalie', ball: [p.bx, p.bz], held: false }, at: clock } as never],
       attackDirection,

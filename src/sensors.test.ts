@@ -9,6 +9,7 @@ import {
   CameraState,
   CompassState,
   EncoderState,
+  GyroState,
   IR_REFERENCE_RANGE,
   Noise,
   blocks,
@@ -118,6 +119,60 @@ describe('compass', () => {
       const n = new Noise(999);
       for (let t = 0; t < 10; t += 0.02) c.step(0.02, n);
       return c.read(0, n);
+    };
+    expect(run()).toBe(run());
+  });
+});
+
+describe('gyro', () => {
+  it('is fine to read directly, and bad to integrate, over a five minute half', () => {
+    // Same shape as the compass test above, but the number that matters is
+    // different: the compass's own drift is what a strategy sees. A gyro's
+    // bias is invisible until a strategy integrates the rate into a heading
+    // of its own - so track both the raw bias (small) and what dead
+    // reckoning off it for a whole half would do (not small).
+    let sumEndBias = 0;
+    let sumEndIntegrated = 0;
+    const seeds = 12;
+    for (let s = 1; s <= seeds; s++) {
+      const g = new GyroState();
+      const n = new Noise(s);
+      let peakBias = 0;
+      let integrated = 0;
+      for (let t = 0; t < 300; t += 1 / 50) {
+        g.step(1 / 50, n);
+        integrated += g.read(0, n) / 50;
+        peakBias = Math.max(peakBias, Math.abs(g.bias));
+      }
+      // The bias itself stays small - nothing a per-tick damping term feels.
+      expect(peakBias).toBeLessThan(0.03);
+      sumEndBias += Math.abs(g.bias);
+      sumEndIntegrated += Math.abs(integrated);
+    }
+    const meanEndBias = sumEndBias / seeds;
+    expect(meanEndBias).toBeGreaterThan(0.0005);
+    expect(meanEndBias).toBeLessThan(0.02);
+    // Integrated over the same half, the same bias is a heading error well
+    // past what the compass ever produces (0.35 rad peak, see above) - the
+    // whole point of exposing a raw rate instead of a fused heading.
+    const meanEndIntegratedDeg = ((sumEndIntegrated / seeds) * 180) / Math.PI;
+    expect(meanEndIntegratedDeg).toBeGreaterThan(10);
+  });
+
+  it('reads near the true rate in the short term', () => {
+    const g = new GyroState();
+    const n = seed();
+    const r = g.read(1.5, n);
+    expect(r).toBeGreaterThan(1.2);
+    expect(r).toBeLessThan(1.8);
+  });
+
+  it('is repeatable for the same seed', () => {
+    const run = () => {
+      const g = new GyroState();
+      const n = new Noise(999);
+      for (let t = 0; t < 10; t += 0.02) g.step(0.02, n);
+      return g.read(0, n);
     };
     expect(run()).toBe(run());
   });
@@ -305,6 +360,14 @@ describe('ideal sensors mode', () => {
     for (let t = 0; t < 300; t += 1 / 50) c.step(1 / 50, n, true);
     expect(c.drift).toBe(0);
     expect(c.read(1.234, n, true)).toBeCloseTo(1.234, 5);
+  });
+
+  it('eliminates gyro bias and noise', () => {
+    const g = new GyroState();
+    const n = seed();
+    for (let t = 0; t < 300; t += 1 / 50) g.step(1 / 50, n, true);
+    expect(g.bias).toBe(0);
+    expect(g.read(0.75, n, true)).toBe(0.75);
   });
 
   it('reports exact reflectance without line noise', () => {

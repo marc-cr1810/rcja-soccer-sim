@@ -118,6 +118,46 @@ class YawRate:
         self._clock = None
 
 
+class GyroRate:
+    """How fast the robot is turning, from the gyroscope.
+
+    A direct measurement, unlike :class:`YawRate` - no drivetrain slip to
+    cancel out of, no assumption that every wheel is actually gripping the
+    carpet. It pays for that with its own noise and a bias that random-walks
+    over the length of a half.
+
+    That trade only bites if it is integrated. Read every tick as a rate -
+    exactly how ``YawRate.rate`` is used here, as a damping term - and the
+    bias barely matters: it is a small constant offset on a number nothing
+    ever accumulates. Feed it into a heading of your own instead, trusting it
+    the way a strategy trusts the compass, and the bias compounds every tick
+    it is integrated over; by the end of a half that is a heading error
+    considerably worse than the compass ever produces, from a sensor that
+    looked perfectly steady in a thirty-second test. ``CompassBias`` corrects
+    for exactly this kind of thing on the compass; nothing here corrects for
+    it on the gyro, because there is no second absolute reference for a rate
+    to be checked against - a rate is only ever right or wrong this instant.
+    """
+
+    def __init__(self, tau: float = 0.05) -> None:
+        self.rate = 0.0
+        self._tau = tau
+        self._clock: float | None = None
+
+    def update(self, s) -> float:
+        clock = s.clock
+        dt = 0.02 if self._clock is None else max(1e-3, clock - self._clock)
+        self._clock = clock
+
+        blend = min(1.0, dt / self._tau)
+        self.rate += (s.gyro.rate - self.rate) * blend
+        return self.rate
+
+    def reset(self) -> None:
+        self.rate = 0.0
+        self._clock = None
+
+
 class CompassBias:
     """Recover the compass's slow drift from the goal posts.
 
