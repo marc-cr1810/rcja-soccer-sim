@@ -1,0 +1,12 @@
+# The best version of the Python robots measured so far, by commit.
+#
+# `scratch/duel.py` plays the working tree against this by default, and that is
+# the benchmark a change has to beat. Promote a version by putting its sha here
+# once it has been committed AND measured to beat the current one over enough
+# matches to mean something - the duel is ~2 goals a side per match, so twenty
+# matches tells you very little and fifty is about the minimum worth acting on.
+#
+# Play both arrangements (each version on each side) and pool them, so a side
+# effect cannot be mistaken for an improvement.
+
+f67b942
