@@ -33,7 +33,7 @@ import {
 import type { League } from './leagues';
 import { ballDiameter } from './leagues';
 import type { RenderView } from './view';
-import { buildRobotMesh, loadRobotModel } from './robot-model';
+import { buildRobotMesh, loadRobotModel, TEAM_COLOUR } from './robot-model';
 
 const MM = 0.001;
 
@@ -130,6 +130,8 @@ export class FieldRenderer {
   private readonly canvas: HTMLCanvasElement;
   private league: League;
   cameraMode: CameraMode = 'referee';
+  /** Where the follow camera is currently looking, eased toward the ball. */
+  private readonly followLook = new THREE.Vector3();
   orbitAngle = 0;
   /** Rule 4.2.5: whether to visually render the 3D communication lines between robots (default false). */
   showCommsLines = false;
@@ -155,7 +157,7 @@ export class FieldRenderer {
         new THREE.Vector3(0, 0.08, 0),
       ]);
       const mat = new THREE.LineBasicMaterial({
-        color: team === 'cyan' ? COLOURS.cyan : COLOURS.yellow,
+        color: TEAM_COLOUR[team],
         transparent: true,
         opacity: 0.45,
       });
@@ -362,14 +364,20 @@ export class FieldRenderer {
         pos.copy(dir).multiplyScalar(Math.max(forLength, forDepth) * FRAME_MARGIN);
         break;
       }
-      case 'follow':
+      case 'follow': {
         this.camera.up.set(0, 1, 0);
-        target.set(world.ball.x * MM, 0, world.ball.z * MM);
-        pos.set(world.ball.x * MM - 0.9, 1.0, world.ball.z * MM + 1.1);
+        const ball = new THREE.Vector3(world.ball.x * MM, 0, world.ball.z * MM);
+        // Snap the view point on entry; ease it every frame after, so the
+        // camera does not whip around whenever the ball changes course.
+        if (this.lastCameraMode !== 'follow') this.followLook.copy(ball);
+        else this.followLook.lerp(ball, 0.05);
+        target.copy(this.followLook);
+        pos.set(this.followLook.x - 0.9, 1.0, this.followLook.z + 1.1);
         break;
+      }
       case 'orbit': {
         this.camera.up.set(0, 1, 0);
-        this.orbitAngle += dt * 0.25;
+        this.orbitAngle += dt * 0.1;
         const r = 2.4;
         pos.set(Math.cos(this.orbitAngle) * r, 1.5, Math.sin(this.orbitAngle) * r);
         break;
@@ -380,7 +388,7 @@ export class FieldRenderer {
       this.lastCameraMode = this.cameraMode;
       this.camera.position.copy(pos);
     } else {
-      this.camera.position.lerp(pos, this.cameraMode === 'follow' ? 0.12 : 0.08);
+      this.camera.position.lerp(pos, this.cameraMode === 'follow' ? 0.05 : 0.08);
     }
     this.camera.lookAt(target);
   }

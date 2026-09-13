@@ -425,11 +425,10 @@ export class World {
     // Rule 5.4.7: The robot kicking off must make a clear strike of the ball
     // and it must roll clear by at least 50 mm, or the robot must start at
     // least 50 mm from the ball.
-    // In leagues with kickers (Lightweight, Open), the robot can start right
-    // behind the ball (~15 mm standoff) because it makes a clear strike (>2000 mm/s).
-    // In pushing leagues (Simple Simon, Standard), it starts at the 50 mm standoff.
+    // Both leagues have kickers, so the robot can start right behind the ball
+    // at a ~15 mm standoff, because it makes a clear strike (>2000 mm/s).
     const bRadius = this.ball.radius;
-    const standoff = this.config.league.kickerAllowed ? 15 : 55;
+    const standoff = 15;
     const kickoffX = ROBOT_RADIUS + bRadius + standoff;
     const cyanSign = sideSign('cyan');
     const yellowSign = sideSign('yellow');
@@ -690,33 +689,15 @@ export class World {
   }
 
   /**
-   * Rule 5.9.1, which is league-dependent. Lightweight and Open judge the ball
-   * on leaving the playing area; the LEGO leagues judge it on striking a wall.
-   * A ball on its way into the goal is not out of play.
+   * Rule 5.9.1: the ball is out of play once it leaves the playing area.
+   * Both leagues judge it the same way. A ball on its way into the goal is
+   * not out of play.
    */
   private detectBallOutOfPlay(): void {
     const b = this.ball;
     if (withinGoalMouth(b.z) && Math.abs(b.x) > HALF_LENGTH) return;
 
-    const league = this.config.league;
-    const mode =
-      this.config.inclined && league.outOfPlayInclined
-        ? league.outOfPlayInclined
-        : league.outOfPlay;
-
-    let out = false;
-    switch (mode) {
-      case 'leaves-play-area':
-        out = Math.abs(b.x) > HALF_LENGTH + b.radius || Math.abs(b.z) > HALF_WIDTH + b.radius;
-        break;
-      case 'any-wall':
-        out = Math.abs(b.x) + b.radius >= GOAL_MOUTH_X || Math.abs(b.z) + b.radius >= HALF_WIDTH + 300;
-        break;
-      case 'back-wall-or-goal-sides':
-      case 'wall-behind-goal':
-        out = Math.abs(b.x) + b.radius >= GOAL_MOUTH_X;
-        break;
-    }
+    const out = Math.abs(b.x) > HALF_LENGTH + b.radius || Math.abs(b.z) > HALF_WIDTH + b.radius;
     if (!out) return;
 
     if (!this.autoResolve) {

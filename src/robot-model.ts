@@ -7,14 +7,11 @@
  * generated robot can be accurate to every league in a way one team's model
  * cannot.
  *
- * The upshot is that the robot on screen changes with the league, and every
- * difference is one a referee or scrutineer has to know:
- *
- *   Simple Simon / Standard  LEGO-style stack, plain wheels, no dribbler
- *                            (4.6.5), no kicker (4.7), no camera.
- *   Lightweight / Open       omni wheels, a dribbler roller inset to the
- *                            league's ball capture limit (4.1.1), a kicker
- *                            plate (4.7) and a camera mast (4.5).
+ * Both leagues this simulation runs (Lightweight and Open) are unrestricted -
+ * omni wheels, a dribbler roller inset to the league's ball capture limit
+ * (4.1.1), a kicker plate (4.7) and a camera mast (4.5) - so the mesh is the
+ * same shape in every league; only the ball capture recess differs. The LEGO
+ * divisions (Simple Simon, Standard) are not offered.
  *
  * To use a real model instead, see loadRobotModel below.
  */
@@ -25,7 +22,12 @@ import type { ViewRobot } from './view';
 
 const MM = 0.001;
 
-const TEAM_COLOUR = { cyan: 0x00a6c4, yellow: 0xf2c500 } as const;
+/**
+ * Team colours, distinct from the goal paint (blue `0x00a6c4` / yellow
+ * `0xf2c500`). RCJA rule 3.1 bars robots coloured orange, yellow or blue, so
+ * the cyan-named team runs violet and the yellow-named team runs lime.
+ */
+export const TEAM_COLOUR = { cyan: 0x8b5cf6, yellow: 0x3fce5a } as const;
 const DARK = 0x11161c;
 const METAL = 0xb9c2cc;
 const RUBBER = 0x1b1f24;
@@ -35,20 +37,14 @@ function mat(color: number, roughness = 0.6, metalness = 0.05): THREE.MeshStanda
 }
 
 /** Wheels sit tangentially on the rim, axle pointing outward. */
-function addWheels(group: THREE.Group, league: League, radius: number): void {
-  // Rule 4.5.5 caps Standard's omni wheels at 80 mm diameter, so 60 mm is
-  // legal in every league.
-  const wheelRadius = 30 * MM;
-  const wheelWidth = 22 * MM;
-  // Rule 4.5.5: Standard may use omni wheels too, so this is not the same
-  // question as whether the chassis is LEGO.
-  const omni = league.omniWheelsAllowed;
-  const q = Math.PI / 4;
+function addWheels(group: THREE.Group, radius: number): void {
   // Four omni wheels on the diagonals is the usual Lightweight and Open
   // layout, and it reads as a robot from overhead in a way a three-wheel
   // layout does not: nothing sits dead ahead of the dribbler or dead astern.
-  // The LEGO leagues keep a two-wheel drive with the wheels on the sides.
-  const angles = omni ? [q, 3 * q, 5 * q, 7 * q] : [Math.PI / 2, -Math.PI / 2];
+  const wheelRadius = 30 * MM;
+  const wheelWidth = 22 * MM;
+  const q = Math.PI / 4;
+  const angles = [q, 3 * q, 5 * q, 7 * q];
 
   /**
    * Rule 4.1.2's envelope is a cylinder, so the constraint is on the wheel's
@@ -67,7 +63,7 @@ function addWheels(group: THREE.Group, league: League, radius: number): void {
     );
 
     const tyre = new THREE.Mesh(
-      new THREE.CylinderGeometry(wheelRadius, wheelRadius, wheelWidth, omni ? 18 : 12),
+      new THREE.CylinderGeometry(wheelRadius, wheelRadius, wheelWidth, 18),
       mat(RUBBER, 0.92),
     );
     tyre.rotation.z = Math.PI / 2;
@@ -79,8 +75,8 @@ function addWheels(group: THREE.Group, league: League, radius: number): void {
     // Omni rollers read as a lighter hub proud of the tyre. Built co-axially
     // with the tyre so it cannot drift outside the envelope.
     const hub = new THREE.Mesh(
-      new THREE.CylinderGeometry(wheelRadius * (omni ? 0.74 : 0.5), wheelRadius * (omni ? 0.74 : 0.5), wheelWidth * 1.06, 14),
-      mat(omni ? METAL : 0x8b929a, 0.45, omni ? 0.5 : 0.1),
+      new THREE.CylinderGeometry(wheelRadius * 0.74, wheelRadius * 0.74, wheelWidth * 1.06, 14),
+      mat(METAL, 0.45, 0.5),
     );
     hub.rotation.copy(tyre.rotation);
     hub.position.copy(position);
@@ -121,11 +117,13 @@ function addDribbler(group: THREE.Group, league: League, deckTop: number): void 
     );
     group.add(cheek);
 
-    // Optical ball gate sensors (IR beam-break) mounted on the inner cheek faces
-    // for sub-millisecond mechanical possession detection.
+    // Optical ball gate sensors (IR beam-break) mounted on the inner cheek
+    // faces for sub-millisecond mechanical possession detection. Kept to a
+    // dark grey, not red, so it never reads as the rival team's colour or
+    // the orange ball.
     const gateOptic = new THREE.Mesh(
       new THREE.CylinderGeometry(2 * MM, 2 * MM, 2 * MM, 8),
-      mat(0xff2b2b, 0.2, 0.9),
+      mat(0x5a636e, 0.2, 0.9),
     );
     gateOptic.rotation.x = Math.PI / 2;
     gateOptic.position.set(
@@ -244,40 +242,6 @@ export function buildRobotMesh(robot: ViewRobot, league: League): THREE.Group {
   const colour = TEAM_COLOUR[robot.team];
   const radius = robot.radius * MM;
 
-  if (league.legoOnly) {
-    // Rule 4.5.2 restricts these leagues to LEGO, so the chassis is a stack of
-    // bricks. Sizes keep every corner inside the 220 mm cylinder of 4.1.2.
-    const tiers: [number, number, number, number][] = [
-      [190 * MM, 100 * MM, 40 * MM, 18 * MM],
-      [150 * MM, 96 * MM, 44 * MM, 58 * MM],
-      [96 * MM, 80 * MM, 34 * MM, 102 * MM],
-    ];
-    for (const [w, d, h, y] of tiers) {
-      const brick = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat(colour, 0.5));
-      brick.position.y = y + h / 2;
-      brick.castShadow = true;
-      group.add(brick);
-    }
-    const deckTop = 136 * MM;
-
-    // Studs, so the silhouette is unmistakably LEGO from overhead.
-    for (const dx of [-0.22, 0.22] as const) {
-      for (const dz of [-0.22, 0.22] as const) {
-        const stud = new THREE.Mesh(
-          new THREE.CylinderGeometry(9 * MM, 9 * MM, 6 * MM, 12),
-          mat(colour, 0.45),
-        );
-        stud.position.set(radius * dx, deckTop + 3 * MM, radius * dz);
-        group.add(stud);
-      }
-    }
-
-    addWheels(group, league, radius);
-    addHeadingArrow(group, DARK, deckTop + 2 * MM);
-    addHandle(group, deckTop, 38 * MM);
-    return group;
-  }
-
   const bodyHeight = 108 * MM;
   const bodyBase = 14 * MM;
   const deckTop = bodyBase + bodyHeight + 12 * MM;
@@ -317,7 +281,7 @@ export function buildRobotMesh(robot: ViewRobot, league: League): THREE.Group {
   addDribbler(group, league, deckTop);
   if (league.kickerAllowed) addKicker(group, league);
   addCamera(group, deckTop);
-  addWheels(group, league, radius);
+  addWheels(group, radius);
   addHeadingArrow(group, colour, deckTop + 4 * MM);
   addHandle(group, deckTop, 46 * MM);
 

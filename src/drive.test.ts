@@ -157,11 +157,10 @@ describe('a symmetric drive behaves symmetrically', () => {
 
 describe('the model actually constrains the robot', () => {
   /**
-   * Two wheels, left and right, both driving forward: the arrangement every
-   * Simple Simon and Standard robot uses. Not a division this league runs, but
-   * the case that proves the motor model is doing real work — a drive like this
-   * physically cannot strafe, and under the lab's force-in-any-direction model
-   * it could.
+   * Two wheels, left and right, both driving forward: a plain two-wheel
+   * differential drive. Not a division this league runs, but the case that
+   * proves the motor model is doing real work — a drive like this physically
+   * cannot strafe, and under the lab's force-in-any-direction model it could.
    */
   function differential(): DriveSpec {
     return {

@@ -68,17 +68,6 @@ describe('ball out of play (5.9.1)', () => {
     expect(Math.abs(w.ball.z)).toBeLessThanOrEqual(300);
   });
 
-  it('is not out in Simple Simon for a side wall', () => {
-    const w = world('simple-simon');
-    w.robots.forEach((r) => (r.removed = true));
-    w.ball.x = 0;
-    w.ball.z = HALF_WIDTH - 20;
-    w.ball.vz = 900;
-    run(w, 1);
-
-    expect(w.events.some((e) => e.kind === 'ball-out-of-play')).toBe(false);
-  });
-
   it('never calls a goal-bound ball out of play', () => {
     const w = world('open');
     w.robots.forEach((r) => (r.removed = true));
@@ -681,15 +670,8 @@ describe('kick-off placement (5.4.5)', () => {
     w.kickOff('cyan');
     const cyanStriker = w.robots.find((r) => r.id === 'cyan-1')!;
     const gap = distance(cyanStriker, w.ball) - (cyanStriker.radius + w.ball.radius);
-    // In kicker league (Lightweight), starts ~15 mm from the ball instead of the old 128 mm gap
+    // In a kicking league, starts ~15 mm from the ball.
     expect(gap).toBeCloseTo(15, 0);
-
-    const wSimon = world('simple-simon');
-    wSimon.kickOff('cyan');
-    const simonStriker = wSimon.robots.find((r) => r.id === 'cyan-1')!;
-    const simonGap = distance(simonStriker, wSimon.ball) - (simonStriker.radius + wSimon.ball.radius);
-    // In pushing league, starts at the 50-55 mm standoff
-    expect(simonGap).toBeCloseTo(55, 0);
   });
 });
 
@@ -740,18 +722,7 @@ describe('rule 5.7.1.6 is applied, not just reported', () => {
     expect(w.events.some((e) => e.rule === '5.7.1.6')).toBe(true);
   });
 
-  it('does not apply 5.7.1.6 in the LEGO leagues', () => {
-    for (const id of ['simple-simon', 'standard'] as const) {
-      const w = world(id);
-      const robot = w.robots.find((r) => r.id === 'cyan-1')!;
-      for (const other of w.robots) if (other !== robot) other.removed = true;
-      robot.x = 0;
-      robot.z = HALF_WIDTH + robot.radius + 40;
-      run(w, 1.5);
-      expect(robot.removed, id).toBe(false);
-    }
   });
-});
 
 describe('robots do not merge into each other', () => {
   /** Smallest gap between any two active robots, negative when overlapping. */

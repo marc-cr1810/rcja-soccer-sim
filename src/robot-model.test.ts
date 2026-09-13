@@ -64,35 +64,10 @@ describe('generated robot', () => {
     }
   });
 
-  /**
-   * The robot differs by league on purpose, and each difference is a rule a
-   * scrutineer has to apply. If these collapse to the same mesh the depiction
-   * has stopped teaching anything.
-   */
-  it('gives the LEGO leagues no dribbler, kicker or camera mast', () => {
-    for (const id of ['simple-simon', 'standard'] as const) {
-      const league = getLeague(id);
-      const mesh = buildRobotMesh(robotFor(id), league);
-      expect(league.dribblerAllowed).toBe(false);
-      // The camera reaches far above the LEGO chassis; without it it is short.
-      expect(heightMm(mesh), id).toBeLessThan(180);
-    }
-  });
-
-  it('gives Lightweight and Open a taller build with a camera mast', () => {
+  it('gives Lightweight and Open a camera mast and no LEGO stack', () => {
     for (const id of ['lightweight', 'open'] as const) {
       const mesh = buildRobotMesh(robotFor(id), getLeague(id));
       expect(heightMm(mesh), id).toBeGreaterThan(180);
     }
-  });
-
-  it('builds distinct meshes for a LEGO league and an unrestricted one', () => {
-    const lego = buildRobotMesh(robotFor('standard'), getLeague('standard'));
-    const open = buildRobotMesh(robotFor('open'), getLeague('open'));
-    let legoParts = 0;
-    let openParts = 0;
-    lego.traverse(() => legoParts++);
-    open.traverse(() => openParts++);
-    expect(openParts).toBeGreaterThan(legoParts);
   });
 });
