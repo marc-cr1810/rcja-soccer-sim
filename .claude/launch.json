@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "workspace",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev:workspace", "--", "--port", "5180", "--strictPort"],
+      "port": 5180
+    }
+  ]
+}
