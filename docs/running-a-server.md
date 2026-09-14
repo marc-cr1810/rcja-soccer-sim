@@ -35,7 +35,7 @@ program side of this).
 **`--home`/`--away`, for pushed submissions.**
 
 ```bash
-npm run serve -- --home "ACT-01" --away "QLD-04"
+npm run serve -- --home "ACT" --away "QLD"
 ```
 
 These names double as a lookup against whatever's been pushed and validated
@@ -71,7 +71,7 @@ A rejected push gets a specific reason back and never replaces anything. A
 successful one gets back:
 
 ```
-accepted: ACT-01 robot 1
+accepted: ACT robot 1
 token: <a long random string>
 keep this - it's what lets a program join as this robot
 ```
@@ -80,7 +80,7 @@ That token is server-issued proof of identity for **this specific `(team,
 robot)`** — not the team as a whole, since the two robots are independent
 programs on independent connections and neither should be able to speak for
 the other. It's what closes the gap a bare join message used to leave wide
-open: without it, anything that connects and claims `team: "ACT-01", robot:
+open: without it, anything that connects and claims `team: "ACT", robot:
 1` got that seat, no questions asked. It rotates on every push — the value
 printed just now is the current one, and re-pushing (even unchanged code)
 mints a fresh one.

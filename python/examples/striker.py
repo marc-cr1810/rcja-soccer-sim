@@ -87,7 +87,6 @@ from rcja_soccer.sense import (
     Locator,
     WheelEffort,
     back_inside,
-    keep_inside,
     obstacle_range,
     spin_towards,
     steer_ball_inside,
@@ -547,9 +546,16 @@ def receive(s, me, me_x, me_z, heading, yaw, frame):
     # Up the field from our own goal, out on the wing this robot is already
     # nearer. The tie-break comes from the frame rather than a fixed sign, so
     # the two ends of the field stay the same game.
+    # `back_inside` and not `keep_inside`: the two sit next to each other and
+    # take the same arguments, but one returns a point and the other returns a
+    # *push vector* that is zero anywhere but the edge. This wanted the point,
+    # took the push, and got (0, 0) every time the spot was comfortably inside
+    # the field - which is every time. The receiver drove to the centre circle
+    # instead of the wing, took seconds to get there, and the keeper's patience
+    # ran out first.
     cx, cz = frame.from_our_goal(RECEIVE_DEPTH)
     wing = math.copysign(RECEIVE_WING, me_z if abs(me_z) > 60 else frame.up_x)
-    spot_x, spot_z = keep_inside(cx - frame.up_z * wing, cz + frame.up_x * wing, 200.0)
+    spot_x, spot_z = back_inside(cx - frame.up_z * wing, cz + frame.up_x * wing, 200.0)
 
     gap = math.hypot(spot_x - me_x, spot_z - me_z)
     travel = math.atan2(spot_z - me_z, spot_x - me_x)

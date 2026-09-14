@@ -31,7 +31,7 @@ function agents(): MatchAgents {
 function played(seconds = 6) {
   const match = new Match({
     agents: agents(),
-    teams: { violet: 'ACT-01', lime: 'QLD-04' },
+    teams: { violet: 'ACT', lime: 'QLD' },
     halfSeconds: 60,
     seed: 3,
   });
@@ -44,7 +44,7 @@ function played(seconds = 6) {
 describe('the frame a viewer gets', () => {
   it('carries what a scoreboard and a renderer need', () => {
     const frame = played().snapshot();
-    expect(frame.teams).toEqual({ violet: 'ACT-01', lime: 'QLD-04' });
+    expect(frame.teams).toEqual({ violet: 'ACT', lime: 'QLD' });
     expect(frame.robots).toHaveLength(4);
     expect(frame.clock).toBeGreaterThan(0);
     expect(typeof frame.score.violet).toBe('number');
@@ -111,7 +111,7 @@ describe('a robot standing down under rule 5.7', () => {
         'lime-1': waller,
         'lime-2': waller,
       } as unknown as MatchAgents,
-      teams: { violet: 'ACT-01', lime: 'WALLERS' },
+      teams: { violet: 'ACT', lime: 'WALLERS' },
       halfSeconds: 120,
       seed: 2,
     });
@@ -193,7 +193,7 @@ describe('the match server', () => {
     const { socket, messages } = await connect(port);
     await server.play({
       agents: agents(),
-      teams: { violet: 'ACT-01', lime: 'QLD-04' },
+      teams: { violet: 'ACT', lime: 'QLD' },
       halfSeconds: 2,
       seed: 1,
     });
@@ -203,7 +203,7 @@ describe('the match server', () => {
     expect(hello).toBeDefined();
     if (hello?.type === 'hello') {
       expect(hello.league.id).toBe('open');
-      expect(hello.teams.violet).toBe('ACT-01');
+      expect(hello.teams.violet).toBe('ACT');
     }
     socket.close();
   });

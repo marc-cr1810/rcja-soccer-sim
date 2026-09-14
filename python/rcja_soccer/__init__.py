@@ -2,7 +2,7 @@
 
     from rcja_soccer import Robot, drive
 
-    robot = Robot(team="violet", number=1, name="ACT-01")
+    robot = Robot(team="violet", number=1, name="ACT")
 
     @robot.tick
     def think(s, me):

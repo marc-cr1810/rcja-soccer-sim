@@ -32,8 +32,8 @@ HERE = Path(__file__).parent
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--url", default="ws://localhost:8080/agent")
-parser.add_argument("--violet", default="ACT-01", help="name for the violet team")
-parser.add_argument("--lime", default="QLD-04", help="name for the lime team")
+parser.add_argument("--violet", default="Violet", help="name for the violet team")
+parser.add_argument("--lime", default="Lime", help="name for the lime team")
 parser.add_argument("--debug", action="store_true", help="stream live robot decision telemetry")
 parser.add_argument(
     "--only",

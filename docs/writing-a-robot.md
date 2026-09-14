@@ -25,7 +25,7 @@ myrobot/
 `manifest.json`:
 
 ```json
-{ "team": "ACT-01", "robot": 1, "entry": "robot.py" }
+{ "team": "ACT", "robot": 1, "entry": "robot.py" }
 ```
 
 | field | rule |
