@@ -110,43 +110,50 @@ const MATCH_MEMORY_LIMIT_MB = 512;
 /** Half a core each; four robots worst-case total 200%, not the whole machine. */
 const MATCH_CPU_QUOTA_PERCENT = 50;
 
+/** One spawned seat, with its own life to end. */
+export interface SeatProcess {
+  /** Stop this seat's program and do not respawn it. */
+  stop: () => void;
+}
+
 /**
- * Spawn every resolved seat, sandboxed and cgroup-governed, and wait for it
- * to join.
+ * Spawn one seat's program, sandboxed and cgroup-governed, respawning it if
+ * it dies.
  *
- * A spawned process has no network, so it reaches the match the same way the
- * one-tick validation check does: `server.agentSocketUrl`, a Unix socket
- * bound into its sandbox rather than a TCP port.
+ * A seat at a time rather than four, because a practice field starts and
+ * stops them one at a time - a team re-pushes one robot and restarts it
+ * without disturbing the situation the other three are standing in.
+ * `spawnLineup` is four of these plus the wait for them all to join.
  */
-export async function spawnLineup(
+export function spawnSeat(
   server: MatchServer,
-  resolved: Partial<Record<string, LineupEntry>>,
+  id: string,
+  entry: LineupEntry,
   opts: LineupOptions,
   log: (line: string) => void = () => {},
-): Promise<SpawnedLineup> {
-  const ids = Object.keys(resolved);
+): SeatProcess {
   const maxRespawns = opts.maxRespawns ?? DEFAULT_MAX_RESPAWNS;
-  const children = new Map<string, ChildProcess>();
+  let child: ChildProcess | null = null;
   let stopped = false;
 
-  const spawnOne = (id: string, entry: LineupEntry, attempt: number): void => {
+  const spawnOne = (attempt: number): void => {
     if (stopped) return;
     const [side, robotText] = id.split('-') as [string, string];
 
     // Registered before the child can possibly connect (spawning below is
     // the earliest anything could reach the gateway), and re-registered
-    // identically on every respawn — harmless, since it's always the same
+    // identically on every respawn - harmless, since it's always the same
     // token for this resolved seat.
     server.agents.expectToken(id, entry.token);
 
-    const child = spawnSandboxed({
+    const spawned = spawnSandboxed({
       entry: join(entry.dir, entry.manifest.entry),
       cwd: entry.dir,
       pythonLibDir: opts.pythonLibDir,
       memoryLimitMb: opts.memoryLimitMb ?? MATCH_MEMORY_LIMIT_MB,
       cpuQuotaPercent: opts.cpuQuotaPercent ?? MATCH_CPU_QUOTA_PERCENT,
       // The agent socket the child needs to reach lives outside its own
-      // folder, so its directory has to be bound in explicitly — the same
+      // folder, so its directory has to be bound in explicitly - the same
       // reason `submission.ts`'s validation check binds in its own control
       // directory for the exact same kind of connection.
       controlDir: server.agentSocketDir,
@@ -163,25 +170,56 @@ export async function spawnLineup(
         entry.token,
       ],
     });
-    children.set(id, child);
+    child = spawned;
 
-    child.stdout?.on('data', (d: Buffer) => log(`[${id}] ${d.toString().trimEnd()}`));
-    child.stderr?.on('data', (d: Buffer) => log(`[${id}] ${d.toString().trimEnd()}`));
+    spawned.stdout?.on('data', (d: Buffer) => log(`[${id}] ${d.toString().trimEnd()}`));
+    spawned.stderr?.on('data', (d: Buffer) => log(`[${id}] ${d.toString().trimEnd()}`));
 
-    child.on('exit', (code) => {
-      children.delete(id);
+    spawned.on('exit', (code) => {
+      if (child === spawned) child = null;
       if (stopped) return;
       if (attempt >= maxRespawns) {
         log(`[${id}] exited (code ${code}) after ${attempt} attempts; not respawning again`);
         return;
       }
       log(`[${id}] exited (code ${code}); respawning (attempt ${attempt + 1} of ${maxRespawns})`);
-      spawnOne(id, entry, attempt + 1);
+      spawnOne(attempt + 1);
     });
   };
 
+  spawnOne(1);
+
+  return {
+    stop: () => {
+      stopped = true;
+      try {
+        child?.kill('SIGKILL');
+      } catch {
+        // already gone
+      }
+    },
+  };
+}
+
+/**
+ * Spawn every resolved seat, sandboxed and cgroup-governed, and wait for it
+ * to join.
+ *
+ * A spawned process has no network, so it reaches the match the same way the
+ * one-tick validation check does: `server.agentSocketUrl`, a Unix socket
+ * bound into its sandbox rather than a TCP port.
+ */
+export async function spawnLineup(
+  server: MatchServer,
+  resolved: Partial<Record<string, LineupEntry>>,
+  opts: LineupOptions,
+  log: (line: string) => void = () => {},
+): Promise<SpawnedLineup> {
+  const ids = Object.keys(resolved);
+  const seats = new Map<string, SeatProcess>();
+
   for (const [id, entry] of Object.entries(resolved)) {
-    if (entry) spawnOne(id, entry, 1);
+    if (entry) seats.set(id, spawnSeat(server, id, entry, opts, log));
   }
 
   if (ids.length > 0) {
@@ -194,14 +232,7 @@ export async function spawnLineup(
   return {
     transports,
     stop: () => {
-      stopped = true;
-      for (const child of children.values()) {
-        try {
-          child.kill('SIGKILL');
-        } catch {
-          // already gone
-        }
-      }
+      for (const seat of seats.values()) seat.stop();
     },
   };
 }

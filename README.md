@@ -13,7 +13,7 @@ falling back to the reference agent for any robot nobody has pushed yet.
 **Documentation:** this file is the pitch — what this is and why it's built
 the way it is. For the manual, see [docs/](docs/): [writing a
 robot](docs/writing-a-robot.md), [running a server](docs/running-a-server.md),
-and the full sensor/actuator reference in
+[practising](docs/practising.md), and the full sensor/actuator reference in
 [python/README.md](python/README.md).
 
 ## What this is not
@@ -224,7 +224,12 @@ standing in for a motor all along.
   only make a reading *short*.
 - **Encoders** — count wheel rotation, not distance. Odometry drifts.
 
-Noise is seeded per robot per match.
+Noise is seeded per robot per match, so a match that can be replayed can be
+disputed. A seed fixes every noise stream (see `rand.ts`: each sensor derives
+its own stream from the seed), and a match's seed is 64 bits — a fresh crypto
+draw per match on the live server, printed before kick-off as `0x…` and
+pasteable straight back in as `--seed` to replay that exact match. Sensor
+noise is exactly normal, drawn by a table inverse-CDF with no transcendentals.
 
 ### The ball rolls, rather than decaying
 

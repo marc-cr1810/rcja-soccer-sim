@@ -24,6 +24,7 @@
  */
 
 import { Match, type MatchAgents } from './match';
+import { addSeed, type SeedInput } from './rand';
 import type { Agent } from './agent';
 
 export type Origin = 'student' | 'reference' | 'generated';
@@ -70,7 +71,13 @@ export interface LadderOptions {
   /** How many times each ordered pairing is played. Default 1, so A-B and B-A. */
   rounds?: number;
   halfSeconds?: number;
-  seed?: number;
+  /**
+   * Base of the per-match seeds, which are exactly `seed + matchIndex * 7919`
+   * (the 64-bit form carries into the high word). A ladder is a measurement,
+   * so a numeric base keeps the whole run deterministic and replayable across
+   * machines; a 64-bit seed is accepted for the same runs.
+   */
+  seed?: SeedInput;
 }
 
 /**
@@ -154,7 +161,8 @@ export function runLadder(entries: Entry[], opts: LadderOptions = {}): LadderSum
           'lime-2': y2!,
         } satisfies MatchAgents;
 
-        const seed = baseSeed + matches * 7919;
+        const seed =
+          typeof baseSeed === 'number' ? baseSeed + matches * 7919 : addSeed(baseSeed, matches * 7919);
         const result = new Match({ agents, halfSeconds, seed }).run();
         matches++;
         goals += result.score.violet + result.score.lime;

@@ -26,6 +26,7 @@ import {
 } from './field';
 import { ballDiameter, type League } from './leagues';
 import {
+  BALL_BOUNCE,
   collideBodies,
   collideWithPerimeter,
   separateBodies,
@@ -84,6 +85,39 @@ export interface Robot extends Body {
    * robot's actual motion - which is the whole reason odometry drifts.
    */
   wheelSpeeds: number[];
+}
+
+/** One robot's place on the field, as an arrangement asks for it. */
+export interface PlacedRobot {
+  /** One of `violet-1`, `violet-2`, `lime-1`, `lime-2`. */
+  id: string;
+  x: number;
+  z: number;
+  /** Radians; 0 points towards +x. */
+  heading: number;
+  /**
+   * Rule 5.8's nomination, and nothing else.
+   *
+   * Not a role and not a behaviour: no part of the simulator treats robot 1
+   * and robot 2 differently, and this flag is read only by the 5.11.2
+   * detector and by which robot 5.11.2 takes off. A standard kick-off
+   * nominates robot 2 because a team has to nominate somebody; an
+   * arrangement says so itself.
+   */
+  isGoalie: boolean;
+}
+
+/**
+ * A situation to put on the field: who is on it, where, and where the ball is.
+ *
+ * The roster is whichever ids are listed, so one robot alone, or one a side,
+ * is an arrangement like any other rather than a mode. A world with an
+ * arrangement staged restarts back into it instead of onto the kick-off
+ * marks - see `World.stage`.
+ */
+export interface Arrangement {
+  robots: PlacedRobot[];
+  ball: { x: number; z: number; vx?: number; vz?: number };
 }
 
 export type EventKind =
@@ -164,6 +198,15 @@ export interface MatchConfig {
    * used.
    */
   kickoffCountdown?: number;
+  /**
+   * A multiplier on the ball's rolling resistance, drawn per match from the
+   * seed so no two matches roll the same. Friction is a property of the
+   * carpet, and carpets differ: at ±10% around `BALL_ROLL_DECEL` a full kick
+   * still carries goal to goal while a gentle knock dies a little sooner or
+   * later, which is enough that a robot cannot just assume last match's
+   * physics. Omit for the nominal coefficient (every match identical).
+   */
+  ballFriction?: number;
 }
 
 /** Rule 4.1.1: every league caps the robot at a 220 mm cylinder. */
@@ -217,6 +260,35 @@ function robotMass(league: League): number {
 function ballMass(league: League): number {
   // Appendix A.8: 130-150 g for the IR ball. Appendix B.5: 46 g for the golf ball.
   return league.ball === 'ir-74' ? 140 : 46;
+}
+
+/** A robot as an arrangement asks for it, at rest and undamaged. */
+function makeRobot(spec: PlacedRobot, mass: number): Robot {
+  return {
+    id: spec.id,
+    team: spec.id.startsWith('violet') ? 'violet' : 'lime',
+    x: spec.x,
+    z: spec.z,
+    vx: 0,
+    vz: 0,
+    radius: ROBOT_RADIUS,
+    mass,
+    heading: spec.heading,
+    isGoalie: spec.isGoalie,
+    removed: false,
+    penaltyRemaining: 0,
+    removalRule: undefined,
+    removalReason: undefined,
+    inGoalAreaFor: 0,
+    whollyOutFor: 0,
+    sinceOpponentContact: 99,
+    inactiveGoalieFor: 0,
+    manual: false,
+    omega: 0,
+    drive: openDrive(),
+    motors: [0, 0, 0, 0],
+    wheelSpeeds: [0, 0, 0, 0],
+  };
 }
 
 /**
@@ -293,6 +365,22 @@ export class World {
    */
   private pairOrderFlipped = false;
 
+  /**
+   * The arrangement restarts go back to, or null for the kick-off marks.
+   *
+   * Set by `stage`. Null for every match this codebase plays - a rehearsal is
+   * the only thing that stages anything, and nothing else can tell.
+   */
+  private staged: Arrangement | null = null;
+  /**
+   * Who is on the field at a kick-off, or null for the usual four.
+   *
+   * A staged situation sets it, so that a rehearsal switched back to ordinary
+   * kick-offs restarts the robots actually in it rather than conjuring the
+   * other three back out of nowhere. Null for every match.
+   */
+  private roster: string[] | null = null;
+
   /** Seconds the ball has been effectively stationary and contested (5.6.1.2). */
   private stalledFor = 0;
   /** Seconds the ball has been at rest with nobody able to get to it (5.6.1.1). */
@@ -352,10 +440,20 @@ export class World {
    */
   private placement: () => number;
 
+  /**
+   * Per-match ball rolling friction multiplier. Derived from the match seed
+   * so the same seed always produces the same physics.
+   */
+  private readonly ballFriction: number;
+  /** Per-match ball-wall restitution. Separate from robot-robot bounce. */
+  private readonly ballBounce: number;
+
   constructor(config: MatchConfig) {
     this.config = config;
     this.placement = makePlacementRandom(config.placementSeed);
     this.commsEnabled = config.commsEnabled ?? config.league.commsAllowed;
+    this.ballFriction = config.ballFriction ?? 1;
+    this.ballBounce = BALL_BOUNCE;
     const r = ballDiameter(config.league) / 2;
     this.ball = { x: 0, z: 0, vx: 0, vz: 0, radius: r, mass: ballMass(config.league) };
     this.resetRobots();
@@ -398,51 +496,103 @@ export class World {
     return this.defendingGoal(team) === 'cyan' ? 'yellow' : 'cyan';
   }
 
-  /** Rule 5.4: both teams on their defensive half, non-kicking team in the box. */
+  /**
+   * Rule 5.4: both teams on their defensive half, non-kicking team in the box.
+   *
+   * Or, on a staged world, whatever was staged. A restart on a staged world
+   * puts the situation back the way whoever set it up left it rather than back
+   * on the kickoff marks - which is what makes a rehearsal repeat itself
+   * without anything driving it: a goal, a ball out of play and a referee's
+   * kick-off all already come through here.
+   */
   resetRobots(kickingOff: TeamId = 'violet'): void {
-    // A robot still serving a 5.7 stand-down does not get a free pass just
-    // because some restart repositions everyone else - only returnRobot()
-    // (5.7.4) brings it back, automatically or by a referee's hand. Without
-    // this, any kick-off - including a referee's own, at the top of a half -
-    // would silently reinstate a robot mid-penalty.
-    const stillRemoved = new Map(this.robots.filter((r) => r.removed).map((r) => [r.id, r]));
-    const mass = robotMass(this.config.league);
+    this.applyArrangement(this.staged ?? this.kickoffArrangement(kickingOff), kickingOff);
+  }
+
+  /**
+   * Hold this arrangement instead of the kickoff marks, and put it out now.
+   *
+   * The whole of a staged situation is this one substitution. Nothing else in
+   * the world knows it is staged: the detectors still watch, the rules still
+   * fire, and `config.autoResolve` still decides whether anything acts on
+   * them - so a rehearsal is the same football as a match, started from
+   * somewhere else.
+   */
+  stage(arrangement: Arrangement): void {
+    this.setArrangement(arrangement);
+    this.applyArrangement(arrangement, this.kickingOffTeam);
+  }
+
+  /**
+   * Change where restarts go back to without disturbing the field now.
+   *
+   * The difference matters constantly on a practice field: nudging the ball
+   * across it is a change to the situation, but it is not a reason to teleport
+   * the robots back to where they started - which is exactly what applying the
+   * whole arrangement would do to everything the one drag did not touch.
+   */
+  setArrangement(arrangement: Arrangement): void {
+    this.staged = arrangement;
+    this.roster = arrangement.robots.map((r) => r.id);
+  }
+
+  /** Back to ordinary kickoffs. The field is left exactly as it stands. */
+  unstage(): void {
+    this.staged = null;
+  }
+
+  /**
+   * Put a robot where this says, now - adding it to the field if it is not
+   * already on it.
+   *
+   * The one operation behind both dragging a robot across the field and
+   * putting one out that was not in the situation at all, because from the
+   * world's side those are the same thing. It does not touch `staged`: where
+   * a restart goes back to is the caller's business, and a nudge mid-play is
+   * not necessarily a change to the situation being rehearsed.
+   */
+  place(spec: PlacedRobot): void {
+    const existing = this.robots.find((r) => r.id === spec.id);
+    if (existing) {
+      existing.x = spec.x;
+      existing.z = spec.z;
+      existing.heading = spec.heading;
+      existing.isGoalie = spec.isGoalie;
+      existing.vx = 0;
+      existing.vz = 0;
+      existing.omega = 0;
+      return;
+    }
+    this.robots.push(makeRobot(spec, robotMass(this.config.league)));
+    if (this.roster && !this.roster.includes(spec.id)) this.roster.push(spec.id);
+  }
+
+  /**
+   * Take a robot out of the situation entirely.
+   *
+   * Not rule 5.7: a robot removed under 5.7 is still in the match, off the
+   * field, serving a stand-down and drawn as such. This one was never in the
+   * arrangement - a rehearsal of one robot alone has three seats that are
+   * simply not part of it - so it leaves no trace on the field at all.
+   */
+  takeOff(robotId: string): void {
+    const at = this.robots.findIndex((r) => r.id === robotId);
+    if (at === -1) return;
+    this.robots.splice(at, 1);
+    this.roster = this.robots.map((r) => r.id);
+  }
+
+  /** The arrangement a restart currently goes back to, or null for the marks. */
+  get stagedArrangement(): Arrangement | null {
+    return this.staged;
+  }
+
+  /** Where everyone stands for a kick-off, all four robots, ball on the spot. */
+  private kickoffArrangement(kickingOff: TeamId): Arrangement {
     // +1 if this team is currently camped on the +x side of the field (i.e.
     // defends the yellow goal this half), -1 if on the -x side. Swaps with
     // `endsSwapped`, unlike the goal colours themselves.
     const sideSign = (team: TeamId): 1 | -1 => (this.defendingGoal(team) === 'cyan' ? -1 : 1);
-    const make = (
-      id: string,
-      team: TeamId,
-      x: number,
-      z: number,
-      isGoalie: boolean,
-    ): Robot => ({
-      id,
-      team,
-      x,
-      z,
-      vx: 0,
-      vz: 0,
-      radius: ROBOT_RADIUS,
-      mass,
-      // Facing up the field, towards this team's current attacking end.
-      heading: sideSign(team) < 0 ? 0 : Math.PI,
-      isGoalie,
-      removed: false,
-      penaltyRemaining: 0,
-      removalRule: undefined,
-      removalReason: undefined,
-      inGoalAreaFor: 0,
-      whollyOutFor: 0,
-      sinceOpponentContact: 99,
-      inactiveGoalieFor: 0,
-      manual: false,
-      omega: 0,
-      drive: openDrive(),
-      motors: [0, 0, 0, 0],
-      wheelSpeeds: [0, 0, 0, 0],
-    });
 
     const goalieX = HALF_LENGTH - PENALTY_DEPTH / 2;
     // The kicking-off team may sit anywhere on its own half (5.4.2); the other
@@ -515,17 +665,39 @@ export class World {
     const violetK = keeperFor(violetSign);
     const limeS = strikerFor('lime', limeSign);
     const limeK = keeperFor(limeSign);
+    // Facing up the field, towards this team's current attacking end.
+    const facing = (sign: 1 | -1): number => (sign < 0 ? 0 : Math.PI);
 
-    this.robots = [
-      make('violet-1', 'violet', violetS.x, violetS.z, false),
-      make('violet-2', 'violet', violetK.x, violetK.z, true),
-      make('lime-1', 'lime', limeS.x, limeS.z, false),
-      make('lime-2', 'lime', limeK.x, limeK.z, true),
+    const out: PlacedRobot[] = [
+      { id: 'violet-1', x: violetS.x, z: violetS.z, heading: facing(violetSign), isGoalie: false },
+      { id: 'violet-2', x: violetK.x, z: violetK.z, heading: facing(violetSign), isGoalie: true },
+      { id: 'lime-1', x: limeS.x, z: limeS.z, heading: facing(limeSign), isGoalie: false },
+      { id: 'lime-2', x: limeK.x, z: limeK.z, heading: facing(limeSign), isGoalie: true },
     ];
+    const roster = this.roster;
+    return {
+      robots: roster ? out.filter((r) => roster.includes(r.id)) : out,
+      ball: { x: 0, z: 0 },
+    };
+  }
+
+  /** Put an arrangement out on the field and reset everything a restart resets. */
+  private applyArrangement(arrangement: Arrangement, kickingOff: TeamId): void {
+    // A robot still serving a 5.7 stand-down does not get a free pass just
+    // because some restart repositions everyone else - only returnRobot()
+    // (5.7.4) brings it back, automatically or by a referee's hand. Without
+    // this, any kick-off - including a referee's own, at the top of a half -
+    // would silently reinstate a robot mid-penalty.
+    const stillRemoved = new Map(this.robots.filter((r) => r.removed).map((r) => [r.id, r]));
+    const mass = robotMass(this.config.league);
+
+    this.robots = arrangement.robots.map((spec) => makeRobot(spec, mass));
     // Whatever the draw, nobody starts inside anybody: the separation pass
     // would otherwise shove them apart before the whistle and the restart
     // would not be the one that was set. Only ever the two of a non-kicking
-    // team are close enough for this to bite.
+    // team are close enough for this to bite at a kick-off - a hand-placed
+    // arrangement can put any pair on top of each other, and gets the same
+    // treatment rather than a different one.
     separateAtRestart(this.robots);
     for (const robot of this.robots) {
       const was = stillRemoved.get(robot.id);
@@ -536,10 +708,10 @@ export class World {
       robot.removalReason = was.removalReason;
     }
 
-    this.ball.x = 0;
-    this.ball.z = 0;
-    this.ball.vx = 0;
-    this.ball.vz = 0;
+    this.ball.x = arrangement.ball.x;
+    this.ball.z = arrangement.ball.z;
+    this.ball.vx = arrangement.ball.vx ?? 0;
+    this.ball.vz = arrangement.ball.vz ?? 0;
     this.stalledFor = 0;
     this.lackOfProgressCount = 0;
     this.progressMark = { x: this.ball.x, z: this.ball.z };
@@ -596,7 +768,7 @@ export class World {
       robot.wheelSpeeds = stepDrive(robot, robot.drive, robot.motors, dt).wheelSpeeds;
     }
 
-    stepBall(this.ball, dt);
+    stepBall(this.ball, dt, this.ballFriction);
 
     const actives = this.active();
 
@@ -665,7 +837,7 @@ export class World {
     // post plane: only a ball that could actually get inside the goal opens
     // the mouth.
     const goalBound = Math.abs(this.ball.z) <= HALF_GOAL_WIDTH - this.ball.radius * 0.5;
-    const hit = collideWithPerimeter(this.ball, goalBound);
+    const hit = collideWithPerimeter(this.ball, goalBound, this.ballBounce);
 
     this.detectGoal(hit);
     this.detectUnreachable(dt);

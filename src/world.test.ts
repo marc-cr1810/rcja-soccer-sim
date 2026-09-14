@@ -1077,3 +1077,112 @@ describe('lack of progress 5.6.1.1: nobody can get to the ball', () => {
     expect(w.events.some((e) => e.rule === '5.6.1.1')).toBe(false);
   });
 });
+
+/**
+ * Phase 4: a situation put on the field by hand rather than by rule 5.4.
+ *
+ * The substitution is deliberately the only thing that changes - the
+ * detectors still watch a staged world and the rules still fire on it - so
+ * these check the roster, the placement and, most of all, that a restart goes
+ * back to the arrangement rather than onto the kick-off marks. That last one
+ * is what makes a rehearsal repeat itself without anything driving it.
+ */
+describe('staged arrangements (Phase 4)', () => {
+  it('puts only the robots the arrangement names on the field', () => {
+    const w = world('open');
+    w.stage({
+      robots: [{ id: 'violet-1', x: -500, z: 200, heading: 0, isGoalie: false }],
+      ball: { x: 100, z: -100 },
+    });
+
+    expect(w.robots.map((r) => r.id)).toEqual(['violet-1']);
+    expect(w.robots[0]!.x).toBe(-500);
+    expect(w.robots[0]!.z).toBe(200);
+    expect(w.ball.x).toBe(100);
+    expect(w.ball.z).toBe(-100);
+  });
+
+  it('restarts back into the arrangement instead of onto the kick-off marks', () => {
+    const w = world('open');
+    const arrangement = {
+      robots: [{ id: 'violet-1', x: 300, z: -600, heading: 0, isGoalie: false }],
+      // Rolling at the yellow goal, which Violet attacks in the first half.
+      ball: { x: GOAL_MOUTH_X - 600, z: 0, vx: 3000 },
+    };
+    w.stage(arrangement);
+    // Somewhere it could only have got to by playing, so the check below is
+    // about the restart putting it back rather than it never having moved.
+    w.robots[0]!.x = -1200;
+    w.robots[0]!.z = 900;
+
+    run(w, 1.5);
+
+    expect(w.score.violet).toBeGreaterThanOrEqual(1);
+    // Still one robot: a kick-off restart would have put all four out.
+    expect(w.robots.map((r) => r.id)).toEqual(['violet-1']);
+    expect(w.robots[0]!.x).toBe(300);
+    expect(w.robots[0]!.z).toBe(-600);
+  });
+
+  it('separates robots an arrangement puts on top of each other', () => {
+    const w = world('open');
+    w.stage({
+      robots: [
+        { id: 'violet-1', x: 0, z: 0, heading: 0, isGoalie: false },
+        { id: 'lime-1', x: 40, z: 0, heading: Math.PI, isGoalie: false },
+      ],
+      ball: { x: 1000, z: 0 },
+    });
+
+    const [a, b] = w.robots as [(typeof w.robots)[number], (typeof w.robots)[number]];
+    expect(distance(a, b)).toBeGreaterThanOrEqual(a.radius + b.radius - 1e-6);
+  });
+
+  it('carries the goalie nomination the arrangement asks for, not the robot number', () => {
+    const w = world('open');
+    w.stage({
+      robots: [
+        { id: 'violet-1', x: -1000, z: 0, heading: 0, isGoalie: true },
+        { id: 'violet-2', x: 0, z: 0, heading: 0, isGoalie: false },
+      ],
+      ball: { x: 1000, z: 0 },
+    });
+
+    expect(w.robots.find((r) => r.id === 'violet-1')!.isGoalie).toBe(true);
+    expect(w.robots.find((r) => r.id === 'violet-2')!.isGoalie).toBe(false);
+  });
+
+  it('kicks off ordinarily when unstaged, with the robots that are in it', () => {
+    const w = world('open');
+    w.stage({
+      robots: [
+        { id: 'violet-1', x: 300, z: -600, heading: 0, isGoalie: false },
+        { id: 'lime-1', x: -300, z: 600, heading: Math.PI, isGoalie: false },
+      ],
+      ball: { x: 0, z: 0 },
+    });
+    w.unstage();
+
+    // Nothing moved yet: unstaging is about the next restart, not this moment.
+    expect(w.robots.map((r) => r.id)).toEqual(['violet-1', 'lime-1']);
+    expect(w.stagedArrangement).toBeNull();
+
+    w.kickOff('violet');
+    // On the kick-off marks now rather than where they were put - but still
+    // the two robots in this situation, not the four a full match has. A
+    // rehearsal of one robot a side that answered a goal by conjuring two
+    // keepers onto the field would be rehearsing a different game.
+    expect(w.robots.map((r) => r.id).sort()).toEqual(['lime-1', 'violet-1']);
+    const violet = w.robots.find((r) => r.id === 'violet-1')!;
+    expect(violet.x).not.toBe(300);
+    expect(violet.z).not.toBe(-600);
+  });
+
+  it('leaves a match that stages nothing exactly as it was', () => {
+    const w = world('open');
+    expect(w.stagedArrangement).toBeNull();
+    expect(w.robots.map((r) => r.id)).toEqual(['violet-1', 'violet-2', 'lime-1', 'lime-2']);
+    expect(w.robots.find((r) => r.id === 'violet-2')!.isGoalie).toBe(true);
+    expect(w.robots.find((r) => r.id === 'violet-1')!.isGoalie).toBe(false);
+  });
+});

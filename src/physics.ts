@@ -74,6 +74,8 @@ const ROBOT_DAMPING = 8;
 
 /** Coefficient of restitution against the walls and between bodies. */
 const WALL_BOUNCE = 0.45;
+/** Ball loses more energy on wall bounces than robots do — carpet and wall panels absorb more. */
+export const BALL_BOUNCE = 0.35;
 const BODY_BOUNCE = 0.35;
 
 /** Below this speed (mm/s) the ball is treated as stationary. */
@@ -116,8 +118,8 @@ export function integrate(b: Body, dt: number, ratePerSecond: number): void {
   }
 }
 
-export function stepBall(ball: Body, dt: number): void {
-  rollingIntegrate(ball, dt, BALL_ROLL_DECEL);
+export function stepBall(ball: Body, dt: number, frictionMultiplier = 1): void {
+  rollingIntegrate(ball, dt, BALL_ROLL_DECEL * frictionMultiplier);
   if (ball.y !== undefined || ball.vy !== undefined) {
     const restY = ball.radius;
     ball.y = ball.y ?? restY;
@@ -166,7 +168,7 @@ export type WallHit = 'side' | 'end' | 'goal-back' | 'goal-side';
  * sees rebound. A body whose centre is somehow inside the block, shoved there
  * by another robot, has no such line and is pushed out through the nearest face.
  */
-function pushOutOfGoalBlock(b: Body, sign: -1 | 1): WallHit | null {
+function pushOutOfGoalBlock(b: Body, sign: -1 | 1, bounce = WALL_BOUNCE): WallHit | null {
   const xMin = sign > 0 ? GOAL_MOUTH_X : -WALL_X;
   const xMax = sign > 0 ? WALL_X : -GOAL_MOUTH_X;
 
@@ -201,23 +203,23 @@ function pushOutOfGoalBlock(b: Body, sign: -1 | 1): WallHit | null {
   // survives and a graze stays a graze.
   const normal = b.vx * dx + b.vz * dz;
   if (normal < 0) {
-    b.vx -= (1 + WALL_BOUNCE) * normal * dx;
-    b.vz -= (1 + WALL_BOUNCE) * normal * dz;
+    b.vx -= (1 + bounce) * normal * dx;
+    b.vz -= (1 + bounce) * normal * dz;
   }
   return Math.abs(dx) >= Math.abs(dz) ? 'end' : 'goal-side';
 }
 
-export function collideWithPerimeter(b: Body, allowGoalEntry: boolean): WallHit | null {
+export function collideWithPerimeter(b: Body, allowGoalEntry: boolean, bounce = WALL_BOUNCE): WallHit | null {
   let hit: WallHit | null = null;
 
   // Sidelines run the full length and have no openings.
   if (b.z - b.radius < -WALL_Z) {
     b.z = -WALL_Z + b.radius;
-    b.vz = Math.abs(b.vz) * WALL_BOUNCE;
+    b.vz = Math.abs(b.vz) * bounce;
     hit = 'side';
   } else if (b.z + b.radius > WALL_Z) {
     b.z = WALL_Z - b.radius;
-    b.vz = -Math.abs(b.vz) * WALL_BOUNCE;
+    b.vz = -Math.abs(b.vz) * bounce;
     hit = 'side';
   }
 
@@ -225,11 +227,11 @@ export function collideWithPerimeter(b: Body, allowGoalEntry: boolean): WallHit 
   // inside a goal: the goal back stops well short of them.
   if (b.x - b.radius < -WALL_X) {
     b.x = -WALL_X + b.radius;
-    b.vx = Math.abs(b.vx) * WALL_BOUNCE;
+    b.vx = Math.abs(b.vx) * bounce;
     hit = 'end';
   } else if (b.x + b.radius > WALL_X) {
     b.x = WALL_X - b.radius;
-    b.vx = -Math.abs(b.vx) * WALL_BOUNCE;
+    b.vx = -Math.abs(b.vx) * bounce;
     hit = 'end';
   }
 
@@ -242,7 +244,7 @@ export function collideWithPerimeter(b: Body, allowGoalEntry: boolean): WallHit 
     if (!beyondMouth) continue;
 
     if (!enteringGoal) {
-      const blocked = pushOutOfGoalBlock(b, sign);
+      const blocked = pushOutOfGoalBlock(b, sign, bounce);
       if (blocked && hit !== 'side') hit = blocked;
       continue;
     }
@@ -252,13 +254,13 @@ export function collideWithPerimeter(b: Body, allowGoalEntry: boolean): WallHit 
     const beyondBack = sign > 0 ? b.x + b.radius > back : b.x - b.radius < back;
     if (beyondBack) {
       b.x = back - sign * b.radius;
-      b.vx = -sign * Math.abs(b.vx) * WALL_BOUNCE;
+      b.vx = -sign * Math.abs(b.vx) * bounce;
       hit = 'goal-back';
     }
     if (Math.abs(b.z) + b.radius > HALF_GOAL_WIDTH) {
       const zSign = Math.sign(b.z) || 1;
       b.z = zSign * (HALF_GOAL_WIDTH - b.radius);
-      b.vz = -zSign * Math.abs(b.vz) * WALL_BOUNCE;
+      b.vz = -zSign * Math.abs(b.vz) * bounce;
       if (!hit) hit = 'goal-side';
     }
   }

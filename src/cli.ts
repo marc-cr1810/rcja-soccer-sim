@@ -9,6 +9,7 @@
 
 import { MatchServer } from './server';
 import { Match, KICKOFF_COUNTDOWN_SECONDS, type MatchAgents } from './match';
+import { PracticeSession } from './practice';
 import { referenceTeam } from './reference';
 import { runLadder, formatLadder, type Entry } from './ladder';
 import { ReferenceAgent } from './reference';
@@ -19,10 +20,17 @@ import { randomBytes } from 'node:crypto';
 import { resolve } from 'node:path';
 import { DEFAULT_OPTIONS, formatBench, runBench, type BenchResult } from './bench';
 import { slugifyTeam } from './manifest';
+import { isLeagueId, type LeagueId } from './leagues';
 import { hashSubmission } from './submission';
 import { formatTable, makeDraw, type Draw } from './tournament';
 import { listEntrants, loadDraw, loadResults, saveDraw } from './tournament-store';
 import { runDraw } from './tournament-run';
+import {
+  bumpSeedValue,
+  formatSeedValue,
+  parseSeed,
+  type SeedInput,
+} from './rand';
 
 interface Args {
   command: string;
@@ -64,6 +72,34 @@ function num(flags: Map<string, string>, name: string, fallback: number): number
 }
 
 /**
+ * A `--seed`, accepted as a decimal or a `0x…` 64-bit seed, or the
+ * fallback when the flag is absent. A decimal stays a plain number — that is
+ * what everyone means by `--seed 5`, and it is what ladder and bench keep —
+ * while a hex seed is the full 64-bit form. Anything else throws: a typo
+ * silently defaulting is exactly how a replay stops being one.
+ */
+function seedOption(flags: Map<string, string>, fallback: SeedInput): SeedInput {
+  const raw = flags.get('seed');
+  return raw === undefined ? fallback : parseSeedLike(raw);
+}
+
+/** `0x…` → its 64-bit Seed; a valid decimal → that number; else throw. */
+function parseSeedLike(raw: string): SeedInput {
+  const trimmed = raw.trim();
+  if (!/^0x/i.test(trimmed)) {
+    const n = Number(trimmed);
+    if (Number.isFinite(n) && n >= 0 && n < 2 ** 53) return n;
+  }
+  return parseSeed(trimmed);
+}
+
+/** 64 fresh bits for one competition match, from the OS entropy pool. */
+function matchSeed(): SeedInput {
+  const b = randomBytes(8);
+  return { hi: b.readUInt32BE(0), lo: b.readUInt32BE(4) };
+}
+
+/**
  * Who is playing.
  *
  * Until submitted programs can be loaded both sides are the reference agent,
@@ -99,6 +135,22 @@ function refereeRoot(): string | undefined {
   return existsSync(built) ? built : undefined;
 }
 
+/** `--league`, checked rather than cast: a typo should not silently mean "open". */
+function leagueFrom(flags: Map<string, string>): LeagueId | undefined {
+  const raw = flags.get('league');
+  if (raw === undefined) return undefined;
+  if (!isLeagueId(raw)) {
+    console.error(`\n  no league called "${raw}" — try "open" or "lightweight"\n`);
+    process.exit(1);
+  }
+  return raw;
+}
+
+function practiceRoot(): string | undefined {
+  const built = resolve('dist-practice');
+  return existsSync(built) ? built : undefined;
+}
+
 function pythonLibDir(): string | undefined {
   const dir = resolve('python');
   return existsSync(dir) ? dir : undefined;
@@ -113,11 +165,15 @@ async function serve(flags: Map<string, string>): Promise<void> {
   // stored anywhere the spectator bundle could read it. --referee-token lets
   // an organiser fix it in advance, for scripting a venue's setup.
   const refereeToken = refereed ? (flags.get('referee-token') ?? randomBytes(24).toString('base64url')) : undefined;
+  // Opt-in, like --referee: a venue that wants teams rehearsing on the match
+  // server says so, and gets a child process per field (see fields.ts).
+  const practiceFields = flags.get('practice-fields') === 'true';
   const server = new MatchServer({
     port: num(flags, 'port', 8080),
     viewerRoot: root,
     refereeRoot: refRoot,
     refereeToken,
+    practiceFields: practiceFields ? { maxFields: num(flags, 'max-fields', 4) } : false,
     realtime: flags.get('fast') !== 'true',
     viewHz: num(flags, 'view-hz', 60),
     idealSensors,
@@ -135,6 +191,10 @@ async function serve(flags: Map<string, string>): Promise<void> {
   console.log(`  watch at  http://localhost:${port}`);
   if (!root) {
     console.log(`  (no viewer built yet — run: npm run build:viewer)`);
+  }
+  if (practiceFields) {
+    console.log(`  practice fields:  POST http://localhost:${port}/practice  opens one`);
+    console.log(`  (open to whoever has the link — nothing on one is scored or recorded)`);
   }
   if (refereed) {
     console.log(`  referee console:  http://localhost:${port}/referee`);
@@ -187,22 +247,31 @@ async function serve(flags: Map<string, string>): Promise<void> {
   }
   process.on('SIGINT', () => {
     lineup?.stop();
+    server.closeFields();
     process.exit(0);
   });
 
   // Keep playing. A screen in a hall should never be showing nothing, and an
   // organiser should not have to restart anything between matches.
-  let seed = num(flags, 'seed', 1);
+  //
+  // Without `--seed` every match draws 64 fresh bits from the OS, so a run of
+  // matches is a run of different matches — which is what a competition is,
+  // and what a seed was there to fight in the first place. With `--seed` the
+  // run is deliberate and repeatable: the value is fixed, then bumps by one
+  // per match as it always has.
+  const explicitSeed = flags.get('seed') !== undefined;
+  let seed: SeedInput = seedOption(flags, matchSeed());
   for (;;) {
     if (waitForAgents) {
       await server.agents.whenReady();
       // Whoever connected gets to say who they are; the scoreboard is theirs.
       Object.assign(teams, server.agents.teamNames());
     }
+    const seedText = formatSeedValue(seed);
     console.log(
       refereed
-        ? `  ready: ${teams.violet} v ${teams.lime}  (seed ${seed}) — waiting for the referee to kick off`
-        : `  kick-off: ${teams.violet} v ${teams.lime}  (seed ${seed})`,
+        ? `  ready: ${teams.violet} v ${teams.lime}  (seed ${seedText}) — waiting for the referee to kick off`
+        : `  kick-off: ${teams.violet} v ${teams.lime}  (seed ${seedText})`,
     );
     const dropouts: string[] = [];
     const result = await server.play({
@@ -231,8 +300,67 @@ async function serve(flags: Map<string, string>): Promise<void> {
       // instead would make every robot reconnect between every match, which is
       // a second of dead air and four lines of log for nothing.
     }
-    seed++;
+    seed = explicitSeed ? bumpSeedValue(seed) : matchSeed();
   }
+}
+
+/**
+ * Open a practice field and leave it open.
+ *
+ * One field, one port, in the foreground - which is all a team on their own
+ * machine needs, and is also exactly what the venue server spawns per field.
+ * Nothing here is scored and nothing is written: there is no result to print
+ * at the end because there is no end.
+ */
+async function practice(flags: Map<string, string>): Promise<void> {
+  const server = new MatchServer({
+    port: num(flags, 'port', 8080),
+    viewerRoot: viewerRoot(),
+    practiceRoot: practiceRoot(),
+    realtime: true,
+    viewHz: num(flags, 'view-hz', 60),
+    idealSensors: flags.get('ideal-sensors') === 'true',
+    pythonLibDir: pythonLibDir(),
+    submissionsDir: flags.get('submissions'),
+  });
+  const port = await server.listen();
+
+  const session = new PracticeSession(server, {
+    submissionsDir: server.submissionsDirectory,
+    pythonLibDir: pythonLibDir() ?? null,
+    league: leagueFrom(flags),
+    idealSensors: flags.get('ideal-sensors') === 'true',
+    seed: seedOption(flags, 1),
+    log: (line) => console.log(`  ${line}`),
+  });
+
+  console.log(`\n  RCJA Soccer Simulation — practice field`);
+  console.log(`  watch at   http://localhost:${port}`);
+  console.log(`  arrange at http://localhost:${port}/practice`);
+  if (!practiceRoot()) console.log(`  (no practice console built yet — run: npm run build:practice)`);
+  console.log(`  robots can also connect to  ws://localhost:${port}/agent`);
+  console.log(`  open to anyone who has the link — nothing here is scored or recorded`);
+  console.log(`  ctrl-c to stop\n`);
+
+  process.on('SIGINT', () => {
+    session.close();
+    process.exit(0);
+  });
+
+  // Spawned by a venue server's field supervisor rather than started by hand:
+  // its stdin is a pipe held open by the parent, so end-of-file on it means
+  // the parent is gone and this field has nobody left to belong to.
+  if (flags.get('die-with-parent') === 'true') {
+    process.stdin.resume();
+    const orphaned = (): void => {
+      session.close();
+      process.exit(0);
+    };
+    process.stdin.on('end', orphaned);
+    process.stdin.on('close', orphaned);
+  }
+
+  await server.practise(session);
 }
 
 function once(flags: Map<string, string>): void {
@@ -246,7 +374,7 @@ function once(flags: Map<string, string>): void {
     agents: agentsFor(flags.get('opponent')),
     teams,
     halfSeconds: num(flags, 'half', 300),
-    seed: num(flags, 'seed', 1),
+    seed: seedOption(flags, 1),
     idealSensors,
   });
   const result = match.run();
@@ -285,7 +413,7 @@ function ladder(flags: Map<string, string>): void {
     formatLadder(
       runLadder(entries, {
         halfSeconds: num(flags, 'half', 120),
-        seed: num(flags, 'seed', 1),
+        seed: seedOption(flags, 1),
         rounds: num(flags, 'rounds', 1),
       }),
     ),
@@ -407,7 +535,7 @@ async function draw(flags: Map<string, string>): Promise<void> {
     name,
     halfSeconds: num(flags, 'half', 300),
     legs: num(flags, 'legs', 1),
-    seed: num(flags, 'seed', 1),
+    seed: seedOption(flags, matchSeed()),
     refereed,
   });
 
@@ -431,7 +559,7 @@ async function draw(flags: Map<string, string>): Promise<void> {
   console.log(`  ${refereed ? 'refereed, wall-clock' : 'headless, unattended'}  ·  ${made.halfSeconds}s halves`);
   console.log(`  written to ${dir}\n`);
   for (const fixture of made.fixtures) {
-    console.log(`    ${fixture.home} v ${fixture.away}   seeds ${fixture.seeds.join(', ')}`);
+    console.log(`    ${fixture.home} v ${fixture.away}   seeds ${fixture.seeds.map(formatSeedValue).join(', ')}`);
   }
   console.log(`\n  play it:  npm run serve -- tournament --name ${made.id}\n`);
 }
@@ -525,7 +653,7 @@ async function tournament(flags: Map<string, string>): Promise<void> {
         }
       }
 
-      if (made.legs > 1) console.log(`    leg ${leg + 1} of ${made.legs}  (seed ${seed})`);
+      if (made.legs > 1) console.log(`    leg ${leg + 1} of ${made.legs}  (seed ${formatSeedValue(seed)})`);
 
       try {
         const result = await server.play({
@@ -564,23 +692,34 @@ async function table(flags: Map<string, string>): Promise<void> {
   console.log(`\n${formatTable(made, await loadResults(root, made))}\n`);
 }
 
-/** "1-5", "1,4,9" or "7" - a range, a list, or one. */
-function parseSeeds(raw: string): number[] {
-  if (raw.includes('-')) {
-    const [from, to] = raw.split('-').map(Number);
-    if (Number.isFinite(from) && Number.isFinite(to) && to! >= from!) {
-      return Array.from({ length: to! - from! + 1 }, (_, i) => from! + i);
+/** "1-5", "1,4,9", "7", or a mix with 0x… 64-bit seeds — a range, a list, or one. */
+function parseSeeds(raw: string): SeedInput[] {
+  const out: SeedInput[] = [];
+  for (const token of raw.split(',')) {
+    const t = token.trim();
+    if (!t) continue;
+    if (!t.startsWith('0x') && t.includes('-')) {
+      const [from, to] = t.split('-').map(Number);
+      if (Number.isFinite(from) && Number.isFinite(to) && to! >= from!) {
+        for (let s = from!; s <= to!; s++) out.push(s);
+        continue;
+      }
+    }
+    try {
+      out.push(parseSeedLike(t));
+    } catch {
+      // Not a number or a hex seed; ignored, as a NaN token always was.
     }
   }
-  const list = raw.split(',').map(Number).filter(Number.isFinite);
-  return list.length > 0 ? list : DEFAULT_OPTIONS.seeds;
+  return out.length > 0 ? out : DEFAULT_OPTIONS.seeds;
 }
 
 function usage(): void {
   console.log(`
   rcja-soccer-sim
 
-    serve     run the match server and keep playing matches   [--port --half --home --away --seed --opponent --agents --fast --referee --kickoff-countdown]
+    serve     run the match server and keep playing matches   [--port --half --home --away --seed --opponent --agents --fast --referee --practice-fields --kickoff-countdown]
+    practice  open a practice field and leave it open          [--port --league --seed --ideal-sensors]
     match     play one match headless and print the result    [--half --home --away --seed --opponent]
     ladder    play every bot against every other              [--half --rounds --seed]
     bench     measure your robot program and say what is wrong
@@ -591,6 +730,23 @@ function usage(): void {
 
   --opponent puts a test robot on the lime side instead of the reference
   agent: naive-chaser, shover, chaser+camper, spinner, waller, wanderer, statue
+
+  --practice-fields lets anyone with the link open a practice field on the
+  match server: POST /practice answers with a URL, and each field is its own
+  child process reached back through this same port.
+
+  --seed N         fix every seed the command uses: a decimal like 7, or a
+                   64-bit seed like 0x1a2b3c4d5e6f7081. Without it, live play
+                   (serve, draw) draws a fresh 64-bit seed per match, because
+                   a real match should not repeat; ladder and bench keep their
+                   numeric defaults, because they are measurements. The seed a
+                   match actually plays is printed before kick-off, and pasting
+                   it straight back in as --seed replays that exact match.
+
+  practice opens one field that never ends: drag the robots and the ball
+  where you want them, fill a seat with a pushed submission, the built-in
+  agent or a program on your own laptop, and start and stop it as you like.
+  Nothing is scored and nothing is written to disk.
 
   --agents waits for four robot programs to connect on /agent before kicking
   off, instead of playing the built-in reference team. See python/README.md.
@@ -611,7 +767,8 @@ function usage(): void {
     --spawn CMD     start your robots with CMD; {url} becomes the address
     --team          violet (default), lime, or both for a mirror match
     --opponent      reference (default) or a bot name, as above
-    --seeds 1-5     which matches to play: a range, a list, or one
+    --seeds 1-5     which matches to play: a range, a list, or one. Hex
+                    64-bit seeds like 0x… are accepted as their own entry
     --half 90       seconds per half
     --ideal-sensors noise-free sensors. A diagnostic mode, not a fair one:
                     the reference team cannot score at all against a keeper
@@ -653,6 +810,9 @@ const { command, flags } = parse(process.argv.slice(2));
 switch (command) {
   case 'serve':
     await serve(flags);
+    break;
+  case 'practice':
+    await practice(flags);
     break;
   case 'match':
     once(flags);

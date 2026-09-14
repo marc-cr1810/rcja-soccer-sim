@@ -137,6 +137,16 @@ The three tournament commands have their own page — see
 `npm run serve -- --help` (or any command with no recognised flags) prints
 this same summary with the current flag defaults.
 
+**Seeds and replays.** Every match is fixed by a seed: `--seed 5` is fine,
+and so is a 64-bit `--seed 0x1a2b3c4d5e6f7081`. Without `--seed`, `serve` and
+`draw` draw a fresh 64-bit seed per match, and `serve` prints it right before
+kick-off — paste that straight back in as `--seed` to replay the exact match.
+The seed reaches restart placement and every sensor's noise stream, so the
+replay is bit-for-bit: two `match` runs with the same seed print the same
+score and the same goals. Ladder and bench keep numeric seeds by default,
+because they are measurements, but accept the 64-bit form as well
+(`bench --seeds "0x…,0x…"`).
+
 Other `serve` flags worth knowing: `--fast` runs as fast as the physics loop
 allows instead of wall-clock (for a machine, not a screen); `--noisy-sensors`
 turns on drift and dropouts instead of the default ideal sensors;
@@ -217,3 +227,30 @@ is nothing to register or sign into.
 `--referee` and `--agents`/`--home`/`--away` are independent and combine
 freely — four laptops or a pushed submission can play while a human still
 explicitly kicks each half off, exactly as a real match would.
+
+## Practice fields
+
+`--practice-fields` lets anyone who can reach the server open a **practice
+field** on it: a match nobody is scoring, with the robots and the ball placed
+by hand.
+
+```bash
+npm run serve -- --practice-fields
+```
+
+`/practice` then answers with a page with one button on it. Each field is its
+own child process running its own match — a team rehearsing does not slow
+down or interfere with the fixture being played on `/` — reached back through
+this same port at `/f/<field id>/`, so a student's laptop can join one with no
+second port to open in the venue's firewall. Fields shut themselves down once
+nobody is watching, and `--max-fields` (4 by default) caps how many run at
+once, because each is up to four sandboxed robots and a physics loop.
+
+They are **open to whoever has the link**: no token, no login. That is
+deliberate for now — the league has no accounts yet, and a second hand-issued
+credential would only be thrown away when it gets them. Nothing on a practice
+field is scored or recorded, so what a stranger can do there is move somebody
+else's robot around, which is worth one fewer credential to hand out at a
+venue.
+
+See [practising](practising.md) for what a team does with one.

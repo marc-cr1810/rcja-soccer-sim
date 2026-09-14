@@ -401,6 +401,22 @@ export class AgentGateway {
     return out;
   }
 
+  /**
+   * Close one seat's connection and forget it.
+   *
+   * A practice field stops and restarts a single seat's program constantly,
+   * and the seat has to be genuinely free afterwards: a socket left open is a
+   * program still holding a place the replacement is about to claim. Nothing
+   * in a match does this - there, a seat going quiet is rule 5.7's business,
+   * not a withdrawal.
+   */
+  close(seatId: string): void {
+    const seat = this.seats.get(seatId);
+    if (!seat) return;
+    seat.transport.close();
+    this.seats.delete(seatId);
+  }
+
   closeAll(): void {
     for (const seat of this.seats.values()) seat.transport.close();
     this.seats.clear();

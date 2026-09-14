@@ -5,6 +5,7 @@ __pycache__/
 .venv/
 dist-viewer/
 dist-referee/
+dist-practice/
 
 # Runtime state a server accumulates in whatever directory it is run from:
 # pushed submissions, and the draws and results of tournaments played on it.

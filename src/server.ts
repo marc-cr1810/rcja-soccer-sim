@@ -24,13 +24,17 @@ import {
   CONTROL_HZ,
   KICKOFF_COUNTDOWN_SECONDS,
   PHYSICS_HZ,
+  SEAT_IDS,
   type MatchOptions,
   type MatchResult,
+  type SeatId,
 } from './match';
 import { VIEW_HZ, type ViewMessage } from './view';
 import { AGENT_PATH, AgentGateway } from './gateway';
 import { slugifyTeam, TOKEN_FILENAME } from './manifest';
 import { validateSubmission } from './submission';
+import type { PracticeSession, ResolveMode, SeatFill } from './practice';
+import { FieldSupervisor, type FieldSupervisorOptions } from './fields';
 
 export interface ServerOptions {
   port?: number;
@@ -65,6 +69,71 @@ export interface ServerOptions {
    * entirely for a match that must start instantly.
    */
   kickoffCountdown?: number;
+  /**
+   * Built practice console to serve, on its own path.
+   *
+   * Only meaningful on a server started as a practice field - `cli.ts
+   * practice` - and like `refereeRoot`, nothing is served without one.
+   */
+  practiceRoot?: string;
+  /**
+   * Let anyone with the link open a practice field on this server.
+   *
+   * Off unless asked for. Each field is a child process running its own
+   * `MatchServer`, reached back through this one's port — see `fields.ts`.
+   */
+  practiceFields?: FieldSupervisorOptions | boolean;
+}
+
+/** The one page a venue server serves for practice: open a field, or rejoin one. */
+function fieldsPage(fields: { id: string; url: string; createdAt: string }[]): string {
+  const rows =
+    fields.length === 0
+      ? '<p class="dim">No practice fields are open.</p>'
+      : `<ul>${fields
+          .map((f) => `<li><a href="${f.url}">${f.id}</a> <span class="dim">opened ${f.createdAt}</span></li>`)
+          .join('')}</ul>`;
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>RCJA Soccer Simulation — Practice</title>
+<style>
+ body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
+        background:#0b120e; color:#f2f5f0; font-family:"Archivo","Helvetica Neue",Arial,sans-serif; }
+ main { width:min(30rem,90vw); padding:1.5rem; background:#121a15;
+        border:1px solid rgba(242,245,240,.14); border-radius:10px; }
+ h1 { margin:0 0 .3rem; font-size:1.2rem; }
+ p { margin:.3rem 0 1rem; font-size:.85rem; }
+ .dim { color:#8a978f; }
+ button { font:inherit; padding:.5rem .8rem; border-radius:6px; cursor:pointer;
+          border:1px solid rgba(242,245,240,.2); background:rgba(242,245,240,.06); color:inherit; }
+ ul { padding-left:1.1rem; font-size:.85rem; } a { color:#6fd39a; }
+</style></head><body><main>
+<h1>Practice</h1>
+<p class="dim">A field is yours to arrange: put your pushed robots on it, move them and the ball
+where you like, and watch. Nothing here is scored or recorded, and anyone with the link can join.</p>
+<button id="open">Open a practice field</button>
+<div id="open-error" class="dim"></div>
+<h2 style="font-size:.72rem;letter-spacing:.1em;text-transform:uppercase;color:#8a978f;margin:1.2rem 0 .3rem">Already open</h2>
+${rows}
+<script>
+document.getElementById('open').addEventListener('click', async () => {
+  const res = await fetch('/practice', { method: 'POST', headers: { accept: 'application/json' } });
+  const payload = await res.json().catch(() => ({}));
+  if (payload && payload.ok) location.href = payload.field.url;
+  else document.getElementById('open-error').textContent = (payload && payload.reason) || 'could not open a field';
+});
+</script>
+</main></body></html>`;
+}
+
+/** `/f/<id>/rest` split into the field and what to ask it for. */
+function splitFieldPath(url: string): { id: string; rest: string } | null {
+  if (!url.startsWith('/f/')) return null;
+  const after = url.slice('/f/'.length);
+  const slash = after.indexOf('/');
+  if (slash <= 0) return null;
+  return { id: after.slice(0, slash), rest: after.slice(slash) };
 }
 
 const MAX_SUBMIT_BYTES = 2 * 1024 * 1024;
@@ -103,6 +172,12 @@ export class MatchServer {
   private current: Match | null = null;
   private readonly viewerRoot: string | null;
   private readonly refereeRoot: string | null;
+  private readonly practiceRoot: string | null;
+  /** The practice field this server is running, if it is one. */
+  private practice: PracticeSession | null = null;
+  /** The practice fields this server is hosting for other people, if it does that. */
+  private readonly fields: FieldSupervisor | null;
+  private stopped = false;
   private readonly refereeToken: string | null;
   private readonly realtime: boolean;
   private readonly pythonLibDir: string | null;
@@ -111,12 +186,26 @@ export class MatchServer {
   constructor(private readonly opts: ServerOptions = {}) {
     this.viewerRoot = opts.viewerRoot ? resolve(opts.viewerRoot) : null;
     this.refereeRoot = opts.refereeRoot ? resolve(opts.refereeRoot) : null;
+    this.practiceRoot = opts.practiceRoot ? resolve(opts.practiceRoot) : null;
+    this.fields = opts.practiceFields
+      ? new FieldSupervisor({
+          submissionsDir: resolve(opts.submissionsDir ?? 'submissions'),
+          ...(opts.practiceFields === true ? {} : opts.practiceFields),
+        })
+      : null;
     this.refereeToken = opts.refereeToken ?? null;
     this.realtime = opts.realtime ?? true;
     this.pythonLibDir = opts.pythonLibDir ? resolve(opts.pythonLibDir) : null;
     this.submissionsDir = resolve(opts.submissionsDir ?? 'submissions');
 
     this.http.on('upgrade', (req, socket, head) => {
+      // A field's own sockets - its viewers and its robots - belong to the
+      // child process running it, not to this server, so they are handed
+      // straight through before anything here looks at them.
+      const forField = splitFieldPath(req.url ?? '/');
+      if (forField && this.fields?.proxyUpgrade(forField.id, forField.rest, req, socket, head)) {
+        return;
+      }
       // One port for both, split by path: a venue has enough to configure
       // without a second hole in a firewall for the robots.
       const agent = (req.url ?? '/').split('?')[0] === AGENT_PATH;
@@ -181,6 +270,9 @@ export class MatchServer {
   }
 
   async close(): Promise<void> {
+    this.stopped = true;
+    this.practice?.close();
+    this.fields?.closeAll();
     this.agents.closeAll();
     for (const ws of this.viewers) ws.close();
     this.viewers.clear();
@@ -188,6 +280,11 @@ export class MatchServer {
     await new Promise<void>((ok) => this.http.close(() => ok()));
     await new Promise<void>((ok) => this.agentSocket.close(() => ok()));
     if (this.agentScratchDir) await rm(this.agentScratchDir, { recursive: true, force: true }).catch(() => {});
+  }
+
+  /** Stop every practice field this server is hosting, now. */
+  closeFields(): void {
+    this.fields?.closeAll();
   }
 
   /** How many screens are watching. */
@@ -435,11 +532,129 @@ export class MatchServer {
     return match.result();
   }
 
+  /**
+   * Run a practice field for as long as the server is up.
+   *
+   * Every other loop in this file is playing a match towards an end: two
+   * halves, a time budget, a result. This one has no end at all, because a
+   * practice field is a room rather than a fixture - it steps when whoever is
+   * in it says to, holds still when they stop it, and the arrangement, the
+   * roster and the programs all change underneath it while it runs. Nothing
+   * is returned because nothing is recorded: no fixture, no table, no match
+   * record. That is the phase's own rule, not an omission.
+   */
+  async practise(session: PracticeSession): Promise<void> {
+    this.practice = session;
+    this.current = session.match;
+    // No stand-down on a practice field: a team restarting their own program
+    // is not serving a sanction, and a seat that refused the reconnect would
+    // just look broken. `PracticeSession.syncSeats` puts the robot back on.
+    this.agents.standDown = () => 0;
+    this.broadcast({
+      type: 'hello',
+      league: session.match.league,
+      teams: session.match.teams,
+      halfSeconds: session.match.halfLength,
+    });
+
+    const dt = 1 / PHYSICS_HZ;
+    const viewHz = Math.max(10, Math.min(100, this.opts.viewHz ?? VIEW_HZ));
+    const framePeriod = 1000 / viewHz;
+    let owed = 0;
+    let last = Date.now();
+
+    while (!this.stopped) {
+      await sleep(framePeriod);
+      const now = Date.now();
+      owed += (now - last) / 1000;
+      last = now;
+      // Same starvation guard as the match loops: never make up more than a
+      // moment at once.
+      owed = Math.min(owed, 0.25);
+
+      session.syncSeats();
+
+      if (session.match.world.running) {
+        while (owed >= dt) {
+          session.match.step(dt);
+          owed -= dt;
+        }
+      } else {
+        // Stopped is stopped: a field held still for a minute while somebody
+        // arranges it must not then play that minute in one frame.
+        owed = 0;
+      }
+      this.broadcast({ type: 'frame', frame: session.match.snapshot() });
+    }
+  }
+
   /** Serve the built viewer or referee console, or a push/referee action, if there is one. */
   private async serve(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = (req.url ?? '/').split('?')[0] ?? '/';
     if (req.method === 'POST' && url === '/submit') {
       await this.handleSubmit(req, res);
+      return;
+    }
+    // A field this server is hosting for somebody else: everything under its
+    // prefix is the child's business, including its own practice API.
+    const forField = splitFieldPath(req.url ?? '/');
+    if (forField) {
+      if (this.fields?.proxy(forField.id, forField.rest, req, res)) return;
+      this.respondJson(res, 404, { ok: false, reason: 'no practice field by that name' });
+      return;
+    }
+    if (url === '/practice' && this.fields) {
+      // Opening a field is a POST; a GET here lists what is already running,
+      // so a venue can see what it is hosting without a console for it.
+      if (req.method === 'POST') {
+        try {
+          const field = await this.fields.create();
+          this.respondJson(res, 201, { ok: true, field });
+        } catch (err) {
+          this.respondJson(res, 503, { ok: false, reason: (err as Error).message });
+        }
+        return;
+      }
+      // A browser gets somewhere to click; anything else gets the list.
+      // Deliberately one small inline page rather than a fourth built bundle:
+      // it has one button on it, and a venue should not have to run a build
+      // step before a team can open a field.
+      if ((req.headers.accept ?? '').includes('text/html')) {
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+        res.end(fieldsPage(this.fields.list()));
+        return;
+      }
+      this.respondJson(res, 200, { ok: true, fields: this.fields.list() });
+      return;
+    }
+    if (url === '/practice-api/state' && req.method === 'GET') {
+      if (!this.practice) {
+        this.respondJson(res, 404, { ok: false, reason: 'this server is not a practice field' });
+        return;
+      }
+      this.respondJson(res, 200, { ok: true, state: this.practice.state() });
+      return;
+    }
+    if (req.method === 'POST' && url.startsWith('/practice-api/')) {
+      await this.handlePracticeAction(req, res, url.slice('/practice-api/'.length));
+      return;
+    }
+    // The practice console, on its own path like the referee's. No token:
+    // a practice field is open to whoever has the link, which is Phase 4's
+    // deliberate position until Phase 6 builds accounts - see PHASES.md.
+    if (url === '/practice' || url.startsWith('/practice/')) {
+      // `/practice` has to become `/practice/` before anything is served from
+      // it: the console's assets are relative, so that a field reached at
+      // `/f/<id>/practice/` through a venue server finds them at the same
+      // place a standalone one does. Without the trailing slash the browser
+      // resolves them a directory too high.
+      if (url === '/practice') {
+        res.writeHead(302, { location: '/practice/' });
+        res.end();
+        return;
+      }
+      const sub = url.slice('/practice'.length);
+      await this.serveStatic(res, this.practiceRoot, sub, 'no practice console built; run: npm run build:practice');
       return;
     }
     if (req.method === 'POST' && url.startsWith('/referee-api/')) {
@@ -493,6 +708,147 @@ export class MatchServer {
    * whole surface 404 regardless of path or body — a server started without
    * `--referee` exposes nothing new at all.
    */
+  /**
+   * One action on the practice field, from whoever has the link.
+   *
+   * Unauthenticated on purpose, and only reachable at all on a server that is
+   * a practice field: `this.practice` is null on a match server, so every one
+   * of these answers 404 there. Nothing a match does grows a new door.
+   */
+  private async handlePracticeAction(
+    req: IncomingMessage,
+    res: ServerResponse,
+    action: string,
+  ): Promise<void> {
+    const session = this.practice;
+    if (!session) {
+      this.respondJson(res, 404, { ok: false, reason: 'this server is not a practice field' });
+      return;
+    }
+
+    const body = await this.readBody(req, 4096);
+    if (body === null) {
+      this.respondJson(res, 413, { ok: false, reason: 'request body too large' });
+      return;
+    }
+    let payload: Record<string, unknown> = {};
+    if (body.length > 0) {
+      try {
+        payload = JSON.parse(body.toString('utf8')) as Record<string, unknown>;
+      } catch {
+        this.respondJson(res, 400, { ok: false, reason: 'body is not valid JSON' });
+        return;
+      }
+    }
+
+    const seatId = (): SeatId | null => {
+      const { seat } = payload;
+      return SEAT_IDS.includes(seat as SeatId) ? (seat as SeatId) : null;
+    };
+
+    switch (action) {
+      case 'start':
+        session.start();
+        break;
+      case 'stop':
+        session.stop();
+        break;
+      case 'restage':
+        session.restage();
+        break;
+      case 'keep':
+        session.keepAsArranged();
+        break;
+      case 'place': {
+        const { target, x, z, heading, vx, vz } = payload;
+        const valid = target === 'ball' || SEAT_IDS.includes(target as SeatId);
+        if (!valid || typeof x !== 'number' || typeof z !== 'number') {
+          this.respondJson(res, 400, {
+            ok: false,
+            reason: '"target" must be "ball" or a seat id, with numeric "x" and "z"',
+          });
+          return;
+        }
+        session.place(target as 'ball' | SeatId, {
+          x,
+          z,
+          heading: typeof heading === 'number' ? heading : undefined,
+          vx: typeof vx === 'number' ? vx : undefined,
+          vz: typeof vz === 'number' ? vz : undefined,
+        });
+        break;
+      }
+      case 'roster': {
+        const id = seatId();
+        const { onField } = payload;
+        if (!id || typeof onField !== 'boolean') {
+          this.respondJson(res, 400, { ok: false, reason: '"seat" and boolean "onField" are required' });
+          return;
+        }
+        session.setRoster(id, onField);
+        break;
+      }
+      case 'resolve': {
+        const { mode } = payload;
+        if (mode !== 'restage' && mode !== 'play-on' && mode !== 'freeze') {
+          this.respondJson(res, 400, {
+            ok: false,
+            reason: '"mode" must be "restage", "play-on" or "freeze"',
+          });
+          return;
+        }
+        session.setResolve(mode satisfies ResolveMode);
+        break;
+      }
+      case 'seat': {
+        const id = seatId();
+        const { fill, team } = payload;
+        if (!id) {
+          this.respondJson(res, 400, { ok: false, reason: '"seat" must be a seat id' });
+          return;
+        }
+        if (fill !== 'empty' && fill !== 'built-in' && fill !== 'laptop' && fill !== 'submission') {
+          this.respondJson(res, 400, {
+            ok: false,
+            reason: '"fill" must be "empty", "built-in", "laptop" or "submission"',
+          });
+          return;
+        }
+        if (fill === 'submission' && (typeof team !== 'string' || team.trim() === '')) {
+          this.respondJson(res, 400, { ok: false, reason: '"team" is required for a submission' });
+          return;
+        }
+        const chosen: SeatFill =
+          fill === 'submission' ? { kind: 'submission', team: team as string } : { kind: fill };
+        await session.setSeat(id, chosen);
+        break;
+      }
+      case 'seat-restart': {
+        const id = seatId();
+        if (!id) {
+          this.respondJson(res, 400, { ok: false, reason: '"seat" must be a seat id' });
+          return;
+        }
+        await session.restartSeat(id);
+        break;
+      }
+      case 'seat-stop': {
+        const id = seatId();
+        if (!id) {
+          this.respondJson(res, 400, { ok: false, reason: '"seat" must be a seat id' });
+          return;
+        }
+        session.stopSeat(id);
+        break;
+      }
+      default:
+        this.respondJson(res, 404, { ok: false, reason: `unknown practice action "${action}"` });
+        return;
+    }
+
+    this.respondJson(res, 200, { ok: true, state: session.state() });
+  }
+
   private async handleRefereeAction(req: IncomingMessage, res: ServerResponse, action: string): Promise<void> {
     if (!this.refereeToken) {
       this.respondJson(res, 404, { ok: false, reason: 'referee mode is not enabled on this server' });

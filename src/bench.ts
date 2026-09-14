@@ -25,6 +25,7 @@ import { referenceTeam } from './reference';
 import { botRoster } from './bots';
 import { HALF_LENGTH, HALF_WIDTH } from './field';
 import { MOUNT_RADIUS } from './drive';
+import { formatSeedValue, type SeedInput } from './rand';
 import type { MatchAgents } from './match';
 import type { TeamId, World } from './world';
 
@@ -35,7 +36,7 @@ export interface BenchOptions {
   team: TeamId | 'both';
   /** Who fills the other side: 'reference', or the name of a built-in bot. */
   opponent: string;
-  seeds: number[];
+  seeds: SeedInput[];
   halfSeconds: number;
   /**
    * Noise, drift and camera latency off. False by default, matching the
@@ -218,7 +219,7 @@ export interface BenchResult {
   kickoffs: KickOffTelemetry[];
   findings: Finding[];
   /** Per-seed scorelines, so a result that hangs on one match is obvious. */
-  scores: { seed: number; for: number; against: number }[];
+  scores: { seed: SeedInput; for: number; against: number }[];
 }
 
 export interface Finding {
@@ -871,7 +872,7 @@ export async function runBench(
         bag.worstRun = Math.max(bag.worstRun, slot.worstRun);
         bag.errors += slot.errors;
       }
-      log(`  seed ${seed}: ${result.score[testedSide]} - ${result.score[otherSide]}`);
+      log(`  seed ${formatSeedValue(seed)}: ${result.score[testedSide]} - ${result.score[otherSide]}`);
     }
 
     return aggregate(opts, seats, testedSide, samplers, scores, slotReports);

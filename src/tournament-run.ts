@@ -14,6 +14,7 @@
  */
 
 import type { MatchResult } from './match';
+import type { SeedInput } from './rand';
 import {
   nextFixture,
   type Draw,
@@ -31,7 +32,7 @@ export interface PlayedLeg {
 
 export interface RunOptions {
   /** Play one leg of a fixture. Home is violet, away is lime. */
-  playLeg: (fixture: Fixture, seed: number, leg: number) => Promise<PlayedLeg>;
+  playLeg: (fixture: Fixture, seed: SeedInput, leg: number) => Promise<PlayedLeg>;
   /** Called before a fixture's first leg, for logging. */
   onFixtureStart?: (fixture: Fixture, played: number, total: number) => void;
   /** Called once a fixture's result is safely on disk. */

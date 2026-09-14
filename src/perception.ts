@@ -22,6 +22,7 @@ import {
   readRange,
   type Pose,
 } from './sensors';
+import { streamSeed, toSeed, type SeedInput } from './rand';
 import type { KickoffReading, SensorFrame, TeamMessage } from './protocol';
 
 export interface SensedRobot extends Pose {
@@ -95,16 +96,17 @@ export class Senses {
    *              on a team do not receive identical noise and accidentally look
    *              better coordinated than they are.
    */
-  constructor(seed: number, motorCount: number, idealSensors = false) {
-    this.ir = new Noise(seed ^ Stream.Ir);
-    this.compassNoise = new Noise(seed ^ Stream.Compass);
-    this.lineNoise = new Noise(seed ^ Stream.Lines);
-    this.rangeNoise = new Noise(seed ^ Stream.Range);
-    this.cameraNoise = new Noise(seed ^ Stream.Camera);
-    this.gyroNoise = new Noise(seed ^ Stream.Gyro);
+  constructor(seed: SeedInput, motorCount: number, idealSensors = false) {
+    const s = toSeed(seed);
+    this.ir = new Noise(streamSeed(s, Stream.Ir));
+    this.compassNoise = new Noise(streamSeed(s, Stream.Compass));
+    this.lineNoise = new Noise(streamSeed(s, Stream.Lines));
+    this.rangeNoise = new Noise(streamSeed(s, Stream.Range));
+    this.cameraNoise = new Noise(streamSeed(s, Stream.Camera));
+    this.gyroNoise = new Noise(streamSeed(s, Stream.Gyro));
     // The camera owns its blob stream, kept apart from `cameraNoise` so that
     // adding the blobs did not shift the sightings that were already there.
-    this.camera = new CameraState(seed);
+    this.camera = new CameraState(s);
     this.encoders = new EncoderState(motorCount);
     this.idealSensors = idealSensors;
   }

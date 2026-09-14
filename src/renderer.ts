@@ -491,6 +491,35 @@ export class FieldRenderer {
     this.renderer.render(this.scene, this.camera);
   }
 
+  /**
+   * Where on the carpet a point on the canvas is, in field millimetres.
+   *
+   * The practice console needs this and nothing else from the camera: a drag
+   * is a screen point, the thing being dragged lives in millimetres, and only
+   * the renderer knows how the one becomes the other. Exposing a `pick`
+   * rather than the camera keeps it that way - a console that could reach the
+   * camera would end up moving it.
+   *
+   * Returns null for a point that misses the carpet plane entirely, which
+   * from the referee's overhead angle is only ever the sky above the far
+   * wall.
+   */
+  pick(clientX: number, clientY: number): { x: number; z: number } | null {
+    const rect = this.canvas.getBoundingClientRect();
+    if (rect.width < 1 || rect.height < 1) return null;
+    const ndc = new THREE.Vector2(
+      ((clientX - rect.left) / rect.width) * 2 - 1,
+      -((clientY - rect.top) / rect.height) * 2 + 1,
+    );
+    const ray = new THREE.Raycaster();
+    ray.setFromCamera(ndc, this.camera);
+    const hit = new THREE.Vector3();
+    // The carpet, not the scene: dropping a robot has to land where the
+    // pointer is on the ground, not on top of whatever mesh is under it.
+    if (!ray.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), 0), hit)) return null;
+    return { x: hit.x / MM, z: hit.z / MM };
+  }
+
   dispose(): void {
     this.renderer.dispose();
   }

@@ -33,7 +33,7 @@ measures the robots. Three entrants is six fixtures, four is twelve.
 | `--teams "A,B,C"` | entrants, instead of scanning `submissions/` |
 | `--legs 1` | matches per fixture; `3` for best-of-three |
 | `--half 300` | seconds per half |
-| `--seed 1` | the draw's base seed |
+| `--seed 1` | the draw's base seed. A decimal or a `0x…` 64-bit seed (16 hex digits). Without it the draw draws one fresh per tournament, which is what a competition wants; with it the same command makes the same draw, for reproduction |
 | `--headless` | make a tournament that never waits for a referee |
 
 **A draw is written once and never rewritten.** Re-running `draw` with the same

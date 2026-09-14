@@ -29,6 +29,7 @@ import {
   goalMouth,
 } from './field';
 import { wrapAngle } from './drive';
+import { mix32, streamSeed, toSeed, unitNormal, type SeedInput } from './rand';
 import type {
   BallReading,
   Blob,
@@ -45,34 +46,76 @@ const ROBOT_RADIUS = 110;
 // ---------------------------------------------------------------- randomness
 
 /**
- * Seeded xorshift, one stream per sensor per robot.
+ * Seeded xoshiro128++, one stream per sensor per robot.
  *
  * Math.random would make a match impossible to replay, and replay is what a
- * §6.1.3 protest rests on.
+ * §6.1.3 protest rests on. The four-word state is spread by a splitmix-style
+ * expansion of the 64-bit seed key, which is the seeding the generator's
+ * author recommends; the step itself is additions, a rotation and three xors.
+ * Replacements for the old xorshift were tested the way anything replacing a
+ * number a season's replays depend on gets tested: cross-checked against an
+ * independent implementation, with a golden vector pinned in the test suite.
+ *
+ * A seed key is only 64 bits, and 2^64 states when fewer than 2^128 of them
+ * are ever drawn is not a deficit for a match: two matches are not going to
+ * collide into the same noise, and if a match has to be replayed exactly, the
+ * seed is right there in the record.
  */
 export class Noise {
-  private state: number;
+  private a: number;
+  private b: number;
+  private c: number;
+  private d: number;
 
-  constructor(seed: number) {
-    // Zero is a fixed point of xorshift, so never let it be the seed.
-    this.state = seed >>> 0 || 0x2f6e2b1;
+  constructor(seed: SeedInput) {
+    const s = toSeed(seed);
+    let state = s.lo;
+    const expand = (): number => {
+      state = (state + 0x9e3779b9) >>> 0;
+      return mix32(state ^ s.hi);
+    };
+    this.a = expand();
+    this.b = expand();
+    this.c = expand();
+    this.d = expand();
+    // All-zero state is the one pair xoshiro cannot step, same trap as the
+    // old xorshift had. Make it not happen rather than detect it later.
+    if ((this.a | this.b | this.c | this.d) === 0) {
+      this.a = 0x9e3779b9;
+      this.c = 0x6d2b79f5;
+    }
   }
 
   /** Uniform in 0..1. */
   next(): number {
-    let s = this.state;
-    s ^= s << 13;
-    s ^= s >>> 17;
-    s ^= s << 5;
-    this.state = s >>> 0;
-    return this.state / 0x100000000;
+    return this.next32() / 0x100000000;
   }
 
-  /** Roughly normal, mean 0, given standard deviation. Sum of three uniforms. */
-  gaussian(sd: number): number {
-    const u = this.next() + this.next() + this.next() - 1.5;
-    return u * 2 * sd;
+  /** The xoshiro128++ step, returning a 32-bit word. Blackman's generator. */
+  private next32(): number {
+    const a = this.a;
+    const b = this.b;
+    const c = this.c;
+    const d = this.d;
+    const result = (rotl(a + d, 7) + a) >>> 0;
+    const t = (b << 9) >>> 0;
+    this.c = (c ^ a) >>> 0;
+    this.d = (d ^ b) >>> 0;
+    this.b = (b ^ this.c) >>> 0;
+    this.a = (a ^ this.d) >>> 0;
+    this.c = (this.c ^ t) >>> 0;
+    this.d = rotl(this.d, 11);
+    return result;
   }
+
+  /** Exactly normal, mean 0, given standard deviation. */
+  gaussian(sd: number): number {
+    return unitNormal(this.next()) * sd;
+  }
+}
+
+function rotl(x: number, k: number): number {
+  return ((x << k) | (x >>> (32 - k))) >>> 0;
 }
 
 // ------------------------------------------------------------------ geometry
@@ -598,8 +641,8 @@ export class CameraState {
   private sinceFrame = Infinity;
 
   /** @param seed Match seed mixed with the robot's identity, as `Senses` does. */
-  constructor(seed = 0) {
-    this.blobNoise = new Noise((seed ^ BLOB_STREAM) >>> 0);
+  constructor(seed: SeedInput = 0) {
+    this.blobNoise = new Noise(streamSeed(toSeed(seed), BLOB_STREAM));
   }
 
   private last: CameraReading = {

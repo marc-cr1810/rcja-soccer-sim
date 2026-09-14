@@ -18,6 +18,7 @@
 
 import { award, blankStanding, compareStandings, invert, type Standing } from './ladder';
 import { slugifyTeam } from './manifest';
+import { addSeed, type SeedInput } from './rand';
 import type { MatchResult } from './match';
 import type { LeagueId } from './leagues';
 
@@ -39,9 +40,11 @@ export interface Fixture {
    *
    * Recorded rather than derived at kick-off so that a fixture replayed after a
    * crash is the same fixture, and so that a result can be reproduced later by
-   * anyone holding the draw and the two submissions.
+   * anyone holding the draw and the two submissions. A number is a plain match
+   * seed; `{ hi, lo }` is the full 64-bit form the CLI stores for a crypto
+   * draw.
    */
-  seeds: number[];
+  seeds: SeedInput[];
 }
 
 export interface Draw {
@@ -60,7 +63,7 @@ export interface Draw {
 }
 
 export interface LegRecord {
-  seed: number;
+  seed: SeedInput;
   /** Home played violet, away played lime. */
   result: MatchResult;
 }
@@ -93,7 +96,12 @@ export interface DrawOptions {
   halfSeconds?: number;
   legs?: number;
   refereed?: boolean;
-  seed?: number;
+  /**
+   * Base of the fixture seeds, exactly `seed + index * SEED_STRIDE + leg` (the
+   * 64-bit form carries). A numeric value reproduces a draw exactly; a 64-bit
+   * one records fresh crypto seeds for a competition.
+   */
+  seed?: SeedInput;
 }
 
 /** Spacing between fixtures' seeds, as the ladder already uses. */
@@ -122,11 +130,18 @@ export function makeDraw(entrants: string[], opts: DrawOptions): Draw {
     for (const away of unique) {
       if (home === away) continue;
       const index = fixtures.length;
+      const seeds = Array<SeedInput>(legs);
+      for (let leg = 0; leg < legs; leg++) {
+        seeds[leg] =
+          typeof baseSeed === 'number'
+            ? baseSeed + index * SEED_STRIDE + leg
+            : addSeed(addSeed(baseSeed, index * SEED_STRIDE), leg);
+      }
       fixtures.push({
         id: `${slugifyTeam(home)}-v-${slugifyTeam(away)}`,
         home,
         away,
-        seeds: Array.from({ length: legs }, (_, leg) => baseSeed + index * SEED_STRIDE + leg),
+        seeds,
       });
     }
   }

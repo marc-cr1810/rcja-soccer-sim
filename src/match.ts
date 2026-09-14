@@ -11,10 +11,11 @@
  * can touch are the dribbler and the kicker on its own chassis.
  */
 
-import { World, type MatchEvent, type Robot, type TeamId } from './world';
+import { World, type Arrangement, type MatchEvent, type Robot, type TeamId } from './world';
 import { getLeague, type LeagueId } from './leagues';
 import { AgentSlot, LocalTransport, type Agent, type Transport } from './agent';
 import { Senses, TeamRadio, type MatchView, type SensedRobot } from './perception';
+import { foldSeed, streamSeed, toSeed, withWord, type Seed, type SeedInput } from './rand';
 import type { ActuatorFrame } from './protocol';
 import { wrapAngle } from './drive';
 import type { ViewEvent, ViewFrame } from './view';
@@ -47,13 +48,38 @@ const KICK_COOLDOWN = 1.2;
 export const KICKOFF_COUNTDOWN_SECONDS = 3;
 /** How firmly the roller holds the ball against the robot. */
 const DRIBBLE_GRIP = 0.55;
+/**
+ * Unused stream tag for the per-match ball friction draw.
+ *
+ * Won't collide with sensor streams (0x1f-0x65 and 0x7c): XORs of its value
+ * against match seeds are spread by `foldSeed`'s mix before use.
+ */
+const BALL_FRICTION_STREAM = 0x8b;
+/** Motors on a robot, for a seat whose robot is not currently on the field. */
+const MOTOR_COUNT = 4;
 
-/** Keyed by the world's own robot ids. */
-export interface MatchAgents {
-  'violet-1': Agent;
-  'violet-2': Agent;
-  'lime-1': Agent;
-  'lime-2': Agent;
+/** The four seats, in the order everything that iterates them uses. */
+export const SEAT_IDS = ['violet-1', 'violet-2', 'lime-1', 'lime-2'] as const;
+export type SeatId = (typeof SEAT_IDS)[number];
+
+/**
+ * Keyed by the world's own robot ids.
+ *
+ * Partial, because `MatchOptions.arrangement` decides who is actually on the
+ * field: a rehearsal of one robot alone needs one program, not four. A seat
+ * with no program is simply not filled - and a robot on the field with no
+ * program is still an error, because nothing would be driving it.
+ */
+export type MatchAgents = Partial<Record<SeatId, Agent>>;
+
+/**
+ * Whether this is a program on the other end of something or a function call.
+ *
+ * `Transport` is the wider of the two - a `LocalTransport` wraps an `Agent` -
+ * so the test is for what only a transport has.
+ */
+function isTransport(program: Agent | Transport): program is Transport {
+  return typeof (program as Transport).send === 'function';
 }
 
 /** Robot number, 1 or 2, from an id like 'violet-2'. */
@@ -78,8 +104,19 @@ export interface MatchOptions {
   league?: LeagueId;
   /** Seconds per half. Rule 5.2.1 says five minutes. */
   halfSeconds?: number;
-  /** Fixes every noise stream in the match, so a result can be reproduced. */
-  seed?: number;
+  /**
+   * Fixes every noise stream and the restart placements in the match, so a
+   * result can be reproduced. A number's bits are the seed's low word; a
+   * `{ hi, lo }` seed carries the full 64 bits a crypto draw produces. See
+   * `rand.ts`.
+   */
+  seed?: SeedInput;
+  /**
+   * A situation to start from, and to restart back into, instead of the
+   * kick-off marks. Omit for an ordinary match, which is every match this
+   * codebase plays. See `World.stage`.
+   */
+  arrangement?: Arrangement;
   inclined?: boolean;
   idealSensors?: boolean;
   /**
@@ -219,6 +256,9 @@ export class Match {
     lime: new TeamRadio(),
   };
   private readonly halfSeconds: number;
+  /** Kept so a seat filled after kick-off gets the same sensors as one filled before. */
+  private readonly seed: Seed;
+  private readonly idealSensors: boolean;
   readonly teams: { violet: string; lime: string };
   private sinceControl = 0;
   /**
@@ -257,6 +297,8 @@ export class Match {
     this.halfSeconds = opts.halfSeconds ?? 300;
     this.teams = opts.teams ?? { violet: 'Violet', lime: 'Lime' };
     this.refereed = opts.refereed ?? false;
+    const seed = toSeed(opts.seed ?? 1);
+    this.seed = seed;
     this.world = new World({
       league,
       halfLengthSeconds: this.halfSeconds,
@@ -264,38 +306,43 @@ export class Match {
       // Nothing draws from the noise streams at all with ideal sensors, so a
       // seed that went no further left every seeded match identical - and a
       // bench or ladder iterating seeds averaging over a single sample.
-      placementSeed: opts.seed ?? 1,
+      placementSeed: foldSeed(seed),
+      // Every match gets its own carpet. Drawn from the seed so a replay is
+      // the same carpet, and drawn from the whole 64-bit seed (not the folded
+      // placement seed) so the same restart placement still varies the roll.
+      ballFriction: 0.9 + (foldSeed(streamSeed(seed, BALL_FRICTION_STREAM)) / 0x100000000) * 0.2,
       inclined: opts.inclined ?? false,
       commsEnabled: league.commsAllowed,
       autoResolve: opts.autoResolve,
       autoDamaged: opts.autoDamaged,
       kickoffCountdown: opts.kickoffCountdown ?? 0,
     });
-    this.world.resetRobots('violet');
+    if (opts.arrangement) this.world.stage(opts.arrangement);
+    else this.world.resetRobots('violet');
 
     this.observer = opts.observe;
 
-    const seed = opts.seed ?? 1;
-    const byId = opts.agents as unknown as Record<string, Agent>;
-    for (const robot of this.world.robots) {
-      const agent = byId[robot.id];
-      if (!agent && !opts.transports?.[robot.id]) {
-        throw new Error(`no program for robot ${robot.id}`);
+    this.idealSensors = opts.idealSensors ?? false;
+    const byId: Partial<Record<string, Agent>> = opts.agents;
+    // Over the seats rather than over `world.robots`, so a seat keeps its
+    // program while its robot is off the field - a rehearsal that stages one
+    // robot now and both of them a moment later would otherwise have nothing
+    // to drive the second with. A slot whose robot is not on the field is
+    // skipped every control cycle (`control` bails on `!robot`) and costs
+    // nothing until it is.
+    for (const id of SEAT_IDS) {
+      const agent = byId[id];
+      const transport = opts.transports?.[id];
+      const robot = this.world.robots.find((r) => r.id === id);
+      if (!agent && !transport) {
+        if (robot) throw new Error(`no program for robot ${id}`);
+        continue;
       }
-      this.slots.set(robot.id, {
-        id: robot.id,
-        senses: new Senses(
-          seed * 2654435761 + hash(robot.id),
-          robot.motors.length,
-          opts.idealSensors ?? false,
-        ),
-        agent: new AgentSlot(
-          opts.transports?.[robot.id] ?? new LocalTransport(agent!, robot.motors.length),
-        ),
-        kickCooldown: 0,
-        command: { motors: [0, 0, 0, 0] },
-        wasConnected: true,
-      });
+      const motors = robot?.motors.length ?? MOTOR_COUNT;
+      this.slots.set(
+        id,
+        this.makeSlot(id, transport ?? new LocalTransport(agent!, motors), motors),
+      );
     }
   }
 
@@ -539,6 +586,67 @@ export class Match {
     if (!this.world.countdownActive) this.world.running = true;
     this.hasKickedOffThisHalf = true;
     this.recordRefereeAction('award-kickoff');
+  }
+
+  private makeSlot(id: string, transport: Transport, motors = MOTOR_COUNT): Slot {
+    return {
+      id,
+      senses: new Senses(withWord(this.seed, hash(id)), motors, this.idealSensors),
+      agent: new AgentSlot(transport),
+      kickCooldown: 0,
+      command: { motors: [0, 0, 0, 0] },
+      wasConnected: true,
+    };
+  }
+
+  /**
+   * Put a program in a seat, replacing whatever was in it.
+   *
+   * Nothing does this during a match - a match's seats are settled before the
+   * whistle and a program that drops out is a rule 5.7 matter, not a
+   * substitution. A practice field does it constantly: a team swaps their own
+   * submission for the built-in agent to see the difference, or restarts a
+   * program they just re-pushed, and neither should cost them the situation
+   * they had arranged. The seat's sensors are rebuilt with the same seed the
+   * match started with, so a seat filled now and a seat filled at kick-off
+   * see the same noise.
+   */
+  setSeat(id: SeatId, program: Agent | Transport): void {
+    const transport = isTransport(program) ? program : new LocalTransport(program, MOTOR_COUNT);
+    this.slots.set(id, this.makeSlot(id, transport));
+  }
+
+  /** Empty a seat. Its robot, if it is on the field, stops where it stands. */
+  clearSeat(id: SeatId): void {
+    const robot = this.robotFor(id);
+    if (robot) robot.motors = [0, 0, 0, 0];
+    this.slots.delete(id);
+  }
+
+  /** Whether this seat has a program in it. */
+  hasSeat(id: SeatId): boolean {
+    return this.slots.has(id);
+  }
+
+  /**
+   * Put a situation on the field, and make it what restarts go back to.
+   *
+   * Not a referee action and not recorded as one - nothing stages anything
+   * during a scored match. A seat whose robot the arrangement leaves off keeps
+   * its program and simply has nothing to drive until it is staged back on.
+   */
+  stage(arrangement: Arrangement): void {
+    this.world.stage(arrangement);
+  }
+
+  /** Change what restarts go back to, leaving the field where it is. */
+  setArrangement(arrangement: Arrangement): void {
+    this.world.setArrangement(arrangement);
+  }
+
+  /** Back to ordinary kick-offs, leaving the field as it stands. */
+  unstage(): void {
+    this.world.unstage();
   }
 
   /** Rule 5.7: take a robot off for the reason given. */

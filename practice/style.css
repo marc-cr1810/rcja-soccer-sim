@@ -1,0 +1,168 @@
+/* Practice field: a workbench, not a scoreboard. Same palette as the referee console. */
+:root {
+  --ink: #f2f5f0;
+  --dim: #8a978f;
+  --violet: #8b5cf6;
+  --lime: #3fce5a;
+  --ground: #0b120e;
+  --panel: #121a15;
+  --good: #6fd39a;
+  --bad: #e2544a;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--ground);
+  color: var(--ink);
+  font-family: "Archivo", "Helvetica Neue", Arial, sans-serif;
+  overflow: hidden;
+}
+
+.app { position: relative; height: 100%; }
+#field {
+  display: block;
+  width: calc(100vw - 22rem);
+  height: 100vh;
+  cursor: grab;
+  touch-action: none;
+}
+#field.dragging { cursor: grabbing; }
+
+.board {
+  position: fixed;
+  top: 0;
+  left: calc((100vw - 22rem) / 2);
+  transform: translateX(-50%);
+  display: flex;
+  align-items: stretch;
+  background: rgba(8, 14, 10, 0.82);
+  border: 1px solid rgba(242, 245, 240, 0.14);
+  border-top: none;
+  border-radius: 0 0 10px 10px;
+  padding: 0.5rem 0.9rem;
+  font-variant-numeric: tabular-nums;
+}
+.side { display: flex; align-items: center; gap: 0.9rem; padding: 0 1rem; }
+.side .name { font-size: 1.15rem; font-weight: 600; }
+.side .goals { font-size: 2rem; font-weight: 700; line-height: 1; }
+.side.violet .name, .side.violet .goals { color: var(--violet); }
+.side.lime .name, .side.lime .goals { color: var(--lime); }
+.middle {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 0 1rem;
+  border-left: 1px solid rgba(242, 245, 240, 0.14);
+  border-right: 1px solid rgba(242, 245, 240, 0.14);
+}
+.middle .clock { font-size: 1.5rem; font-weight: 700; line-height: 1; }
+.middle .half {
+  font-size: 0.62rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+
+.hint {
+  position: fixed;
+  bottom: 0.9rem;
+  left: 0.9rem;
+  font-size: 0.72rem;
+  color: var(--dim);
+}
+
+.call {
+  position: fixed;
+  bottom: 0.9rem;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 0.4rem 0.8rem;
+  background: rgba(8, 14, 10, 0.9);
+  border: 1px solid rgba(242, 245, 240, 0.14);
+  border-radius: 6px;
+  font-size: 0.8rem;
+}
+.call[hidden] { display: none; }
+
+.panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  width: 22rem;
+  height: 100vh;
+  background: var(--panel);
+  border-left: 1px solid rgba(242, 245, 240, 0.14);
+  padding: 1rem;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+.group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding-bottom: 0.9rem;
+  border-bottom: 1px solid rgba(242, 245, 240, 0.1);
+}
+.group h2 {
+  margin: 0 0 0.2rem;
+  font-size: 0.72rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+.row { display: flex; gap: 0.4rem; }
+.row > * { flex: 1; }
+
+.panel input, .panel select, .panel button {
+  font: inherit;
+  font-size: 0.85rem;
+  padding: 0.4rem 0.5rem;
+  border-radius: 5px;
+  border: 1px solid rgba(242, 245, 240, 0.18);
+  background: rgba(242, 245, 240, 0.04);
+  color: var(--ink);
+}
+.panel button { cursor: pointer; }
+.panel button:hover:not(:disabled) { background: rgba(242, 245, 240, 0.12); }
+.panel button:disabled { opacity: 0.35; cursor: not-allowed; }
+
+.modes { display: flex; gap: 0.4rem; }
+.modes button { flex: 1; font-size: 0.75rem; }
+.modes button.on {
+  border-color: var(--good);
+  color: var(--good);
+  background: rgba(111, 211, 154, 0.12);
+}
+
+.seats { display: flex; flex-direction: column; gap: 0.55rem; }
+.seat {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  padding: 0.55rem;
+  border: 1px solid rgba(242, 245, 240, 0.12);
+  border-left: 4px solid var(--dim);
+  border-radius: 6px;
+}
+.seat.violet { border-left-color: var(--violet); }
+.seat.lime { border-left-color: var(--lime); }
+.seat .who { font-size: 0.85rem; font-weight: 600; }
+.seat.violet .who { color: var(--violet); }
+.seat.lime .who { color: var(--lime); }
+.seat input[hidden] { display: none; }
+.seat .status { font-size: 0.7rem; color: var(--dim); }
+
+.log {
+  margin-top: auto;
+  font-size: 0.72rem;
+  color: var(--dim);
+  max-height: 10rem;
+  overflow-y: auto;
+  font-variant-numeric: tabular-nums;
+}

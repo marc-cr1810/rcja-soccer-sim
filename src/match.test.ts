@@ -562,3 +562,79 @@ describe('refereed play: a human starts each half; everything else resolves itse
     expect(r.scoreCorrections).toEqual([]);
   });
 });
+
+/**
+ * Phase 4: a rehearsal is a match with a different arrangement, not a mode.
+ *
+ * The seat/robot split is the part worth pinning down. A seat holds a program
+ * and exists for the whole run; a robot is on the field only while an
+ * arrangement says so. A rehearsal that stages one robot now and two of them a
+ * moment later depends on the second seat still being there, unused, in
+ * between.
+ */
+describe('staged matches (Phase 4)', () => {
+  const dt = 1 / 100;
+  const alone = {
+    robots: [{ id: 'violet-1', x: -800, z: 0, heading: 0, isGoalie: false }],
+    ball: { x: -400, z: 0 },
+  };
+
+  it('plays one robot alone, with one program and no seats for the rest', () => {
+    const m = new Match({
+      agents: { 'violet-1': new ReferenceAgent({ team: 'violet', number: 1, role: 'striker' }) },
+      arrangement: alone,
+      halfSeconds: HALF,
+      seed: 1,
+    });
+    m.kickOff('violet');
+
+    expect(m.world.robots.map((r) => r.id)).toEqual(['violet-1']);
+    const before = { x: m.world.robots[0]!.x, z: m.world.robots[0]!.z };
+    for (let i = 0; i < 600; i++) m.step(dt);
+
+    // It went for the ball: nothing else is on the field to push it anywhere.
+    const moved = Math.hypot(m.world.robots[0]!.x - before.x, m.world.robots[0]!.z - before.z);
+    expect(moved).toBeGreaterThan(100);
+  });
+
+  it('refuses a robot the arrangement puts on the field with no program to drive it', () => {
+    expect(
+      () =>
+        new Match({
+          agents: {},
+          arrangement: alone,
+          halfSeconds: HALF,
+          seed: 1,
+        }),
+    ).toThrow(/no program for robot violet-1/);
+  });
+
+  it('keeps a seat while its robot is off the field, and drives it when staged back on', () => {
+    const m = new Match({
+      agents: {
+        'violet-1': new ReferenceAgent({ team: 'violet', number: 1, role: 'striker' }),
+        'lime-1': new ReferenceAgent({ team: 'lime', number: 1, role: 'striker' }),
+      },
+      // lime-1 has a program from the start but is not on the field yet.
+      arrangement: alone,
+      halfSeconds: HALF,
+      seed: 1,
+    });
+    m.kickOff('violet');
+    for (let i = 0; i < 60; i++) m.step(dt);
+    expect(m.world.robots.map((r) => r.id)).toEqual(['violet-1']);
+
+    m.stage({
+      robots: [
+        ...alone.robots,
+        { id: 'lime-1', x: 800, z: 0, heading: Math.PI, isGoalie: false },
+      ],
+      ball: { x: 0, z: 0 },
+    });
+    const before = { x: 800, z: 0 };
+    for (let i = 0; i < 600; i++) m.step(dt);
+
+    const lime = m.world.robots.find((r) => r.id === 'lime-1')!;
+    expect(Math.hypot(lime.x - before.x, lime.z - before.z)).toBeGreaterThan(100);
+  });
+});

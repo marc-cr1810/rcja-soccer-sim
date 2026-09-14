@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RCJA Soccer Simulation — Practice Field</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <div class="app">
+      <canvas id="field"></canvas>
+
+      <div id="board" class="board">
+        <div class="side violet">
+          <span class="name" id="violet-name">Violet</span>
+          <span class="goals" id="violet-score">0</span>
+        </div>
+        <div class="middle">
+          <span class="clock" id="clock">0:00</span>
+          <span class="half" id="mode">stopped</span>
+        </div>
+        <div class="side lime">
+          <span class="goals" id="lime-score">0</span>
+          <span class="name" id="lime-name">Lime</span>
+        </div>
+      </div>
+
+      <div id="hint" class="hint">drag a robot or the ball to put it where you want it</div>
+      <div id="call" class="call" hidden></div>
+
+      <aside class="panel">
+        <section class="group">
+          <h2>Play</h2>
+          <div class="row">
+            <button data-action="start">Start</button>
+            <button data-action="stop">Stop</button>
+          </div>
+          <div class="row">
+            <button data-action="restage">Put it back</button>
+            <button data-action="keep">Keep this</button>
+          </div>
+        </section>
+
+        <section class="group">
+          <h2>When a goal goes in</h2>
+          <div class="modes" id="modes">
+            <button data-mode="restage">Set it up again</button>
+            <button data-mode="play-on">Play on</button>
+            <button data-mode="freeze">Freeze</button>
+          </div>
+        </section>
+
+        <section class="group">
+          <h2>Robots</h2>
+          <div id="seats" class="seats"></div>
+        </section>
+
+        <div id="log" class="log"></div>
+      </aside>
+    </div>
+
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
