@@ -1,15 +1,42 @@
-/* The team workspace: an editor, on the practice console's palette. */
+/*
+ * The team workspace, dressed as Visual Studio Code's Dark+.
+ *
+ * The rest of this league's browser tools — the viewer, the referee console,
+ * the practice field — are green-on-black, because they are scoreboards and
+ * control panels and they are meant to read across a hall. An editor is not
+ * one of those. A student who has seen a code editor before has almost
+ * certainly seen this one, and looking familiar is worth more here than
+ * matching the other three.
+ *
+ * The editor's own colours live in editor.ts, because CodeMirror is themed in
+ * JavaScript rather than in CSS. These two have to be kept in step by hand;
+ * the shared values are named the same in both places.
+ */
 :root {
-  --ink: #f2f5f0;
-  --dim: #8a978f;
-  --violet: #8b5cf6;
-  --lime: #3fce5a;
-  --ground: #0b120e;
-  --panel: #121a15;
-  --good: #6fd39a;
-  --bad: #e2544a;
-  --line: rgba(242, 245, 240, 0.14);
+  --editor-bg: #1e1e1e;
+  --sidebar-bg: #252526;
+  --titlebar-bg: #323233;
+  --border: #2d2d30;
+  --border-strong: #3e3e42;
+
+  --text: #cccccc;
+  --text-bright: #e7e7e7;
+  --text-dim: #858585;
+
+  --accent: #0e639c;
+  --accent-hover: #1177bb;
+  --accent-text: #ffffff;
+  --focus: #007fd4;
+
+  --input-bg: #3c3c3c;
+  --hover: #2a2d2e;
+  --selected: #094771;
+
+  --good: #89d185;
+  --bad: #f48771;
+
   --mono: "SF Mono", "Cascadia Mono", Menlo, Consolas, "DejaVu Sans Mono", monospace;
+  --ui: "Segoe UI", system-ui, "Helvetica Neue", Arial, sans-serif;
 }
 
 * { box-sizing: border-box; }
@@ -17,16 +44,23 @@
 html, body {
   margin: 0;
   height: 100%;
-  background: var(--ground);
-  color: var(--ink);
-  font-family: "Archivo", "Helvetica Neue", Arial, sans-serif;
+  background: var(--editor-bg);
+  color: var(--text);
+  font-family: var(--ui);
+  font-size: 13px;
 }
 
-button, input {
-  font: inherit;
-  color: var(--ink);
+/* Every control, so nothing falls back to a UA default that is unreadable on
+ * a dark ground — which is exactly how the first version of this page shipped
+ * code in near-black on near-black. */
+button, input, textarea, select {
+  font-family: inherit;
+  font-size: inherit;
+  color: var(--text);
 }
-.dim { color: var(--dim); }
+.dim { color: var(--text-dim); }
+
+:focus-visible { outline: 1px solid var(--focus); outline-offset: -1px; }
 
 /* --- the way in --- */
 
@@ -40,43 +74,36 @@ button, input {
 .gate[hidden] { display: none; }
 .gate main {
   width: min(26rem, 100%);
-  padding: 1.6rem;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 10px;
+  padding: 1.75rem;
+  background: var(--sidebar-bg);
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
 }
-.gate h1 { margin: 0 0 0.4rem; font-size: 1.3rem; }
-.gate p { margin: 0 0 1.2rem; font-size: 0.85rem; line-height: 1.5; }
-.gate form { display: flex; flex-direction: column; gap: 0.4rem; }
-.gate label {
-  font-size: 0.7rem;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--dim);
+.gate h1 { margin: 0 0 0.5rem; font-size: 1.35rem; font-weight: 600; color: var(--text-bright); }
+.gate p { margin: 0 0 1.25rem; line-height: 1.6; color: var(--text-dim); }
+.gate form { display: flex; flex-direction: column; gap: 0.35rem; }
+.gate label { font-size: 0.85em; color: var(--text); }
+.gate input {
+  padding: 0.45rem 0.5rem;
+  border-radius: 2px;
+  border: 1px solid transparent;
+  background: var(--input-bg);
 }
-.gate input, .gate button {
-  padding: 0.55rem 0.6rem;
-  border-radius: 6px;
-  border: 1px solid rgba(242, 245, 240, 0.18);
-  background: rgba(242, 245, 240, 0.04);
-}
+.gate input:focus { outline: none; border-color: var(--focus); }
 .gate button {
-  margin-top: 0.5rem;
+  margin-top: 0.75rem;
+  padding: 0.5rem;
+  border: none;
+  border-radius: 2px;
   cursor: pointer;
-  background: rgba(111, 211, 154, 0.14);
-  border-color: rgba(111, 211, 154, 0.4);
-  color: var(--good);
-  font-weight: 600;
+  background: var(--accent);
+  color: var(--accent-text);
 }
-.gate button:hover { background: rgba(111, 211, 154, 0.22); }
-.error {
-  margin-top: 0.8rem;
-  font-size: 0.8rem;
-  color: var(--bad);
-}
+.gate button:hover { background: var(--accent-hover); }
+.error { margin-top: 0.9rem; color: var(--bad); }
 .error[hidden] { display: none; }
 
-/* --- the workspace --- */
+/* --- frame --- */
 
 .app {
   height: 100%;
@@ -90,125 +117,131 @@ button, input {
   align-items: center;
   justify-content: space-between;
   gap: 1rem;
-  padding: 0.6rem 0.9rem;
-  background: var(--panel);
-  border-bottom: 1px solid var(--line);
+  padding: 0.4rem 0.6rem;
+  background: var(--titlebar-bg);
+  border-bottom: 1px solid var(--border);
 }
-.who { display: flex; align-items: center; gap: 1rem; min-width: 0; }
+.who { display: flex; align-items: center; gap: 0.9rem; min-width: 0; }
 .team {
   font-weight: 600;
+  color: var(--text-bright);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.robots { display: flex; gap: 0.3rem; }
+
+/* Robot 1 / Robot 2, as editor tabs rather than buttons. */
+.robots { display: flex; }
 .robots button {
-  padding: 0.3rem 0.7rem;
-  font-size: 0.78rem;
-  border-radius: 5px;
-  border: 1px solid var(--line);
+  padding: 0.3rem 0.85rem;
+  border: none;
+  border-top: 1px solid transparent;
   background: transparent;
+  color: var(--text-dim);
   cursor: pointer;
 }
+.robots button:hover { color: var(--text); }
 .robots button.on {
-  border-color: var(--violet);
-  color: var(--violet);
-  background: rgba(139, 92, 246, 0.12);
+  background: var(--editor-bg);
+  border-top-color: var(--focus);
+  color: var(--text-bright);
 }
 
 .actions { display: flex; align-items: center; gap: 0.5rem; }
-.saved { font-size: 0.72rem; min-width: 3.5rem; text-align: right; }
+.saved { min-width: 3.75rem; text-align: right; color: var(--text-dim); font-size: 0.9em; }
 .saved.good { color: var(--good); }
 .actions button {
-  padding: 0.4rem 0.75rem;
-  font-size: 0.8rem;
-  border-radius: 6px;
-  border: 1px solid var(--line);
-  background: rgba(242, 245, 240, 0.04);
+  padding: 0.35rem 0.75rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 2px;
+  background: transparent;
   cursor: pointer;
   white-space: nowrap;
 }
-.actions button:hover:not(:disabled) { background: rgba(242, 245, 240, 0.12); }
-.actions button:disabled { opacity: 0.45; cursor: progress; }
+.actions button:hover:not(:disabled) { background: var(--hover); }
+.actions button:disabled { opacity: 0.5; cursor: progress; }
 .actions .primary {
-  border-color: rgba(111, 211, 154, 0.4);
-  background: rgba(111, 211, 154, 0.14);
-  color: var(--good);
-  font-weight: 600;
+  border-color: transparent;
+  background: var(--accent);
+  color: var(--accent-text);
 }
-.actions .quiet { color: var(--dim); border-color: transparent; }
+.actions .primary:hover:not(:disabled) { background: var(--accent-hover); }
+.actions .quiet { border-color: transparent; color: var(--text-dim); }
+.actions .quiet:hover { color: var(--text); }
 
 .body {
   display: grid;
-  grid-template-columns: 13rem 1fr;
+  grid-template-columns: 14rem 1fr;
   min-height: 0;
 }
 
-/* --- files --- */
+/* --- the file list --- */
 
 .files {
   display: flex;
   flex-direction: column;
-  gap: 0.4rem;
-  padding: 0.8rem;
-  background: var(--panel);
-  border-right: 1px solid var(--line);
+  gap: 0.3rem;
+  padding: 0.6rem 0;
+  background: var(--sidebar-bg);
+  border-right: 1px solid var(--border);
   overflow-y: auto;
 }
 .files h2 {
   margin: 0;
-  font-size: 0.7rem;
-  letter-spacing: 0.1em;
+  padding: 0 0.9rem 0.3rem;
+  font-size: 0.85em;
+  font-weight: 400;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: var(--dim);
+  color: var(--text-dim);
 }
 .files ul { list-style: none; margin: 0; padding: 0; }
-.files li {
-  display: flex;
-  align-items: center;
-  border-radius: 5px;
-}
-.files li.on { background: rgba(242, 245, 240, 0.09); }
+.files li { display: flex; align-items: center; }
+.files li:hover { background: var(--hover); }
+.files li.on { background: var(--selected); }
 .files li button {
   border: none;
   background: none;
   cursor: pointer;
-  font-size: 0.82rem;
   font-family: var(--mono);
+  font-size: 0.95em;
 }
 .files li .name {
   flex: 1;
   text-align: left;
-  padding: 0.35rem 0.45rem;
+  padding: 0.3rem 0.9rem;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .files li .remove {
-  padding: 0.2rem 0.45rem;
-  color: var(--dim);
+  padding: 0.2rem 0.6rem;
+  color: var(--text-dim);
   opacity: 0;
 }
-.files li:hover .remove { opacity: 1; }
+.files li:hover .remove, .files li .remove:focus-visible { opacity: 1; }
 .files li .remove:hover { color: var(--bad); }
 
-.new-file { display: flex; gap: 0.25rem; margin-top: 0.3rem; }
+.new-file { display: flex; gap: 0.3rem; padding: 0.4rem 0.9rem 0; }
 .new-file input {
   flex: 1;
   min-width: 0;
   padding: 0.3rem 0.4rem;
-  font-size: 0.78rem;
   font-family: var(--mono);
-  border-radius: 5px;
-  border: 1px solid var(--line);
-  background: rgba(242, 245, 240, 0.04);
+  font-size: 0.95em;
+  border-radius: 2px;
+  border: 1px solid transparent;
+  background: var(--input-bg);
 }
+.new-file input:focus { outline: none; border-color: var(--focus); }
 .new-file button {
-  padding: 0.3rem 0.55rem;
-  border-radius: 5px;
-  border: 1px solid var(--line);
-  background: rgba(242, 245, 240, 0.04);
+  padding: 0.3rem 0.6rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 2px;
+  background: transparent;
   cursor: pointer;
 }
+.new-file button:hover { background: var(--hover); }
 
 /* --- the editor --- */
 
@@ -217,90 +250,63 @@ button, input {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
+  background: var(--editor-bg);
 }
 .editor-head {
-  padding: 0.4rem 0.8rem;
-  border-bottom: 1px solid var(--line);
-  font-size: 0.75rem;
+  padding: 0.35rem 0.9rem;
+  background: var(--sidebar-bg);
+  border-bottom: 1px solid var(--border);
   font-family: var(--mono);
+  font-size: 0.95em;
 }
-.code {
-  flex: 1;
-  display: flex;
-  min-height: 0;
-  overflow: hidden;
-}
-.gutter {
-  margin: 0;
-  padding: 0.7rem 0.5rem 0.7rem 0.8rem;
-  font-family: var(--mono);
-  font-size: 0.82rem;
-  line-height: 1.55;
-  color: rgba(138, 151, 143, 0.55);
-  text-align: right;
-  user-select: none;
-  overflow: hidden;
-  background: rgba(0, 0, 0, 0.18);
-}
-.code textarea {
-  flex: 1;
-  min-width: 0;
-  margin: 0;
-  padding: 0.7rem 0.8rem;
-  border: none;
-  outline: none;
-  resize: none;
-  background: transparent;
-  font-family: var(--mono);
-  font-size: 0.82rem;
-  line-height: 1.55;
-  tab-size: 4;
-  white-space: pre;
-  overflow: auto;
-}
-.code textarea:disabled { opacity: 0.4; }
+/* CodeMirror mounts here and manages everything inside it. */
+.code { flex: 1; min-height: 0; overflow: hidden; }
+.code .cm-editor { height: 100%; }
+.code .cm-editor.cm-focused { outline: none; }
 
 /* --- output --- */
 
 .console {
-  border-top: 1px solid var(--line);
-  background: var(--panel);
-  max-height: 11rem;
   display: flex;
   flex-direction: column;
+  max-height: 11rem;
+  background: var(--editor-bg);
+  border-top: 1px solid var(--border-strong);
 }
 .console-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0.35rem 0.8rem;
-  font-size: 0.7rem;
-  letter-spacing: 0.1em;
+  padding: 0.3rem 0.9rem;
+  font-size: 0.85em;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: var(--dim);
+  color: var(--text-dim);
 }
 .console-head button {
   border: none;
   background: none;
   cursor: pointer;
-  font-size: 0.7rem;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
+  font-size: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  color: var(--text-dim);
 }
+.console-head button:hover { color: var(--text); }
 .console pre {
   margin: 0;
-  padding: 0 0.8rem 0.7rem;
+  padding: 0 0.9rem 0.7rem;
   overflow-y: auto;
   font-family: var(--mono);
-  font-size: 0.75rem;
-  line-height: 1.6;
+  font-size: 0.95em;
+  line-height: 1.7;
   white-space: pre-wrap;
 }
 .console .good { color: var(--good); }
 .console .bad { color: var(--bad); }
-.console .note { color: var(--dim); }
+.console .note { color: var(--text-dim); }
 
-@media (max-width: 40rem) {
+@media (max-width: 44rem) {
   .body { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
-  .files { border-right: none; border-bottom: 1px solid var(--line); max-height: 9rem; }
+  .files { border-right: none; border-bottom: 1px solid var(--border); max-height: 9rem; }
 }

@@ -20,6 +20,8 @@
  * comes from.
  */
 
+import { CodeEditor } from './editor';
+
 type RobotNumber = 1 | 2;
 
 interface WorkspaceFile {
@@ -54,8 +56,7 @@ const el = {
   newFileForm: document.getElementById('new-file-form') as HTMLFormElement,
   newFile: document.getElementById('new-file') as HTMLInputElement,
   activeName: document.getElementById('active-name')!,
-  code: document.getElementById('code') as HTMLTextAreaElement,
-  gutter: document.getElementById('gutter')!,
+  code: document.getElementById('code')!,
   consoleBody: document.getElementById('console-body')!,
   clearConsole: document.getElementById('clear-console')!,
 };
@@ -129,31 +130,31 @@ function entryName(): string {
 
 /* --- editing --- */
 
-function renderGutter(): void {
-  const lines = el.code.value.split('\n').length;
-  el.gutter.textContent = Array.from({ length: lines }, (_, i) => String(i + 1)).join('\n');
-}
+const editor = new CodeEditor(el.code, {
+  onChange: () => touched(),
+  onSave: () => void saveActive(),
+});
 
 async function openFile(name: string): Promise<void> {
   if (active && active !== name) await saveActive();
   active = name;
-  el.code.value = files.get(name) ?? '';
-  el.code.disabled = false;
+  editor.show(files.get(name) ?? '');
   el.activeName.textContent = name;
-  renderGutter();
   renderFiles();
-  el.code.focus();
+  editor.focus();
 }
 
 let saveTimer: ReturnType<typeof setTimeout> | undefined;
 
 function touched(): void {
   if (!active) return;
-  files.set(active, el.code.value);
+  const text = editor.text;
+  // `show()` counts as a change, so a file that was only opened is not dirty.
+  if (text === files.get(active)) return;
+  files.set(active, text);
   unsaved.add(active);
   el.saved.textContent = 'unsaved';
   el.saved.className = 'saved dim';
-  renderGutter();
   renderFiles();
   // Save shortly after they stop typing. A student should never have to think
   // about saving, and should never lose a line because they closed a laptop.
@@ -187,69 +188,12 @@ async function deleteFile(name: string): Promise<void> {
   unsaved.delete(name);
   if (active === name) {
     active = null;
-    el.code.value = '';
-    el.code.disabled = true;
+    editor.show('');
+    editor.setEnabled(false);
     el.activeName.textContent = 'nothing open';
   }
   load(result.files as WorkspaceFile[]);
   say(`deleted ${name}`);
-}
-
-/**
- * Make a textarea bearable for Python.
- *
- * Not an IDE, and not trying to be one — but a language where indentation is
- * syntax is genuinely unusable if Tab moves focus and Enter goes back to
- * column one. These three behaviours are the difference between "I can write
- * my robot here" and "I cannot".
- */
-function wireEditorKeys(): void {
-  el.code.addEventListener('keydown', (event) => {
-    const area = el.code;
-    const { selectionStart: start, selectionEnd: end, value } = area;
-
-    if (event.key === 'Tab') {
-      event.preventDefault();
-      const lineStart = value.lastIndexOf('\n', start - 1) + 1;
-      if (event.shiftKey) {
-        // Dedent: take up to four leading spaces off this line.
-        const leading = value.slice(lineStart, lineStart + 4);
-        const remove = leading.length - leading.replace(/^ {1,4}/, '').length;
-        if (remove > 0) {
-          area.value = value.slice(0, lineStart) + value.slice(lineStart + remove);
-          area.selectionStart = area.selectionEnd = Math.max(lineStart, start - remove);
-        }
-      } else {
-        area.value = value.slice(0, start) + '    ' + value.slice(end);
-        area.selectionStart = area.selectionEnd = start + 4;
-      }
-      touched();
-      return;
-    }
-
-    if (event.key === 'Enter') {
-      event.preventDefault();
-      const lineStart = value.lastIndexOf('\n', start - 1) + 1;
-      const indent = /^[ \t]*/.exec(value.slice(lineStart, start))![0];
-      // A line ending in ":" opens a block, so the next one goes in a level.
-      const deeper = /:\s*$/.test(value.slice(lineStart, start)) ? '    ' : '';
-      const inserted = '\n' + indent + deeper;
-      area.value = value.slice(0, start) + inserted + value.slice(end);
-      area.selectionStart = area.selectionEnd = start + inserted.length;
-      touched();
-      return;
-    }
-
-    if ((event.ctrlKey || event.metaKey) && event.key === 's') {
-      event.preventDefault();
-      void saveActive();
-    }
-  });
-
-  el.code.addEventListener('input', touched);
-  el.code.addEventListener('scroll', () => {
-    el.gutter.scrollTop = el.code.scrollTop;
-  });
 }
 
 /* --- loading a workspace --- */
@@ -394,7 +338,6 @@ addEventListener('visibilitychange', () => {
   });
 });
 
-wireEditorKeys();
 
 // A refresh should not cost a sign-in.
 try {

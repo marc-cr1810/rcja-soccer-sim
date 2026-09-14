@@ -21,3 +21,7 @@ scratch/*.jsonl
 scratch/frames/
 scratch/rotframes/
 scratch/locframes.json
+
+# A local team list for trying the browser workspace out. Real secrets do not
+# belong in a repository.
+teams.local.json
