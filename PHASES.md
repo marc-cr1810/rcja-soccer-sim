@@ -10,6 +10,10 @@ not when the code exists.
 > holding it was cleared. Phase 0 is history; everything after it is a plan and
 > can be argued with.
 
+[END-STATE.md](END-STATE.md) describes what Phases 6 to 9 add up to — the whole
+interaction, screen by screen and role by role. This file is the order; that one
+is the destination.
+
 ## The destination
 
 A student writes Python on their own laptop — or in a browser, on a school
@@ -276,52 +280,143 @@ phase that can answer it.
 
 ---
 
-## Phase 6 — Anyone can find the game
+## Phase 6 — Accounts and the front door
 
-*Gate: a visitor with no venue access opens the site and sees what's upcoming,
-what's in progress, and what already happened; a team registers itself instead
-of being handed a token, presses Run on the code in its workspace, and watches
-its own robot play.*
+*Gate: a visitor with no account opens the site and sees what is upcoming, in
+progress and already played; a team registers itself, logs in, and finds its
+existing push credential and workspace exactly where they were.*
 
-Phases 1 and 2 got here first, on purpose, with a credential an admin hands
-out — that was enough to prove identity mattered without building the whole
-system around it up front. This is where it becomes real.
+Phases 1, 2 and 5 each shipped a hand-issued secret and each said, in the same
+words, that Phase 6 replaces where it comes from. This is that — and only that.
+It was once a much larger phase; the rest of it is now Phases 7 to 9, because
+"accounts, a front page, several arenas at once, a run queue and a referee's
+pre-game" is five gates wearing one hat. See [END-STATE.md](END-STATE.md) for
+what the four of them add up to.
 
-- **Team registration, referee registration, an admin role.** Replaces the
-  hand-issued tokens from Phase 1 and 2 with actual accounts and a real sign-up
-  flow, without changing what those tokens were *for* — the join-token and
-  push-credential mechanics stay, only where they come from changes.
-- **Visitors need no account at all.** Consistent with Phase 2's stance that
-  the viewer stream is untrusted by design — watching stays open, only
-  registering a team, refereeing, or administering needs a login.
-- **A front page.** Upcoming fixtures, matches in progress (linking through to
-  the live viewer), and past results — built on the match records and fixture
-  list Phase 3 already persists, which is why this comes after it rather than
-  before.
-- **Run it from the workspace.** Phase 5 gave a team somewhere to write their
-  robot and a way to push it; this is the button that puts it on a field and
-  shows them what it did. Most of the machinery is already in place — a
-  practice field is a process, a seat takes a program, and `spawnSeat` already
-  captures the child's stdout *and* stderr, so the traceback a student needs is
-  being produced and simply has nowhere to go yet. What is missing is a seat
-  kind that runs a workspace rather than a submission (and mints a token to do
-  it — `resolveLineup` skips any folder without one, so getting this wrong
-  fills the seat with the built-in agent and lets a team watch the reference
-  robot believing it is theirs), a per-seat output buffer the browser can read,
-  and the three things below that are only answerable with accounts.
-- **A field belongs to somebody.** Which team owns which field, what happens
-  when they press Run twice, and what they get back when all four fields are
-  taken. Phase 4 left fields open to whoever has the link on purpose; a team's
-  own rehearsal is the first thing that needs to know who is asking.
-- **Optional, not load-bearing.** A team spinning up the server locally for a
-  single match still gets today's behaviour — no login, no front page, nothing
-  to opt into. Accounts and the front page are a layer above `MatchServer`, not
-  a path threaded through it, so running one game alone stays exactly as cheap
-  as [the destination](#the-destination) demands.
+- **Registration and roles.** Team registration, referee registration, an admin
+  role. Four roles over a capability list, each capability scoped — a referee
+  controls the match they are *assigned to*, not every match — so per-user
+  grants are a row rather than a redesign.
+- **Identity is the first mutable state, and it is fenced.** Accounts, sessions,
+  grants, invites and the audit log in SQLite via `node:sqlite`, which costs no
+  dependency. **The database holds who; the disk holds what happened.** Draws,
+  results, match records, submissions, join tokens and workspaces stay files.
+  Losing the database loses logins, never a season.
+- **The tokens keep working, from a new source.** A push credential becomes an
+  API key minted from the team's account, so `python/submit.py` is unchanged. A
+  referee token and a workspace secret become a session. The per-submission
+  join token does not change at all — it was never an account credential.
+- **A front page.** Upcoming fixtures, matches in progress linking through to
+  the live viewer, and past results — built on the records and fixture list
+  Phase 3 already persists, which is why this comes after it. Visitors need no
+  account: watching stays open and the viewer stream stays untrusted by design.
+- **One site, role-gated.** Referee, team and admin areas are separately built
+  chunks the server refuses to a session without the capability, so a spectator
+  never downloads match-control code — Phase 2's rule, kept as a server rule
+  rather than a build artefact.
+- **Optional, not load-bearing.** `serve` on a laptop is untouched: no login, no
+  front page, no database file created, nothing to opt into. Accounts are a
+  layer above `MatchServer`, never a path threaded through it.
 
 ---
 
-## Phase 7 — See what your robot saw
+## Phase 7 — The league server supervises
+
+*Gate: two fixtures and a team's own practice field run at once on one server,
+and a team presses Run on the code in its workspace and watches its own robot
+play.*
+
+One `MatchServer` is one world, one viewer broadcast, one gateway over four
+fixed seats. A hall with three live fixtures and four teams rehearsing needs
+seven of all of that. [`src/fields.ts`](src/fields.ts) already answered this
+once — a child process per field, proxied back through the one port the venue
+configured — and this is that answer taken seriously.
+
+- **The hub plays no football.** A league server owns accounts, the draw, the
+  schedule and the front page, and spawns a child `MatchServer` per world. The
+  same binary a team runs on a laptop is what runs a final.
+- **`FieldSupervisor` becomes `ArenaSupervisor`.** An arena has a kind (fixture
+  or practice), an owner and a capability check. `/f/<id>/` keeps working,
+  because it is in the docs and in students' history.
+- **Arenas die with the hub, and that is honest.** Nothing to resume a physics
+  loop and four sandboxed children from; a fixture interrupted this way writes
+  no result and is replayed, which Phase 3 already guarantees.
+- **A field belongs to somebody.** Which team owns it, what a second Run does,
+  and who may drag whose robot. A team can invite another team by name and the
+  invitation lands on their dashboard, not as a link to paste.
+- **A queue, not an error.** `maxFields` is 4 because an arena is a game loop
+  plus up to four sandboxed CPython processes, and thirty teams rehearsing at
+  once is the question [Phase 5 flagged and left open](#phase-5--write-it-in-a-browser).
+  Admission control and a queue position are the answer; a bigger number is not.
+- **Run it from the workspace.** A seat kind that runs a workspace rather than a
+  submission — and mints a token to do it, because `resolveLineup` skips a
+  folder without one and a team watching the reference agent believing it is
+  theirs is the worst possible failure. Plus a per-seat output buffer the
+  browser can read: `spawnSeat` already captures stderr, so the traceback a
+  student needs exists and has nowhere to go.
+
+---
+
+## Phase 8 — The referee's day
+
+*Gate: a referee is assigned a fixture, takes it from pre-game through to a
+confirmed result that appears in the table, and never opens a terminal.*
+
+Phase 2 built the console and stopped at the whistle. What a refereed
+competition actually needs around it is the twenty minutes before kick-off,
+where the teams arrive, the code is loaded, and somebody decides that this is
+the code that plays.
+
+- **Assignments.** The next game and the ones after it, with times and teams.
+- **Pre-game.** Opening it spawns the fixture's arena and shows a checklist:
+  four seats, who has joined, the code loaded in each seat by hash and push
+  time, and the validation result already produced at push time shown here
+  rather than only in the push response.
+- **Lineup lock.** The moment a push stops affecting this match, visible from
+  both sides — before it, a team may push and the match will use the new code;
+  after it, the match plays what was locked and the team's dashboard says so.
+  Without an explicit lock, "did my fix make it in" is a race between an HTTP
+  request and a whistle.
+- **The console, unchanged in function.** Kick off, pause, end half, abandon,
+  award a kick-off, remove a robot under 5.7 and agree it is repaired before it
+  returns, correct the score with a reason recorded against the match.
+- **One confirmation writes the result.** The referee agrees the score and that
+  is what commits the fixture — the same whole-or-nothing write
+  [`tournament-store.ts`](src/tournament-store.ts) makes today, which is why an
+  unconfirmed fixture leaves nothing behind and is simply replayed.
+
+---
+
+## Phase 9 — Administering a venue
+
+*Gate: an admin reschedules a fixture, stops a runaway practice field, fixes a
+team's mis-uploaded file, and re-runs an abandoned game — all from a browser,
+with the audit log saying who did each one.*
+
+Last, because it is the only one of these whose absence can be worked around
+with a terminal and an ssh session. Not optional, though: at a real event the
+person holding this screen is the one being shouted at.
+
+- **Every arena, and the button to stop it.** Kind, owner, age, CPU, memory.
+  A venue's failure mode is four things running that should not be and nobody
+  knowing which machine they are on.
+- **Team files.** A team's workspace and submissions, readable and editable,
+  because sometimes a student uploaded the wrong file and the fastest fix is an
+  organiser fixing it in front of them. Every edit is an audit row.
+- **Manual game editing, without breaking the draw.** `draw.json` is written
+  once and never rewritten, deliberately — that is what makes resuming a
+  consequence and a fixture replay as itself. So an amendment is an **appended
+  record**: what changed, who changed it, and why. The effective draw is the
+  draw folded with its amendments, exactly as the table is the results folded
+  together. Rescheduling, substituting a withdrawn team and voiding a fixture
+  all become possible without the tournament being able to disagree with itself.
+- **Officials and people.** Assign referees to fixtures; manage accounts, roles
+  and per-user capability grants.
+- **An audit log.** Every privileged action, its actor, its target and its time.
+
+---
+
+## Phase 10 — See what your robot saw
 
 *Gate: a team finds a real bug in their robot by scrubbing back to the tick
 where it last saw the ball — without adding a print statement.*
@@ -332,12 +427,17 @@ robot that plays badly and a robot that is perceiving badly look identical from
 the outside, and the only tool a team has today is printing things in a loop
 that runs fifty times a second.
 
-It is Phase 7 rather than part of Phase 5 because the two have nothing in
-common but a target — Phase 5 is for a student who cannot run Python at all,
+It is its own phase rather than part of Phase 5 because the two have nothing
+in common but a target — Phase 5 is for a student who cannot run Python at all,
 this is for one who can — and because one phase with two gates is a phase that
-passes neither for months. It sits after Phase 6 because it does not block a
-season from running, and because renumbering would strand the five places in
-the source that already name Phase 6 as the one that builds accounts.
+passes neither for months. It sits last because it does not block a season from
+running: everything before it is needed to hold an event, and this is needed to
+get good at one.
+
+> It was Phase 7 until the accounts phase was split into
+> [6 through 9](END-STATE.md). Renumbering was free here and only here —
+> eight places in the source name Phase 6 as the one that builds accounts, and
+> Phase 6 still is; nothing anywhere named Phase 7.
 
 - **The trace, first and on its own.** Sensor and actuator frames per tick,
   recorded from a match, written as a file. Nothing records these today.

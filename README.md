@@ -294,12 +294,17 @@ which is what makes it usable in a loop.
 
 ## Next
 
-1. A team rehearsing on its own: a scenario configured by hand — a striker
-   alone, a goalie against a striker — played through the same pipeline a
-   scored match uses.
-2. Pyodide in the browser, and a VS Code extension, for teams who cannot
-   install Python at all.
-3. Accounts and a front page, replacing the hand-issued tokens.
+1. Accounts and a front page, replacing the hand-issued tokens: anyone can
+   see what is on, and a team registers itself instead of being handed a
+   secret.
+2. A league server that supervises rather than plays — several fixtures and
+   several team-owned practice fields at once, each its own child process, and
+   a Run button in the browser workspace.
+3. The referee's pre-game, an admin console, and a VS Code extension that
+   shows a team what their robot actually saw.
+
+[PHASES.md](PHASES.md) has the order and the gates; [END-STATE.md](END-STATE.md)
+has what it all adds up to.
 
 Known and recorded as tests rather than hidden: the reference agent still scores
 the occasional own goal against a motionless opponent (0–5 a match, down from
