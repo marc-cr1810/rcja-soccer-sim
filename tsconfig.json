@@ -5,7 +5,8 @@
     "moduleResolution": "bundler",
     "lib": [
       "ES2022",
-      "DOM"
+      "DOM",
+      "DOM.Iterable"
     ],
     "strict": true,
     "noUncheckedIndexedAccess": true,
@@ -24,7 +25,11 @@
     "src",
     "viewer",
     "referee",
+    "practice",
+    "workspace",
     "vite.config.ts",
-    "vite.referee.config.ts"
+    "vite.referee.config.ts",
+    "vite.practice.config.ts",
+    "vite.workspace.config.ts"
   ]
 }

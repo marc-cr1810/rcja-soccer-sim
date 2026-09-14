@@ -54,16 +54,19 @@ from .sense import (
     teammate_says,
     teleported,
 )
+from .transport import Channel, TransportError, use_transport
 
 __all__ = [
     "DEFAULT_URL",
     "PROTOCOL_VERSION",
     "BallTracker",
+    "Channel",
     "GyroRate",
     "Locator",
     "Memory",
     "Reading",
     "Robot",
+    "TransportError",
     "WHEEL_AXES",
     "WebSocketError",
     "YawRate",
@@ -88,6 +91,7 @@ __all__ = [
     "teammate_position",
     "teammate_says",
     "teleported",
+    "use_transport",
     "wrap_angle",
 ]
 

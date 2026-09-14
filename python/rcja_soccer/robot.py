@@ -25,8 +25,8 @@ import sys
 import time
 from typing import Any, Callable
 
-from ._ws import WebSocket, WebSocketError
 from .drive import coast as _coast
+from .transport import Connect, TransportError, current_transport
 
 #: The wire contract this library speaks. The server refuses a mismatch, which
 #: is a season boundary rather than a typo: the frame shape changed and this
@@ -202,6 +202,7 @@ class Robot:
         reconnect: bool = True,
         reconnect_for: float = 120.0,
         quiet: bool = False,
+        connect: Connect | None = None,
     ) -> None:
         """Connect to a match server and play until it stops.
 
@@ -222,17 +223,23 @@ class Robot:
             noticed, and the next measurement is taken against whatever those
             leftovers are doing to the load. Give up eventually and the leak
             has no way to happen, whatever became of the parent.
+
+        :param connect: How to open the connection, for a test that would
+            rather not open a socket. A host embedding this library wants
+            :func:`~rcja_soccer.transport.use_transport` instead — it reaches
+            programs that never pass this argument, which is all of them.
         """
         if self._tick is None:
             raise RuntimeError(
                 "no tick function. Decorate one with @robot.tick before run()."
             )
 
+        opener = connect or current_transport()
         self._last_connected = time.monotonic()
         while True:
             try:
-                self._play(url, quiet)
-            except (WebSocketError, OSError) as error:
+                self._play(url, quiet, opener)
+            except (TransportError, OSError) as error:
                 if not reconnect:
                     raise
                 idle = time.monotonic() - self._last_connected
@@ -250,8 +257,9 @@ class Robot:
             except KeyboardInterrupt:
                 return
 
-    def _play(self, url: str, quiet: bool) -> None:
-        with WebSocket(url) as socket:
+    def _play(self, url: str, quiet: bool, connect: Connect) -> None:
+        socket = connect(url)
+        try:
             join_message: dict[str, Any] = {
                 "type": "join",
                 "protocol": PROTOCOL_VERSION,
@@ -265,9 +273,9 @@ class Robot:
 
             hello = json.loads(socket.recv())
             if hello.get("type") == "reject":
-                raise WebSocketError(f"server refused: {hello.get('reason')}")
+                raise TransportError(f"server refused: {hello.get('reason')}")
             if hello.get("type") != "welcome":
-                raise WebSocketError(f"unexpected reply: {hello!r}")
+                raise TransportError(f"unexpected reply: {hello!r}")
             self.motor_count = hello.get("motors", self.motor_count)
             if not quiet:
                 print(f"[{self.name}] {hello['robot']} connected to {url}", file=sys.stderr)
@@ -306,3 +314,7 @@ class Robot:
                 if command is None:
                     continue
                 socket.send(json.dumps({"type": "command", "frame": command}))
+        finally:
+            # A channel is closed even when the match ended badly, because the
+            # reconnect loop above is about to open another one.
+            socket.close()

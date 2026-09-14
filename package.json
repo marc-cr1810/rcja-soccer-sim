@@ -17,8 +17,10 @@
     "dev:viewer": "vite",
     "build:referee": "vite build --config vite.referee.config.ts",
     "build:practice": "vite build --config vite.practice.config.ts",
+    "build:workspace": "vite build --config vite.workspace.config.ts",
     "dev:referee": "vite --config vite.referee.config.ts",
     "dev:practice": "vite --config vite.practice.config.ts",
+    "dev:workspace": "vite --config vite.workspace.config.ts",
     "bench": "tsx src/cli.ts bench"
   },
   "devDependencies": {

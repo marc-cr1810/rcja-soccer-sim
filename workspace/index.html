@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RCJA Soccer Simulation — Your Robot</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <!-- Until a token is presented there is nothing else to show. -->
+    <div id="gate" class="gate">
+      <main>
+        <h1>Your robot</h1>
+        <p class="dim">
+          Write your team's robot here and push it to the competition. Nothing to install —
+          your code lives on the venue's server and runs there, the same way it will in a match.
+        </p>
+        <form id="gate-form">
+          <label for="token">Your team's secret</label>
+          <input id="token" type="password" autocomplete="off" spellcheck="false"
+                 placeholder="the one your organiser gave you" />
+          <button type="submit">Open my workspace</button>
+        </form>
+        <div id="gate-error" class="error" hidden></div>
+      </main>
+    </div>
+
+    <div id="app" class="app" hidden>
+      <header class="bar">
+        <div class="who">
+          <span class="team" id="team">—</span>
+          <div class="robots" id="robots">
+            <button data-robot="1" class="on">Robot 1</button>
+            <button data-robot="2">Robot 2</button>
+          </div>
+        </div>
+        <div class="actions">
+          <span class="saved" id="saved"></span>
+          <button id="submit" class="primary">Push to the competition</button>
+          <button id="logout" class="quiet">Sign out</button>
+        </div>
+      </header>
+
+      <div class="body">
+        <aside class="files">
+          <h2>Files</h2>
+          <ul id="file-list"></ul>
+          <form id="new-file-form" class="new-file">
+            <input id="new-file" placeholder="helper.py" spellcheck="false" />
+            <button type="submit" title="Add a file">+</button>
+          </form>
+        </aside>
+
+        <section class="editor">
+          <div class="editor-head">
+            <span id="active-name" class="dim">nothing open</span>
+          </div>
+          <div class="code">
+            <pre id="gutter" class="gutter" aria-hidden="true"></pre>
+            <textarea id="code" spellcheck="false" autocomplete="off" autocapitalize="off"
+                      wrap="off" disabled></textarea>
+          </div>
+        </section>
+      </div>
+
+      <div id="console" class="console">
+        <div class="console-head">
+          <span>Output</span>
+          <button id="clear-console" class="quiet">Clear</button>
+        </div>
+        <pre id="console-body"></pre>
+      </div>
+    </div>
+
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

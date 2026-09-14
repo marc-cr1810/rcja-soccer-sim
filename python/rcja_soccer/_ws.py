@@ -16,9 +16,10 @@ from __future__ import annotations
 import base64
 import os
 import socket
-import ssl
 import struct
 from urllib.parse import parse_qs, urlparse
+
+from .transport import TransportError
 
 _OP_CONTINUATION = 0x0
 _OP_TEXT = 0x1
@@ -30,8 +31,8 @@ _OP_PONG = 0xA
 _GUID = "258EAFA5-E914-47DA-95CA-5AB0DC85B11A"
 
 
-class WebSocketError(Exception):
-    """The connection failed, or the peer said something unexpected."""
+class WebSocketError(TransportError):
+    """This socket failed, or the peer said something unexpected."""
 
 
 class WebSocket:
@@ -65,6 +66,11 @@ class WebSocket:
 
         self._sock = socket.create_connection((host, port), timeout=timeout)
         if secure:
+            # Imported here rather than at the top of the file so that plain
+            # ``ws://`` works on a Python without a usable ``ssl`` — which is
+            # not a hypothetical: it is every robot running in a browser tab.
+            import ssl
+
             context = ssl.create_default_context()
             self._sock = context.wrap_socket(self._sock, server_hostname=host)
 

@@ -135,6 +135,65 @@ function refereeRoot(): string | undefined {
   return existsSync(built) ? built : undefined;
 }
 
+function workspaceRoot(): string | undefined {
+  const built = resolve('dist-workspace');
+  return existsSync(built) ? built : undefined;
+}
+
+/**
+ * Hand-issued team credentials for `--workspaces`, read from a file.
+ *
+ * A JSON object of team name to secret — the direction an organiser thinks in,
+ * writing one line per team they have registered. It is inverted here into the
+ * token-to-team map the server looks things up by, and a duplicated secret is
+ * refused rather than silently handing two teams each other's code.
+ *
+ * A file rather than repeated flags because a venue has twenty of these and a
+ * shell history is the wrong place for twenty secrets.
+ */
+function teamTokens(flags: Map<string, string>): ReadonlyMap<string, string> {
+  const tokens = new Map<string, string>();
+
+  const inline = flags.get('team-token');
+  if (inline) {
+    const split = inline.indexOf('=');
+    if (split <= 0) {
+      console.error(`\n  --team-token wants TEAM=SECRET, not "${inline}"\n`);
+      process.exit(1);
+    }
+    tokens.set(inline.slice(split + 1), inline.slice(0, split));
+  }
+
+  const path = flags.get('team-tokens');
+  if (path) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(readFileSync(resolve(path), 'utf8'));
+    } catch (error) {
+      console.error(`\n  could not read ${path}: ${(error as Error).message}\n`);
+      process.exit(1);
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      console.error(`\n  ${path} must be a JSON object of "team": "secret"\n`);
+      process.exit(1);
+    }
+    for (const [team, secret] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof secret !== 'string' || secret.length < 8) {
+        console.error(`\n  the secret for "${team}" must be a string of at least 8 characters\n`);
+        process.exit(1);
+      }
+      const already = tokens.get(secret);
+      if (already && already !== team) {
+        console.error(`\n  "${team}" and "${already}" were given the same secret\n`);
+        process.exit(1);
+      }
+      tokens.set(secret, team);
+    }
+  }
+
+  return tokens;
+}
+
 /** `--league`, checked rather than cast: a typo should not silently mean "open". */
 function leagueFrom(flags: Map<string, string>): LeagueId | undefined {
   const raw = flags.get('league');
@@ -168,6 +227,11 @@ async function serve(flags: Map<string, string>): Promise<void> {
   // Opt-in, like --referee: a venue that wants teams rehearsing on the match
   // server says so, and gets a child process per field (see fields.ts).
   const practiceFields = flags.get('practice-fields') === 'true';
+  // Opt-in the same way: a venue that wants teams editing in a browser says
+  // so, and hands each team a secret out of band. Phase 6 replaces this with
+  // registration; until then it is the same shape as the referee's token.
+  const workspaceTokens = teamTokens(flags);
+  const wsRoot = workspaceTokens.size > 0 ? workspaceRoot() : undefined;
   const server = new MatchServer({
     port: num(flags, 'port', 8080),
     viewerRoot: root,
@@ -178,6 +242,9 @@ async function serve(flags: Map<string, string>): Promise<void> {
     viewHz: num(flags, 'view-hz', 60),
     idealSensors,
     pythonLibDir: pythonLibDir(),
+    workspaceRoot: wsRoot,
+    workspaceTokens,
+    workspacesDir: flags.get('workspaces-dir'),
     // Present means the operator said something ("0" included); absent lets
     // the server pick its own default for the mode.
     kickoffCountdown: flags.has('kickoff-countdown')
@@ -195,6 +262,12 @@ async function serve(flags: Map<string, string>): Promise<void> {
   if (practiceFields) {
     console.log(`  practice fields:  POST http://localhost:${port}/practice  opens one`);
     console.log(`  (open to whoever has the link — nothing on one is scored or recorded)`);
+  }
+  if (workspaceTokens.size > 0) {
+    const teams = [...new Set(workspaceTokens.values())].sort();
+    console.log(`  team workspaces:  http://localhost:${port}/workspace`);
+    console.log(`  teams:            ${teams.join(', ')}`);
+    if (!wsRoot) console.log(`  (no workspace built yet — run: npm run build:workspace)`);
   }
   if (refereed) {
     console.log(`  referee console:  http://localhost:${port}/referee`);
@@ -718,7 +791,7 @@ function usage(): void {
   console.log(`
   rcja-soccer-sim
 
-    serve     run the match server and keep playing matches   [--port --half --home --away --seed --opponent --agents --fast --referee --practice-fields --kickoff-countdown]
+    serve     run the match server and keep playing matches   [--port --half --home --away --seed --opponent --agents --fast --referee --practice-fields --team-tokens --kickoff-countdown]
     practice  open a practice field and leave it open          [--port --league --seed --ideal-sensors]
     match     play one match headless and print the result    [--half --home --away --seed --opponent]
     ladder    play every bot against every other              [--half --rounds --seed]
@@ -730,6 +803,14 @@ function usage(): void {
 
   --opponent puts a test robot on the lime side instead of the reference
   agent: naive-chaser, shover, chaser+camper, spinner, waller, wanderer, statue
+
+  --team-tokens <file> hosts a browser workspace per team: a JSON object of
+  "team": "secret", one line per team you have registered. Each team opens
+  /workspace, pastes their secret, and edits their robot on the server — for a
+  student on a school machine who cannot install Python. --team-token
+  TEAM=SECRET does one team inline, for trying it out. --workspaces-dir moves
+  where the folders are kept (default ./workspaces). Needs npm run
+  build:workspace. See docs/writing-in-a-browser.md.
 
   --practice-fields lets anyone with the link open a practice field on the
   match server: POST /practice answers with a URL, and each field is its own

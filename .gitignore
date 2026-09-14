@@ -6,10 +6,13 @@ __pycache__/
 dist-viewer/
 dist-referee/
 dist-practice/
+dist-workspace/
 
 # Runtime state a server accumulates in whatever directory it is run from:
-# pushed submissions, and the draws and results of tournaments played on it.
+# pushed submissions, teams' working folders, and the draws and results of
+# tournaments played on it.
 submissions/
+workspaces/
 tournaments/
 
 # Probe output: trace logs and generated sensor frames. The probe SCRIPTS in

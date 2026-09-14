@@ -34,6 +34,7 @@ import { AGENT_PATH, AgentGateway } from './gateway';
 import { slugifyTeam, TOKEN_FILENAME } from './manifest';
 import { validateSubmission } from './submission';
 import type { PracticeSession, ResolveMode, SeatFill } from './practice';
+import { WorkspaceStore, type RobotNumber } from './workspace';
 import { FieldSupervisor, type FieldSupervisorOptions } from './fields';
 
 export interface ServerOptions {
@@ -76,6 +77,29 @@ export interface ServerOptions {
    * practice` - and like `refereeRoot`, nothing is served without one.
    */
   practiceRoot?: string;
+  /**
+   * Built team-workspace bundle to serve, on its own path.
+   *
+   * Like `refereeRoot` and `practiceRoot`, nothing is served without one — and
+   * like them, absent is the default, so a server that was not told to host
+   * workspaces has no workspace surface at all.
+   */
+  workspaceRoot?: string;
+  /**
+   * Where teams' working folders live. Defaults to ./workspaces.
+   *
+   * Deliberately not `submissionsDir`: a workspace is whatever the student
+   * last typed, including code that does not parse, and a submission is
+   * something that passed the validator. Keeping them in one tree would make
+   * "what would play if the match started now" unanswerable.
+   */
+  workspacesDir?: string;
+  /**
+   * Hand-issued team credentials, token to team name — the same style as
+   * `refereeToken`, and replaced by real accounts in Phase 6. Empty (the
+   * default) means `/workspace-api/*` answers 404 for everything.
+   */
+  workspaceTokens?: ReadonlyMap<string, string>;
   /**
    * Let anyone with the link open a practice field on this server.
    *
@@ -182,6 +206,8 @@ export class MatchServer {
   private readonly realtime: boolean;
   private readonly pythonLibDir: string | null;
   private readonly submissionsDir: string;
+  private readonly workspaceRoot: string | null;
+  private readonly workspaces: WorkspaceStore;
 
   constructor(private readonly opts: ServerOptions = {}) {
     this.viewerRoot = opts.viewerRoot ? resolve(opts.viewerRoot) : null;
@@ -197,6 +223,11 @@ export class MatchServer {
     this.realtime = opts.realtime ?? true;
     this.pythonLibDir = opts.pythonLibDir ? resolve(opts.pythonLibDir) : null;
     this.submissionsDir = resolve(opts.submissionsDir ?? 'submissions');
+    this.workspaceRoot = opts.workspaceRoot ? resolve(opts.workspaceRoot) : null;
+    this.workspaces = new WorkspaceStore({
+      dir: resolve(opts.workspacesDir ?? 'workspaces'),
+      tokens: opts.workspaceTokens ?? new Map(),
+    });
 
     this.http.on('upgrade', (req, socket, head) => {
       // A field's own sockets - its viewers and its robots - belong to the
@@ -665,6 +696,33 @@ export class MatchServer {
     // one page with a referee panel bolted on. The static files themselves
     // need no auth (a login screen has to be fetchable to log in from); only
     // the actions under /referee-api do.
+    if (req.method === 'POST' && url.startsWith('/workspace-api/')) {
+      await this.handleWorkspaceAction(req, res, url.slice('/workspace-api/'.length));
+      return;
+    }
+    // The team workspace, on its own path like the referee console's. Every
+    // request under /workspace-api/ carries the team's own token; the bundle
+    // itself is served to anyone, because it is a login screen until one is
+    // presented.
+    if (url === '/workspace' || url.startsWith('/workspace/')) {
+      // Same redirect the practice console needs, for the same reason: the
+      // bundle's assets are relative, so without the trailing slash the
+      // browser resolves them a directory too high and the page arrives
+      // unstyled and inert.
+      if (url === '/workspace') {
+        res.writeHead(302, { location: '/workspace/' });
+        res.end();
+        return;
+      }
+      const sub = url.slice('/workspace'.length);
+      await this.serveStatic(
+        res,
+        this.workspaceRoot,
+        sub,
+        'no team workspace built; run: npm run build:workspace',
+      );
+      return;
+    }
     if (url === '/referee' || url.startsWith('/referee/')) {
       const sub = url === '/referee' ? '/' : url.slice('/referee'.length);
       await this.serveStatic(res, this.refereeRoot, sub, 'no referee console built; run: npm run build:referee');
@@ -1010,6 +1068,186 @@ export class MatchServer {
    * gets moved into the real submissions tree, so a rejected push can never
    * clobber a team's last-good one for that robot.
    */
+  /**
+   * One workspace action, over `POST /workspace-api/<action>`.
+   *
+   * Same shape as the referee surface: a hand-issued bearer token checked
+   * before anything else, a small JSON body, and a `{ ok, reason }` response.
+   * With no teams configured the whole surface is 404, so a server that was
+   * not told to host workspaces grows no new door.
+   *
+   * Every action takes the team from the *token*, never from the body. That is
+   * the same rule Phase 1 put on the join — a client that can name its own
+   * team can be any team — and it is why there is no `team` parameter here to
+   * get wrong.
+   */
+  private async handleWorkspaceAction(
+    req: IncomingMessage,
+    res: ServerResponse,
+    action: string,
+  ): Promise<void> {
+    if (!this.workspaces.enabled) {
+      this.respondJson(res, 404, {
+        ok: false,
+        reason: 'this server is not hosting team workspaces',
+      });
+      return;
+    }
+
+    const auth = req.headers.authorization ?? '';
+    const presented = auth.startsWith('Bearer ') ? auth.slice('Bearer '.length) : '';
+    const team = this.workspaces.teamFor(presented);
+    if (!team) {
+      this.respondJson(res, 401, { ok: false, reason: 'invalid or missing team token' });
+      return;
+    }
+
+    const body = await this.readBody(req, MAX_SUBMIT_BYTES);
+    if (body === null) {
+      this.respondJson(res, 413, { ok: false, reason: 'request body too large' });
+      return;
+    }
+    let payload: Record<string, unknown> = {};
+    if (body.length > 0) {
+      try {
+        payload = JSON.parse(body.toString('utf8')) as Record<string, unknown>;
+      } catch {
+        this.respondJson(res, 400, { ok: false, reason: 'body is not valid JSON' });
+        return;
+      }
+    }
+
+    const robot = payload.robot === 2 ? 2 : 1;
+
+    switch (action) {
+      case 'open': {
+        // What the page asks for on login: who am I, and what is in my folder.
+        // Seeding here rather than on first save means a team that has never
+        // touched this has something that runs before they type anything.
+        const files = await this.workspaces.seed(team, robot);
+        this.respondJson(res, 200, { ok: true, team, robot, files });
+        return;
+      }
+
+      case 'save': {
+        const { name, content } = payload as { name?: unknown; content?: unknown };
+        if (typeof name !== 'string' || typeof content !== 'string') {
+          this.respondJson(res, 400, { ok: false, reason: '"name" and "content" must be strings' });
+          return;
+        }
+        const result = await this.workspaces.write(team, robot, name, content);
+        if (!result.ok) {
+          this.respondJson(res, 400, { ok: false, reason: result.reason });
+          return;
+        }
+        this.respondJson(res, 200, { ok: true, name });
+        return;
+      }
+
+      case 'delete': {
+        const { name } = payload as { name?: unknown };
+        if (typeof name !== 'string') {
+          this.respondJson(res, 400, { ok: false, reason: '"name" must be a string' });
+          return;
+        }
+        const result = await this.workspaces.remove(team, robot, name);
+        if (!result.ok) {
+          this.respondJson(res, 400, { ok: false, reason: result.reason });
+          return;
+        }
+        this.respondJson(res, 200, { ok: true, files: await this.workspaces.read(team, robot) });
+        return;
+      }
+
+      case 'submit': {
+        await this.submitWorkspace(res, team, robot);
+        return;
+      }
+
+      default:
+        this.respondJson(res, 404, { ok: false, reason: `unknown workspace action "${action}"` });
+    }
+  }
+
+  /**
+   * Push a team's workspace through the same validator a laptop's push goes
+   * through, and keep it if it passes.
+   *
+   * Deliberately the identical path — `validateSubmission` on a scratch copy,
+   * then a move into the submissions tree and a freshly minted join token.
+   * A workspace that is submitted from a browser and a folder that is pushed
+   * with `python/submit.py` produce the same thing on disk, checked the same
+   * way, because a competition where entry route changed the rules would not
+   * be a competition.
+   */
+  private async submitWorkspace(
+    res: ServerResponse,
+    team: string,
+    robot: RobotNumber,
+  ): Promise<void> {
+    if (!this.pythonLibDir) {
+      this.respondJson(res, 400, {
+        ok: false,
+        reason: 'this server has no python library configured; nothing can be validated',
+      });
+      return;
+    }
+
+    const files = await this.workspaces.read(team, robot);
+    if (files.length === 0) {
+      this.respondJson(res, 400, { ok: false, reason: 'there is nothing in this workspace yet' });
+      return;
+    }
+
+    const scratch = await mkdtemp(join(tmpdir(), 'rcja-workspace-'));
+    try {
+      for (const file of files) {
+        await writeFile(join(scratch, file.name), file.content, 'utf8');
+      }
+
+      const result = await validateSubmission(scratch, { pythonLibDir: this.pythonLibDir });
+      if (!result.ok) {
+        this.respondJson(res, 400, { ok: false, reason: result.reason });
+        return;
+      }
+
+      const manifest = result.value;
+      // The manifest is the student's to edit, so it can name a team that is
+      // not theirs. The token said who they are; believe that instead.
+      if (slugifyTeam(manifest.team) !== slugifyTeam(team)) {
+        this.respondJson(res, 400, {
+          ok: false,
+          reason: `manifest.json says the team is "${manifest.team}", but this workspace belongs to "${team}"`,
+        });
+        return;
+      }
+      if (manifest.robot !== robot) {
+        this.respondJson(res, 400, {
+          ok: false,
+          reason: `manifest.json says this is robot ${manifest.robot}, but it is robot ${robot}'s workspace`,
+        });
+        return;
+      }
+
+      const teamDir = join(this.submissionsDir, slugifyTeam(manifest.team));
+      const target = join(teamDir, String(manifest.robot));
+      await mkdir(teamDir, { recursive: true });
+      await rm(target, { recursive: true, force: true });
+      try {
+        await rename(scratch, target);
+      } catch {
+        await cp(scratch, target, { recursive: true });
+      }
+
+      const token = randomBytes(24).toString('base64url');
+      await writeFile(join(target, TOKEN_FILENAME), token);
+
+      this.respondJson(res, 200, { ok: true, team: manifest.team, robot: manifest.robot });
+    } finally {
+      await rm(scratch, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+
   private async handleSubmit(req: IncomingMessage, res: ServerResponse): Promise<void> {
     if (!this.pythonLibDir) {
       this.respondJson(res, 400, {

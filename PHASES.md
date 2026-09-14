@@ -205,7 +205,7 @@ had to become two different things.
 ## Phase 5 — Write it in a browser
 
 *Gate: a student with a locked-down school laptop and no Python writes a
-robot, watches it play, and submits it — in a tab, with nothing installed.*
+robot, watches it play, and submits it — with nothing installed but a browser.*
 
 This is the accessibility argument the whole league rests on, taken at its
 word. Every phase so far has assumed a machine a student controls: a Python
@@ -214,55 +214,49 @@ is supposed to reach are the ones where none of that is true — and a team that
 cannot install Python is not a team that enters late, it is a team that does
 not enter.
 
-- **The match runs in the tab.** Not a demo of one: the actual simulator, the
-  actual rule detectors, the actual sensors. `world.ts`, `match.ts`,
-  `physics.ts`, `sensors.ts`, `perception.ts`, `agent.ts` and `renderer.ts`
-  already import nothing from `node:` — Node enters this codebase at
-  `server.ts`, `lineup.ts`, `sandbox.ts` and `fields.ts`, all of which a tab
-  does without. So this is a fourth bundle on the pattern `viewer/`,
-  `referee/` and `practice/` already share, not a second simulator.
-- **The cost of that, stated up front.** A second execution path is a second
-  place the physics can differ, and "it played differently in the browser" is
-  the kind of complaint that ends an event. So the phase does not pass on the
-  gate alone: the same seed and the same built-in bots, played in the tab and
-  played headless, have to finish with the same score. That check is part of
-  the phase rather than a follow-up, because the moment it is optional it is
-  the thing that was skipped.
-- **Pyodide is a seat, not the game.** Python runs in a worker and reaches the
-  match through `Transport` — the same seam in [`src/agent.ts`](src/agent.ts)
-  that a socket robot and an in-process bot already come through. It follows
-  that a program which hangs coasts on its last command in the tab for exactly
-  the reason it does at a venue: nobody wrote that behaviour twice.
-- **One library, running in both places.** [`Robot.run()`](python/rcja_soccer/robot.py)
-  constructs a `WebSocket` directly and [`_ws.py`](python/rcja_soccer/_ws.py)
-  is raw `socket`, which Pyodide has not got — so as things stand not one line
-  of `rcja_soccer` executes in a tab. A transport seam under `run()` is the
-  smallest change that fixes it and the one thing everything else here waits
-  on. The requirement it serves is absolute: the file a student writes in the
-  browser is the file they push, character for character. A browser dialect
-  would be a toy, and worse, a toy that teaches a team habits their submission
-  will not honour.
-- **Submitting is the same push.** Same `POST /submit`, same `manifest.json`,
-  same token in the reply — the browser is another client of Phase 1, not a
-  second way in. The page is served from the venue server's own origin, which
-  is also what keeps `/submit` same-origin: it has no CORS headers today and
-  should not grow any just to let a page on some other host push code into a
-  competition.
-- **Somewhere for the code to live.** A tab has no filesystem, so the folder
-  lives in browser storage, exports as a real team folder, and imports one
-  back. The format does not change to suit the browser — a student who moves
-  to a laptop mid-season, or hands their folder to a team mate who has one,
-  carries the same directory across.
-- **What it gives up, deliberately.** It is slow, and for practice that does
-  not matter. There is no sandbox, and that is correct: it is the student's
-  own tab running the student's own code, with nothing scored — the sandbox
-  exists to protect a venue machine from a stranger, and here there is no
-  venue machine and no stranger. And Pyodide is a large download, vendored and
-  served by the venue server so that a hall with bad wifi pays for it once.
+- **Their code lives on the venue server, and runs there.** Not in the tab.
+  The same CPython, the same `bwrap` sandbox with the same CPU and memory
+  ceilings, the same simulator a scored match uses. This was very nearly built
+  the other way — Pyodide in the tab, the whole simulator with it — and the
+  argument against it is the one this codebase keeps making: a rehearsal under
+  different conditions from the match is a rehearsal of a different sport. A
+  robot that is comfortably fast enough in a browser's Python, with no sandbox
+  and no ceiling, could blow its budget at the venue and the team would find
+  out during the match.
+- **A workspace is a folder, and nothing else.** The same shape as a
+  submission — a `manifest.json` and some flat `.py` files — at
+  `workspaces/<team>/<robot>/`. No database, no metadata, no per-team record:
+  the files on disk *are* the state, the way a tournament is its draw plus
+  whichever results exist. That is what makes submitting a copy through the
+  existing validator rather than a conversion, and it means an admin can open
+  a team's code in a text editor when something is wrong at eleven at night.
+- **Editing is not submitting.** A workspace holds whatever the student last
+  typed, including code that does not parse, because an editor that refused to
+  save broken code is an editor you cannot use — you could not save halfway
+  through a thought. The validator's opinion is asked at the moment they push,
+  which is exactly where a team on a laptop is asked for it.
+- **One way in, not two.** A workspace pushed from a browser and a folder
+  pushed with `python/submit.py` go through the same `validateSubmission`, land
+  in the same place on disk, and get the same join token minted beside them. A
+  competition where the entry route changed the rules would not be a
+  competition. A push that fails changes nothing: whatever last passed is still
+  what will play.
+- **Identity is a hand-issued team secret.** The same arrangement as Phase 1's
+  push token and Phase 2's referee token — a secret per team, created by the
+  admin running the venue, checked on every request. The team always comes from
+  the token and never from the request body, which is the same rule Phase 1 put
+  on the join for the same reason: a client that can name its own team can be
+  any team. Registration is Phase 6's job, and when it arrives nothing about
+  this page changes except where the secret comes from.
+- **Opt-in, like everything else.** Without `--team-tokens` there is no
+  workspace surface at all: `/workspace-api/*` answers 404 for everything, and
+  a plain `serve` is byte for byte what it was.
 
-**A scored match still never runs in a browser.** The tab is the practice loop
-Phase 1 promised and Phase 4 built a field for, reached by a student who has
-no other way in. Competition runs submitted code, sandboxed, on the server.
+**What this gives up, knowingly.** A team cannot practise with no server
+reachable — at home the night before, or at a school that blocks the venue.
+And the server now carries the load that a laptop used to: `maxFields` is
+capped at 4 today, and thirty teams rehearsing at once is a real question this
+phase does not answer.
 
 ---
 
