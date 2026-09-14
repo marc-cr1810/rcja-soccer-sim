@@ -190,10 +190,17 @@ function updateBoard(frame: ViewFrame): void {
 
   // The "remove a robot" list tracks who is actually on the field, rebuilt
   // only when it has actually changed rather than every frame.
+  //
+  // Keyed on the labels, not the ids. The ids never change — they are always
+  // the same four seats — so keying on them alone meant the list was built once
+  // and then never again, and the team names in it stayed those of the first
+  // match this console ever saw. One `serve` playing the same two teams all day
+  // hid that completely; a tournament, where the next fixture is a different
+  // pair, turned it into a referee sending off the robot they did not pick.
   const onField = frame.robots.filter((r) => !r.removed);
-  const ids = onField.map((r) => r.id).join(',');
-  if (removeRobotSelect.dataset['ids'] !== ids) {
-    removeRobotSelect.dataset['ids'] = ids;
+  const labels = onField.map((r) => `${r.id}:${frame.teams[r.team]}`).join(',');
+  if (removeRobotSelect.dataset['ids'] !== labels) {
+    removeRobotSelect.dataset['ids'] = labels;
     removeRobotSelect.replaceChildren(
       ...onField.map((r) => {
         const opt = document.createElement('option');

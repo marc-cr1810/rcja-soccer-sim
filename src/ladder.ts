@@ -73,10 +73,38 @@ export interface LadderOptions {
   seed?: number;
 }
 
-function blank(entry: Entry): Standing {
+/**
+ * Add one meeting to a side's row.
+ *
+ * The outcome is passed in rather than worked out from the goals, because what
+ * decides a meeting is not always the score: a ladder match is decided by it,
+ * but a best-of-three fixture is decided by legs won, and both end up in a
+ * table that has to read the same way.
+ */
+export function award(
+  side: Standing,
+  goalsFor: number,
+  goalsAgainst: number,
+  outcome: 'won' | 'drawn' | 'lost',
+): void {
+  side.played++;
+  side.for += goalsFor;
+  side.against += goalsAgainst;
+  if (outcome === 'won') {
+    side.won++;
+    side.points += 3;
+  } else if (outcome === 'drawn') {
+    side.drawn++;
+    side.points++;
+  } else {
+    side.lost++;
+  }
+}
+
+export function blankStanding(name: string, origin: Origin): Standing {
   return {
-    name: entry.name,
-    origin: entry.origin,
+    name,
+    origin,
     played: 0,
     won: 0,
     drawn: 0,
@@ -87,6 +115,10 @@ function blank(entry: Entry): Standing {
     missed: 0,
     errors: 0,
   };
+}
+
+function blank(entry: Entry): Standing {
+  return blankStanding(entry.name, entry.origin);
 }
 
 /**
@@ -132,27 +164,14 @@ export function runLadder(entries: Entry[], opts: LadderOptions = {}): LadderSum
 
         const h = table.get(home.name)!;
         const a = table.get(away.name)!;
-        h.played++;
-        a.played++;
-        h.for += result.score.violet;
-        h.against += result.score.lime;
-        a.for += result.score.lime;
-        a.against += result.score.violet;
-
-        if (result.score.violet > result.score.lime) {
-          h.won++;
-          a.lost++;
-          h.points += 3;
-        } else if (result.score.lime > result.score.violet) {
-          a.won++;
-          h.lost++;
-          a.points += 3;
-        } else {
-          h.drawn++;
-          a.drawn++;
-          h.points++;
-          a.points++;
-        }
+        const homeOutcome =
+          result.score.violet > result.score.lime
+            ? 'won'
+            : result.score.lime > result.score.violet
+              ? 'lost'
+              : 'drawn';
+        award(h, result.score.violet, result.score.lime, homeOutcome);
+        award(a, result.score.lime, result.score.violet, invert(homeOutcome));
 
         for (const [id, slot] of Object.entries(result.slots)) {
           const side = id.startsWith('violet') ? h : a;
@@ -178,8 +197,15 @@ export function runLadder(entries: Entry[], opts: LadderOptions = {}): LadderSum
   };
 }
 
+/** The same meeting from the other side. */
+export function invert(outcome: 'won' | 'drawn' | 'lost'): 'won' | 'drawn' | 'lost' {
+  if (outcome === 'won') return 'lost';
+  if (outcome === 'lost') return 'won';
+  return 'drawn';
+}
+
 /** Points, then goal difference, then goals for — as every other Soccer league. */
-function compareStandings(a: Standing, b: Standing): number {
+export function compareStandings(a: Standing, b: Standing): number {
   if (b.points !== a.points) return b.points - a.points;
   const gd = b.for - b.against - (a.for - a.against);
   if (gd !== 0) return gd;

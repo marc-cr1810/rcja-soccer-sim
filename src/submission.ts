@@ -11,6 +11,7 @@
  * with something a student can act on, not a stack trace out of this file.
  */
 
+import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -18,7 +19,7 @@ import { join } from 'node:path';
 import { WebSocketServer } from 'ws';
 
 import { AGENT_PATH, AgentGateway } from './gateway';
-import { fail, ok, parseManifest, type Manifest, type Result } from './manifest';
+import { fail, ok, parseManifest, TOKEN_FILENAME, type Manifest, type Result } from './manifest';
 import { Senses } from './perception';
 import { scanImports, stdlibModules } from './pyimports';
 import { sandboxUnavailableReason, spawnSandboxed } from './sandbox';
@@ -31,6 +32,30 @@ export interface ValidateOptions {
 }
 
 const ALLOWED_EXTRA = new Set(['rcja_soccer']);
+
+/**
+ * A fingerprint of the code in a submission folder, for the match record.
+ *
+ * What makes a result reviewable is being able to say which code played, and a
+ * team name cannot — it is re-pointed at new code on every push. Files are
+ * folded in sorted by name, with the name and the byte length alongside the
+ * bytes, so neither renaming a file nor moving a line between two of them
+ * leaves the digest unchanged.
+ *
+ * The token file is excluded deliberately: it rotates on every push, so
+ * including it would give identical code a different hash each time it was
+ * re-pushed, which is exactly backwards.
+ */
+export async function hashSubmission(dir: string): Promise<string> {
+  const names = (await readdir(dir)).filter((name) => name !== TOKEN_FILENAME).sort();
+  const digest = createHash('sha256');
+  for (const name of names) {
+    const bytes = await readFile(join(dir, name));
+    digest.update(`${name}\0${bytes.length}\0`);
+    digest.update(bytes);
+  }
+  return digest.digest('hex');
+}
 
 /**
  * Validate a robot folder already unpacked on disk at `dir`.

@@ -11,7 +11,7 @@
  * can touch are the dribbler and the kicker on its own chassis.
  */
 
-import { World, type Robot, type TeamId } from './world';
+import { World, type MatchEvent, type Robot, type TeamId } from './world';
 import { getLeague, type LeagueId } from './leagues';
 import { AgentSlot, LocalTransport, type Agent, type Transport } from './agent';
 import { Senses, TeamRadio, type MatchView, type SensedRobot } from './perception';
@@ -123,6 +123,21 @@ export interface MatchOptions {
   observe?: (match: Match) => void;
 }
 
+/**
+ * Something a referee did, in the order they did it.
+ *
+ * Only actions that actually took effect: `resume()` and `returnRobot()` both
+ * refuse in states where the button does nothing, and a log saying play resumed
+ * when it did not is worse than no log.
+ */
+export interface RefereeAction {
+  action: string;
+  /** Match clock the referee acted at. */
+  at: number;
+  /** Whichever of robot, team or reason the action carried. */
+  detail?: string;
+}
+
 /** A referee's correction to the score, kept for the match record. */
 export interface ScoreCorrection {
   team: TeamId;
@@ -143,12 +158,21 @@ export interface MatchResult {
   /**
    * Every referee call of the match, counted by kind.
    *
-   * Not taken from world.events, which is a 60-entry ring buffer sized for the
-   * referee panel and silently drops the early part of a ten-minute match.
-   * Counting restarts is the whole point of a balance run, so they are tallied
-   * as they happen.
+   * Kept alongside `events` rather than derived from it: a balance run wants
+   * the tally and nothing else, and counting as they happen costs nothing.
    */
   calls: Record<string, number>;
+  /**
+   * Every referee call of the match, in order, whole.
+   *
+   * Not `world.events`, which is a 60-entry ring buffer sized for the referee
+   * panel and silently drops the early part of a ten-minute match. Drained as
+   * it fills, so a match record can say what actually happened rather than
+   * only how it ended.
+   */
+  events: MatchEvent[];
+  /** Every referee action that took effect, in order. */
+  refereeActions: RefereeAction[];
   /** Every score correction a referee made, in order. */
   scoreCorrections: ScoreCorrection[];
   /** Whether a referee ended the match early rather than it running full time. */
@@ -215,6 +239,8 @@ export class Match {
   private readonly goals: { team: TeamId; at: number }[] = [];
   private lastScore = { violet: 0, lime: 0 };
   private readonly calls: Record<string, number> = {};
+  private readonly eventLog: MatchEvent[] = [];
+  private readonly refereeActions: RefereeAction[] = [];
   private lastSeenEvent: unknown = null;
   private readonly observer: ((match: Match) => void) | undefined;
   /** Whether this match is driven by referee calls rather than the clock. */
@@ -445,7 +471,7 @@ export class Match {
   }
 
   /**
-   * Count referee calls as they are emitted.
+   * Count and keep referee calls as they are emitted.
    *
    * The world's event list is a ring buffer, so it has to be read before it
    * rolls. Find the last event already counted; anything after it is new, and
@@ -456,10 +482,15 @@ export class Match {
     if (events.length === 0) return;
     const from = this.lastSeenEvent ? events.indexOf(this.lastSeenEvent as never) + 1 : 0;
     for (let i = from; i < events.length; i++) {
-      const kind = events[i]!.kind;
-      this.calls[kind] = (this.calls[kind] ?? 0) + 1;
+      const event = events[i]!;
+      this.calls[event.kind] = (this.calls[event.kind] ?? 0) + 1;
+      this.eventLog.push(event);
     }
     this.lastSeenEvent = events[events.length - 1];
+  }
+
+  private recordRefereeAction(action: string, detail?: string): void {
+    this.refereeActions.push({ action, at: this.world.clock, ...(detail ? { detail } : {}) });
   }
 
   private recordGoals(): void {
@@ -499,6 +530,7 @@ export class Match {
     this.world.kickOff(team);
     if (!this.world.countdownActive) this.world.running = true;
     this.hasKickedOffThisHalf = true;
+    this.recordRefereeAction('kickoff', team);
   }
 
   /** Rule violated at kick-off: the other side gets it instead. */
@@ -506,16 +538,20 @@ export class Match {
     this.world.callIllegalKickOff();
     if (!this.world.countdownActive) this.world.running = true;
     this.hasKickedOffThisHalf = true;
+    this.recordRefereeAction('award-kickoff');
   }
 
   /** Rule 5.7: take a robot off for the reason given. */
   removeRobot(robotId: string, rule: string, reason: string): void {
     this.world.removeRobot(robotId, rule, reason);
+    this.recordRefereeAction('remove-robot', `${robotId} (${rule}): ${reason}`);
   }
 
   /** Rule 5.7.4: return a robot once the referee is satisfied it is fixed. Refuses early. */
   returnRobot(robotId: string): boolean {
-    return this.world.returnRobot(robotId);
+    const returned = this.world.returnRobot(robotId);
+    if (returned) this.recordRefereeAction('return-robot', robotId);
+    return returned;
   }
 
   /** Stop play without ending anything — a referee's whistle. */
@@ -526,6 +562,7 @@ export class Match {
     // can talk a team down and still give them their full restart.
     this.world.paused = true;
     this.world.emit({ kind: 'paused', rule: '—', message: 'Play paused by referee.' });
+    this.recordRefereeAction('pause');
   }
 
   /**
@@ -547,17 +584,20 @@ export class Match {
     this.world.paused = false;
     this.world.running = true;
     this.world.emit({ kind: 'resumed', rule: '—', message: 'Play resumed by referee.' });
+    this.recordRefereeAction('resume');
   }
 
   /** A referee skipping the kick-off wait: end the countdown and play now. */
   skipKickoffCountdown(): void {
     this.world.skipKickoffCountdown();
+    this.recordRefereeAction('skip-kickoff-countdown');
   }
 
   /** End the current half early. The loop driving the match checks this once per frame. */
   endHalf(): void {
     this.halfEndRequested = true;
     this.world.running = false;
+    this.recordRefereeAction('end-half', `half ${this.world.half}`);
   }
 
   /** Read and clear the end-half request. */
@@ -572,6 +612,7 @@ export class Match {
     this.ended = true;
     this.halfEndRequested = true;
     this.world.running = false;
+    this.recordRefereeAction('end-match');
   }
 
   /** End the match immediately, for a reason recorded against the result. */
@@ -581,6 +622,7 @@ export class Match {
     this.ended = true;
     this.halfEndRequested = true;
     this.world.running = false;
+    this.recordRefereeAction('abandon', reason);
   }
 
   get isEnded(): boolean {
@@ -605,6 +647,7 @@ export class Match {
       team,
       message: `Score corrected: ${team} ${from} → ${to}. ${reason}`,
     });
+    this.recordRefereeAction('correct-score', `${team} ${from} → ${to}: ${reason}`);
   }
 
   /**
@@ -702,6 +745,8 @@ export class Match {
       goals: [...this.goals],
       slots,
       calls: { ...this.calls },
+      events: [...this.eventLog],
+      refereeActions: [...this.refereeActions],
       scoreCorrections: [...this.scoreCorrections],
       abandoned: this.abandoned,
       abandonReason: this.abandonReason,

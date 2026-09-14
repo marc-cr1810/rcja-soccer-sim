@@ -102,22 +102,45 @@ person can stop it.
 
 ---
 
-## Phase 3 — A tournament runs itself
+## Phase 3 — A tournament runs itself ✅
 
 *Gate: a draw goes in, a division plays, and a table comes out — across a
 process restart.*
 
-The [ladder harness](src/ladder.ts) already plays every entry against every
-other, both ways round. What it lacks is everything around the football.
+Passed. A draw of two pushed teams was played through, killed with ctrl-c
+mid-fixture, and resumed in a fresh process: it restarted at the fixture that
+had not finished, counted none of them twice, and printed a table. Each fixture
+tore down its lineup and spawned the next one's — verified by the submission
+hashes in the records, which show the same code changing sides between fixtures.
 
-- A draw, a fixture list, and results that persist to disk.
-- Headless at 400× for qualifying, wall-clock on the screen for finals.
-- Best-of-three on recorded seeds. Sixteen matches were needed to separate a
-  skill dial of 1.0 from 0.35 — that is a real statement about how noisy a
-  single meeting is, and it is already written down in the Phase 0 test.
-- A published match record per fixture: seed, both submissions' hashes, the
-  referee event log. This is what makes a result reviewable, and it is the thing
-  the committee paper's review pathway depends on existing.
+`src/tournament.ts` · `src/tournament-store.ts` · `src/tournament-run.ts` ·
+[docs/running-a-tournament.md](docs/running-a-tournament.md)
+
+- A draw, a fixture list, and results that persist to disk. **There is no
+  mutable state file**: a tournament is its draw, written once, plus whichever
+  fixture results exist. The table is folded out of them on every read and the
+  next fixture is the first with no result, so resuming is not a feature but a
+  consequence — and a fixture interrupted halfway leaves nothing behind.
+- Headless for qualifying, wall-clock on the screen for finals. **Not 400×**:
+  headless routes sandboxed submissions through `playFast`, which yields once
+  per control cycle and runs at better than ten times real time, bounded by how
+  fast the programs answer. The unbounded path is only open to in-process
+  agents, which a submission is not. The two modes are not interchangeable
+  results — a slow program misses more cycles headless — so a division is
+  played one way or the other.
+- Best-of-three on recorded seeds, as `--legs 3`. Seeds are fixed in the draw
+  rather than derived at kick-off, so a fixture replays as itself. Legs decide
+  a fixture, not aggregate goals, and a fixture is worth one row's points.
+- A published match record per fixture: seed, the sha256 of the code in each
+  seat, and the referee event log — now kept whole, rather than the 60-entry
+  ring buffer sized for the referee's banner, plus every referee action that
+  took effect and when.
+
+Caught by playing it rather than by testing it: the referee console's
+"remove a robot" list cached itself on the four seat ids, which never change,
+so it kept the team names of the first match the console ever saw. One `serve`
+playing the same two teams all day hid it completely; the second fixture of a
+tournament turned it into a referee sending off the robot they did not pick.
 
 ---
 

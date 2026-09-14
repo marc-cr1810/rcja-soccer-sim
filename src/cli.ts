@@ -18,6 +18,11 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { resolve } from 'node:path';
 import { DEFAULT_OPTIONS, formatBench, runBench, type BenchResult } from './bench';
+import { slugifyTeam } from './manifest';
+import { hashSubmission } from './submission';
+import { formatTable, makeDraw, type Draw } from './tournament';
+import { listEntrants, loadDraw, loadResults, saveDraw } from './tournament-store';
+import { runDraw } from './tournament-run';
 
 interface Args {
   command: string;
@@ -357,6 +362,208 @@ async function bench(flags: Map<string, string>): Promise<void> {
   console.log(formatBench(result, baseline));
 }
 
+function tournamentsRoot(): string {
+  return resolve('tournaments');
+}
+
+function requireName(flags: Map<string, string>): string {
+  const name = flags.get('name');
+  if (!name || name === 'true') {
+    console.error(`\n  --name is required: which tournament, e.g. --name "state-round-1"\n`);
+    process.exit(1);
+  }
+  return name;
+}
+
+/**
+ * Write a draw. Entrants default to whoever has actually pushed something.
+ *
+ * Separate from playing it because a draw is a decision an organiser makes
+ * once, looks at, and then lives with — a fixture list that appears as a side
+ * effect of starting a server is one nobody gets to check first.
+ */
+async function draw(flags: Map<string, string>): Promise<void> {
+  const name = requireName(flags);
+  const submissionsDir = resolve('submissions');
+  const teamsFlag = flags.get('teams');
+  const entrants =
+    teamsFlag && teamsFlag !== 'true'
+      ? teamsFlag
+          .split(',')
+          .map((t) => t.trim())
+          .filter(Boolean)
+      : await listEntrants(submissionsDir);
+
+  if (entrants.length < 2) {
+    console.error(
+      `\n  need at least two entrants, found ${entrants.length} in ${submissionsDir}` +
+        `\n  push some robots first, or name them yourself: --teams "ACT,QLD,VIC"\n`,
+    );
+    process.exit(1);
+  }
+
+  const refereed = flags.get('headless') !== 'true';
+  const made = makeDraw(entrants, {
+    name,
+    halfSeconds: num(flags, 'half', 300),
+    legs: num(flags, 'legs', 1),
+    seed: num(flags, 'seed', 1),
+    refereed,
+  });
+
+  let dir: string;
+  try {
+    dir = await saveDraw(tournamentsRoot(), made);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'EEXIST') {
+      console.error(
+        `\n  a draw called "${made.id}" already exists.` +
+          `\n  a draw is never rewritten — delete it by hand, or pick another --name\n`,
+      );
+      process.exit(1);
+    }
+    throw error;
+  }
+
+  console.log(`\n  ${made.name}  (${made.id})`);
+  console.log(`  ${made.entrants.length} entrants, ${made.fixtures.length} fixtures, ${made.legs} leg(s) each`);
+  console.log(`  ${refereed ? 'refereed, wall-clock' : 'headless, unattended'}  ·  ${made.halfSeconds}s halves`);
+  console.log(`  written to ${dir}\n`);
+  for (const fixture of made.fixtures) {
+    console.log(`    ${fixture.home} v ${fixture.away}   seeds ${fixture.seeds.join(', ')}`);
+  }
+  console.log(`\n  play it:  npm run serve -- tournament --name ${made.id}\n`);
+}
+
+/**
+ * Play a draw through, picking up wherever it was left.
+ *
+ * Every fixture spawns its own lineup and tears it down again, which `serve`
+ * has never had to do: it resolves one lineup for the life of the process. The
+ * teardown is `stop()` *and* `agents.closeAll()`, because killing the child
+ * does not vacate its seat — the gateway keeps the seat until the socket
+ * closes, and `waitForSeats` only checks that a seat exists. Leave it and the
+ * next fixture is handed the last team's dead transport and starts happily
+ * against nobody.
+ */
+async function tournament(flags: Map<string, string>): Promise<void> {
+  const root = tournamentsRoot();
+  const id = slugifyTeam(requireName(flags));
+
+  let made: Draw;
+  try {
+    made = await loadDraw(root, id);
+  } catch {
+    console.error(`\n  no draw called "${id}" under ${root}` + `\n  make one:  npm run serve -- draw --name "${id}"\n`);
+    process.exit(1);
+  }
+
+  // The draw says whether this tournament is refereed; --headless overrides it
+  // for this run only, because realtime is a property of the server and cannot
+  // change between fixtures inside one process.
+  const refereed = made.refereed && flags.get('headless') !== 'true';
+  const refereeToken = refereed ? (flags.get('referee-token') ?? randomBytes(24).toString('base64url')) : undefined;
+  const refRoot = refereeRoot();
+
+  const server = new MatchServer({
+    port: num(flags, 'port', 8080),
+    viewerRoot: viewerRoot(),
+    refereeRoot: refRoot,
+    refereeToken,
+    realtime: refereed,
+    viewHz: num(flags, 'view-hz', 60),
+    pythonLibDir: pythonLibDir(),
+  });
+  const port = await server.listen();
+
+  console.log(`\n  ${made.name} — ${made.fixtures.length} fixtures`);
+  console.log(`  watch at  http://localhost:${port}`);
+  if (refereed) {
+    console.log(`  referee console:  http://localhost:${port}/referee`);
+    console.log(`  referee token:    ${refereeToken}`);
+    console.log(`  (hand this to the referee — it is not shown again, and it lasts the whole tournament)`);
+    if (!refRoot) console.log(`  (no referee console built yet — run: npm run build:referee)`);
+  } else {
+    console.log(`  headless — nothing waits for a referee`);
+  }
+  console.log(`  ctrl-c to stop; re-run to carry on where it stopped\n`);
+
+  const libDir = pythonLibDir();
+  let running: SpawnedLineup | null = null;
+  process.on('SIGINT', () => {
+    running?.stop();
+    process.exit(0);
+  });
+
+  const results = await runDraw(root, made, {
+    onFixtureStart: (fixture, played, total) => {
+      console.log(`  fixture ${played + 1} of ${total}:  ${fixture.home} v ${fixture.away}`);
+    },
+    onFixtureDone: (fixture, result) => {
+      const score = result.legs
+        .map((leg) => `${leg.result.score.violet}-${leg.result.score.lime}`)
+        .join(', ');
+      console.log(`  played:  ${fixture.home} v ${fixture.away}  ${score}\n`);
+    },
+    playLeg: async (fixture, seed, leg) => {
+      const teams = { violet: fixture.home, lime: fixture.away };
+      const submissions: Record<string, string> = {};
+      let lineup: SpawnedLineup | null = null;
+
+      if (libDir) {
+        const resolved = await resolveLineup(server.submissionsDirectory, teams);
+        const ids = Object.keys(resolved);
+        if (ids.length > 0) {
+          lineup = await spawnLineup(server, resolved, { pythonLibDir: libDir }, (line) =>
+            console.log(`  ${line}`),
+          );
+          running = lineup;
+          for (const [id, entry] of Object.entries(resolved)) {
+            if (entry) submissions[id] = await hashSubmission(entry.dir);
+          }
+        }
+      }
+
+      if (made.legs > 1) console.log(`    leg ${leg + 1} of ${made.legs}  (seed ${seed})`);
+
+      try {
+        const result = await server.play({
+          agents: agentsFor(undefined),
+          transports: lineup?.transports,
+          teams,
+          league: made.league,
+          halfSeconds: made.halfSeconds,
+          seed,
+          refereed,
+        });
+        return { result, submissions };
+      } finally {
+        lineup?.stop();
+        running = null;
+        server.agents.closeAll();
+      }
+    },
+  });
+
+  console.log(`\n${formatTable(made, results)}\n`);
+  await server.close();
+}
+
+/** The table as it stands, without playing anything. */
+async function table(flags: Map<string, string>): Promise<void> {
+  const root = tournamentsRoot();
+  const id = slugifyTeam(requireName(flags));
+  let made: Draw;
+  try {
+    made = await loadDraw(root, id);
+  } catch {
+    console.error(`\n  no draw called "${id}" under ${root}\n`);
+    process.exit(1);
+  }
+  console.log(`\n${formatTable(made, await loadResults(root, made))}\n`);
+}
+
 /** "1-5", "1,4,9" or "7" - a range, a list, or one. */
 function parseSeeds(raw: string): number[] {
   if (raw.includes('-')) {
@@ -377,6 +584,10 @@ function usage(): void {
     match     play one match headless and print the result    [--half --home --away --seed --opponent]
     ladder    play every bot against every other              [--half --rounds --seed]
     bench     measure your robot program and say what is wrong
+
+    draw        write a fixture list for a tournament          [--name --teams --legs --half --seed --headless]
+    tournament  play a draw through, resumably                 [--name --headless --port --referee-token]
+    table       print a tournament's table as it stands        [--name]
 
   --opponent puts a test robot on the lime side instead of the reference
   agent: naive-chaser, shover, chaser+camper, spinner, waller, wanderer, statue
@@ -409,6 +620,26 @@ function usage(): void {
     --json FILE     write the full numbers as JSON (- for stdout)
     --baseline FILE compare against a JSON written earlier
 
+  tournament flags:
+    --name SLUG     which tournament; the folder under tournaments/
+    --teams "A,B"   entrants for a draw (default: everyone who has pushed)
+    --legs 1        matches per fixture. 3 for best-of-three on recorded
+                    seeds, which costs three times the match time and buys a
+                    table that is not mostly one seed's luck
+    --headless      on draw, make a tournament that never waits for a referee;
+                    on tournament, play this run unattended whatever the draw
+                    says. Without it, every fixture waits at /referee for a
+                    kick-off and plays at wall-clock so a hall can watch
+
+  A draw is written once and never rewritten, and a fixture's result is written
+  only when the whole fixture is done — so ctrl-c and re-run carries on at the
+  fixture that did not finish, and never counts one twice.
+
+  Run a tournament:
+    npm run serve -- draw --name state-round-1 --legs 3
+    npm run serve -- tournament --name state-round-1
+    npm run serve -- table --name state-round-1
+
   Measure a change:
     npm run bench -- --spawn "python3 python/examples/play.py --url {url}" --json before.json
     ...edit the robot...
@@ -431,6 +662,15 @@ switch (command) {
     break;
   case 'bench':
     await bench(flags);
+    break;
+  case 'draw':
+    await draw(flags);
+    break;
+  case 'tournament':
+    await tournament(flags);
+    break;
+  case 'table':
+    await table(flags);
     break;
   default:
     usage();

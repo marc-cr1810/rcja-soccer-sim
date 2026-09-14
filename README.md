@@ -67,10 +67,13 @@ npm run serve            # then open http://localhost:8080
 | `src/manifest.ts` `src/submission.ts` | **New.** A team folder's manifest, and validating a push on arrival. |
 | `src/sandbox.ts` | **New.** Running a submission with no network and no filesystem outside its own folder. |
 | `src/lineup.ts` | **New.** Turning `--home`/`--away` into the submissions to spawn and play. |
+| `src/tournament.ts` | **New.** A draw, the fixtures in it, and the table folded out of them. |
+| `src/tournament-store.ts` `src/tournament-run.ts` | **New.** Where a tournament lives on disk, and playing a draw through resumably. |
 | `viewer/` | **New.** The spectator client, using the lab's renderer. |
+| `referee/` | **New.** The referee console — a separate bundle, so the spectator one can never carry it. |
 | `python/` | **New.** The client library teams write against, and examples. |
 
-`npm test` runs 249 tests.
+`npm test` runs 334 tests.
 
 ### Python robots
 
@@ -286,10 +289,12 @@ which is what makes it usable in a loop.
 
 ## Next
 
-1. Pyodide in the browser, for teams who cannot install Python at all.
-2. A referee console: start, pause, resume, and the calls `World` already has
-   methods for.
-3. Tournament running — a draw, a table, and results that persist.
+1. A team rehearsing on its own: a scenario configured by hand — a striker
+   alone, a goalie against a striker — played through the same pipeline a
+   scored match uses.
+2. Pyodide in the browser, and a VS Code extension, for teams who cannot
+   install Python at all.
+3. Accounts and a front page, replacing the hand-issued tokens.
 
 Known and recorded as tests rather than hidden: the reference agent still scores
 the occasional own goal against a motionless opponent (0–5 a match, down from

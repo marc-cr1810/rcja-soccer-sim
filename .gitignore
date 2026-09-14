@@ -6,6 +6,11 @@ __pycache__/
 dist-viewer/
 dist-referee/
 
+# Runtime state a server accumulates in whatever directory it is run from:
+# pushed submissions, and the draws and results of tournaments played on it.
+submissions/
+tournaments/
+
 # Probe output: trace logs and generated sensor frames. The probe SCRIPTS in
 # scratch/ are worth keeping; their several-megabyte output is not.
 scratch/*.jsonl

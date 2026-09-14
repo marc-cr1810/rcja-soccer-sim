@@ -123,7 +123,16 @@ match     play one match headless and print the result
 ladder    play every built-in bot against every other  [--half --rounds --seed]
 bench     measure your robot program and say what is wrong
           [--spawn --team --opponent --seeds --half --noisy-sensors --json --baseline]
+
+draw        write a fixture list for a tournament
+            [--name --teams --legs --half --seed --headless]
+tournament  play a draw through, resumably
+            [--name --headless --port --referee-token]
+table       print a tournament's table as it stands  [--name]
 ```
+
+The three tournament commands have their own page — see
+[running a tournament](running-a-tournament.md).
 
 `npm run serve -- --help` (or any command with no recognised flags) prints
 this same summary with the current flag defaults.
