@@ -205,7 +205,16 @@ had to become two different things.
 ## Phase 5 — Write it in a browser
 
 *Gate: a student with a locked-down school laptop and no Python writes a
-robot, watches it play, and submits it — with nothing installed but a browser.*
+robot and submits it to the competition — with nothing installed but a
+browser.*
+
+> The gate used to say "writes a robot, **watches it play**, and submits it".
+> Watching it moved to Phase 6 rather than being quietly left unmet: running a
+> team's code needs a field that belongs to *them*, a queue for when the four
+> fields are taken, and somewhere to watch it — and all three of those are
+> questions about accounts, which is Phase 6's whole subject. Building them on
+> top of a hand-issued token would have meant building them twice. This is a
+> re-cut of where the line falls, not a lowered bar.
 
 This is the accessibility argument the whole league rests on, taken at its
 word. Every phase so far has assumed a machine a student controls: a Python
@@ -252,19 +261,27 @@ not enter.
   workspace surface at all: `/workspace-api/*` answers 404 for everything, and
   a plain `serve` is byte for byte what it was.
 
+**Watching it run is Phase 6's.** Until then a team is not stuck: they push
+from the workspace, and an organiser puts that submission on a practice field
+by team name, which works today and is unchanged. It is not the five-second
+loop the practice field was built for — that arrives with the Run button — but
+nobody is left unable to see their robot move.
+
 **What this gives up, knowingly.** A team cannot practise with no server
 reachable — at home the night before, or at a school that blocks the venue.
 And the server now carries the load that a laptop used to: `maxFields` is
 capped at 4 today, and thirty teams rehearsing at once is a real question this
-phase does not answer.
+phase does not answer either, which is the other reason Run waits for the
+phase that can answer it.
 
 ---
 
 ## Phase 6 — Anyone can find the game
 
 *Gate: a visitor with no venue access opens the site and sees what's upcoming,
-what's in progress, and what already happened; a team or referee registers
-themselves instead of getting a token by hand.*
+what's in progress, and what already happened; a team registers itself instead
+of being handed a token, presses Run on the code in its workspace, and watches
+its own robot play.*
 
 Phases 1 and 2 got here first, on purpose, with a credential an admin hands
 out — that was enough to prove identity mattered without building the whole
@@ -281,6 +298,21 @@ system around it up front. This is where it becomes real.
   the live viewer), and past results — built on the match records and fixture
   list Phase 3 already persists, which is why this comes after it rather than
   before.
+- **Run it from the workspace.** Phase 5 gave a team somewhere to write their
+  robot and a way to push it; this is the button that puts it on a field and
+  shows them what it did. Most of the machinery is already in place — a
+  practice field is a process, a seat takes a program, and `spawnSeat` already
+  captures the child's stdout *and* stderr, so the traceback a student needs is
+  being produced and simply has nowhere to go yet. What is missing is a seat
+  kind that runs a workspace rather than a submission (and mints a token to do
+  it — `resolveLineup` skips any folder without one, so getting this wrong
+  fills the seat with the built-in agent and lets a team watch the reference
+  robot believing it is theirs), a per-seat output buffer the browser can read,
+  and the three things below that are only answerable with accounts.
+- **A field belongs to somebody.** Which team owns which field, what happens
+  when they press Run twice, and what they get back when all four fields are
+  taken. Phase 4 left fields open to whoever has the link on purpose; a team's
+  own rehearsal is the first thing that needs to know who is asking.
 - **Optional, not load-bearing.** A team spinning up the server locally for a
   single match still gets today's behaviour — no login, no front page, nothing
   to opt into. Accounts and the front page are a layer above `MatchServer`, not

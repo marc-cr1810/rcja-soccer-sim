@@ -89,6 +89,21 @@ folder are.
 A push that fails changes nothing — whatever you last pushed successfully is
 still what will play.
 
+## Watching it play
+
+There is no Run button yet. It is coming, and it needs something this does not
+have: a field that belongs to your team, which means accounts rather than a
+secret your organiser wrote down. That is the next phase.
+
+Until then you are not stuck. Push from here, then ask your organiser to put
+your robot on a [practice field](practising.md) — a seat takes a pushed
+submission by team name, so yours goes on the same as anybody else's, and you
+watch it in the browser like a match. Slower than it will be, and it costs
+somebody else thirty seconds, but nothing about your robot is waiting on it.
+
+If your organiser has given you the link to a practice field of your own, you
+can fill the seats yourself from its console.
+
 ## What this is not
 
 **It is not a different way to enter.** A workspace pushed from a browser and a
