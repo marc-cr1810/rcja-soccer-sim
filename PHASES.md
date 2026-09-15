@@ -10,7 +10,7 @@ not when the code exists.
 > holding it was cleared. Phase 0 is history; everything after it is a plan and
 > can be argued with.
 
-[END-STATE.md](END-STATE.md) describes what Phases 6 to 9 add up to — the whole
+[END-STATE.md](END-STATE.md) describes what Phases 6 to 10 add up to — the whole
 interaction, screen by screen and role by role. This file is the order; that one
 is the destination.
 
@@ -288,9 +288,9 @@ existing push credential and workspace exactly where they were.*
 
 Phases 1, 2 and 5 each shipped a hand-issued secret and each said, in the same
 words, that Phase 6 replaces where it comes from. This is that — and only that.
-It was once a much larger phase; the rest of it is now Phases 7 to 9, because
-"accounts, a front page, several arenas at once, a run queue and a referee's
-pre-game" is five gates wearing one hat. See [END-STATE.md](END-STATE.md) for
+It was once a much larger phase; the rest of it is now Phases 7 to 10, because
+"accounts, a front page, several arenas at once, fields that belong to somebody,
+a run queue and a referee's pre-game" is six gates wearing one hat. See [END-STATE.md](END-STATE.md) for
 what the four of them add up to.
 
 - **Registration and roles.** Team registration, referee registration, an admin
@@ -314,6 +314,14 @@ what the four of them add up to.
   chunks the server refuses to a session without the capability, so a spectator
   never downloads match-control code — Phase 2's rule, kept as a server rule
   rather than a build artefact.
+- **A way in from outside the browser, because the circle has to break
+  somewhere.** The first admin cannot be made from a page that requires an
+  admin to log into, so `account` and `invite` join the CLI. This is also a
+  debt the database choice incurred: the standing promise that an organiser can
+  fix the broken thing in a text editor at eleven at night still holds for
+  workspaces, submissions, draws and results, and no longer holds for accounts.
+  `account --passwd` rebuilds that hatch for the failure most likely to happen
+  under pressure — somebody cannot log in, twenty minutes before their match.
 - **Optional, not load-bearing.** `serve` on a laptop is untouched: no login, no
   front page, no database file created, nothing to opt into. Accounts are a
   layer above `MatchServer`, never a path threaded through it.
@@ -322,9 +330,8 @@ what the four of them add up to.
 
 ## Phase 7 — The league server supervises
 
-*Gate: two fixtures and a team's own practice field run at once on one server,
-and a team presses Run on the code in its workspace and watches its own robot
-play.*
+*Gate: two fixtures and a practice field play at once on one server, and the
+admin console says honestly how much of the machine that is using.*
 
 One `MatchServer` is one world, one viewer broadcast, one gateway over four
 fixed seats. A hall with three live fixtures and four teams rehearsing needs
@@ -332,22 +339,108 @@ seven of all of that. [`src/fields.ts`](src/fields.ts) already answered this
 once — a child process per field, proxied back through the one port the venue
 configured — and this is that answer taken seriously.
 
+Nothing here knows whose field is whose. That is Phase 8, deliberately: this
+phase is *can one machine hold several worlds and tell the truth about it*, and
+a competition day is meaningfully shorter the moment two fixtures can play at
+once, whether or not practice has grown owners yet.
+
 - **The hub plays no football.** A league server owns accounts, the draw, the
   schedule and the front page, and spawns a child `MatchServer` per world. The
   same binary a team runs on a laptop is what runs a final.
-- **`FieldSupervisor` becomes `ArenaSupervisor`.** An arena has a kind (fixture
-  or practice), an owner and a capability check. `/f/<id>/` keeps working,
+- **`FieldSupervisor` becomes `ArenaSupervisor`.** An arena has a kind —
+  fixture or practice — and a place in the budget. `/f/<id>/` keeps working,
   because it is in the docs and in students' history.
 - **Arenas die with the hub, and that is honest.** Nothing to resume a physics
   loop and four sandboxed children from; a fixture interrupted this way writes
   no result and is replayed, which Phase 3 already guarantees.
+- **A measured budget, and an admin's number.** `maxFields` is 4 because 4 was
+  a guess made before anything had been measured. It has been measured now: an
+  arena of four real robots costs **0.17 cores and 176 MB**, against a
+  **granted 2 cores and 2 GB** — and a robot written to spend its grant gets
+  exactly 50.0% of a core, because the cgroup is real. So the ceiling becomes
+  an admin setting checked against the actual machine, showing three numbers
+  rather than one: what you set, what the hardware guarantees, and what is in
+  use right now. Exceeding it is allowed, with a warning that names the
+  consequence rather than grading the risk.
+- **Capacity is derived, and policy may only subtract.** `arenas.max` less
+  however many fixtures the schedule runs at once is what practice can afford,
+  so **a fixture never queues behind a rehearsal** without anyone remembering
+  to arrange it. An organiser's `practice.max` sits on top and may only lower
+  that, never raise it — a second number able to contradict the first is the
+  thing this codebase keeps refusing.
+- **`capacity`, so the budget can be checked before the day.** Without
+  `--measure` it computes from `os.cpus()`, `os.totalmem()` and
+  [`sandboxUnavailableReason()`](src/sandbox.ts) — which already exists, is
+  already phrased for an operator to fix, and today is only ever reached at
+  spawn time, which is to say during a match. With `--measure` it runs one real
+  arena for half a minute against the repo's own example robot and prints what
+  it cost. A fixed calibration robot rather than a pushed team, because nobody
+  has pushed anything the week before an event, which is when this gets asked.
+- **One seat grant, for practice and finals alike.** The tempting lever is
+  shrinking practice seats to fit more in, and it is not available: a rehearsal
+  under different conditions is a rehearsal of a different sport, which is the
+  argument that [rejected Pyodide](#phase-5--write-it-in-a-browser). The grant
+  goes into the match record beside the seed and the code hashes, because it is
+  a condition of play. See [The arena budget](END-STATE.md#the-arena-budget).
+
+---
+
+## Phase 8 — A field belongs to a team
+
+*Gate: a team presses Run on the code in its workspace and watches its own
+robot play; the same robot cannot be started anywhere else while it does; and a
+field the team walks away from comes back on its own, with their arrangement
+intact.*
+
+Phase 4 left practice fields open to whoever had the link, on purpose, because
+the league had no accounts. Phase 6 built the accounts and Phase 7 built the
+room for several fields to exist. This is the phase where a field stops being
+anonymous — and it is also where a team finally gets the Run button
+[Phase 5 deferred](#phase-5--write-it-in-a-browser), because Run is meaningless
+until there is a field that belongs to the person pressing it.
+
 - **A field belongs to somebody.** Which team owns it, what a second Run does,
   and who may drag whose robot. A team can invite another team by name and the
   invitation lands on their dashboard, not as a link to paste.
-- **A queue, not an error.** `maxFields` is 4 because an arena is a game loop
-  plus up to four sandboxed CPython processes, and thirty teams rehearsing at
-  once is the question [Phase 5 flagged and left open](#phase-5--write-it-in-a-browser).
-  Admission control and a queue position are the answer; a bigger number is not.
+- **One robot, one place.** Not a setting — a rule: **each of a team's robots
+  may be in exactly one seat, anywhere on the server, at any moment.** Nothing
+  technical forces it; the sport does, because a team has two robots and two
+  robots cannot be on two fields. It makes "what is my robot doing right now"
+  answerable, and it removes the fixture conflict without a second rule: during
+  their match both robots are seated, so there is nothing left to rehearse
+  with. It is also what makes one field per team, at most two, a derived
+  ceiling rather than a guess — two is reachable only by splitting robot 1 onto
+  one field and robot 2 onto another.
+- **Ownership and occupancy are separate ledgers.** A guest spends no *field*
+  allowance, so accepting an invitation never costs a team their own field; it
+  does spend their own *robot* occupancy, because their robots really are in
+  seats. A laptop `AGENT_PATH` connection counts the same way — Phase 1 already
+  settled that identity comes from the token rather than the client's say-so.
+- **The check lives in the hub, and that is a real change.** It proxies
+  `/a/<id>/` blindly today and a child can only see its own field, so seat
+  requests stop being transparently forwarded. Get this wrong and every field
+  looks correct on its own while a robot plays in two places.
+- **A fixture pre-empts practice.** Without an explicit winner the invariant
+  deadlocks at the worst moment of the day: a team whose robot is still held by
+  an abandoned field cannot be seated in their own match. At pre-game the hub
+  takes the robots back, empties whatever practice seat held them, and says so.
+- **A field is given back when its team stops using it.** Configurable quiet
+  time, then a warning on the field and the owner's dashboard, then closing —
+  warned, never silently killed. A person present or an interaction resets the
+  clock; **a connected robot does not**, which is a change from today, where
+  [`hold()`](src/fields.ts) feeds one counter from `/agent` upgrades and viewer
+  sockets alike and one forgotten laptop program holds an arena all day.
+  Closing keeps the `Arrangement` in the team's workspace folder and restores
+  it on reopen, so reclamation costs a process rather than an afternoon's
+  setup. Pressure scales with the queue rather than a flat maximum lifetime: be
+  generous when nobody is waiting, warn the longest-idle field first when
+  somebody is. See [Giving a field back](END-STATE.md#giving-a-field-back).
+- **A queue, not an error.** A team over the line is told where they are and
+  what is ahead of them, and practice arenas are shed first when the budget is
+  over, because a rehearsal can wait and a scheduled match cannot.
+- **`arenas` from the terminal.** Listing what is running and stopping one is
+  on the admin screen, and also needs to work when the admin screen is the
+  thing that has gone wrong.
 - **Run it from the workspace.** A seat kind that runs a workspace rather than a
   submission — and mints a token to do it, because `resolveLineup` skips a
   folder without one and a team watching the reference agent believing it is
@@ -357,7 +450,7 @@ configured — and this is that answer taken seriously.
 
 ---
 
-## Phase 8 — The referee's day
+## Phase 9 — The referee's day
 
 *Gate: a referee is assigned a fixture, takes it from pre-game through to a
 confirmed result that appears in the table, and never opens a terminal.*
@@ -387,7 +480,7 @@ the code that plays.
 
 ---
 
-## Phase 9 — Administering a venue
+## Phase 10 — Administering a venue
 
 *Gate: an admin reschedules a fixture, stops a runaway practice field, fixes a
 team's mis-uploaded file, and re-runs an abandoned game — all from a browser,
@@ -410,13 +503,15 @@ person holding this screen is the one being shouted at.
   draw folded with its amendments, exactly as the table is the results folded
   together. Rescheduling, substituting a withdrawn team and voiding a fixture
   all become possible without the tournament being able to disagree with itself.
+  `amend` is its CLI pair, because `draw` already writes a draw from the
+  terminal and the two belong at the same altitude.
 - **Officials and people.** Assign referees to fixtures; manage accounts, roles
   and per-user capability grants.
 - **An audit log.** Every privileged action, its actor, its target and its time.
 
 ---
 
-## Phase 10 — See what your robot saw
+## Phase 11 — See what your robot saw
 
 *Gate: a team finds a real bug in their robot by scrubbing back to the tick
 where it last saw the ball — without adding a print statement.*
@@ -434,10 +529,11 @@ passes neither for months. It sits last because it does not block a season from
 running: everything before it is needed to hold an event, and this is needed to
 get good at one.
 
-> It was Phase 7 until the accounts phase was split into
-> [6 through 9](END-STATE.md). Renumbering was free here and only here —
-> eight places in the source name Phase 6 as the one that builds accounts, and
-> Phase 6 still is; nothing anywhere named Phase 7.
+> It was Phase 7 until the accounts work was split into
+> [6 through 10](END-STATE.md), and it has drifted up twice since. Renumbering
+> stays free above 6 and nowhere else — eight places in the source name Phase 6
+> as the one that builds accounts, and Phase 6 still is; nothing in the source
+> names any phase above it.
 
 - **The trace, first and on its own.** Sensor and actuator frames per tick,
   recorded from a match, written as a file. Nothing records these today.

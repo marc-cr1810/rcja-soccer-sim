@@ -332,15 +332,334 @@ from disk and cannot silently disagree with itself.
 
 ---
 
+## The arena budget
+
+How many arenas a machine may run is the one number a venue has to get right,
+and it is the admin's to set. What follows is measured rather than reasoned —
+on an Intel Ultra 7 155H, 22 logical CPUs, 31 GB, cgroup v2 and bwrap 0.11.1,
+driving a real practice field over its own HTTP API.
+
+### What an arena actually costs
+
+| | CPU | memory | realtime fidelity |
+|---|---|---|---|
+| **granted** per arena (4 seats × `MATCH_CPU_QUOTA_PERCENT`/`MATCH_MEMORY_LIMIT_MB`) | 2.00 cores | 2.00 GB | — |
+| **measured**, four real robots (`rehearsal`, 764 lines of actual football) | **0.17 cores** | **176 MB** | 100.0% |
+| **measured**, every seat spending its whole grant | **1.48 cores** | 190 MB | 100.0% |
+
+Per process, at rest: the arena's own Node — physics at 100 Hz, control at
+50 Hz, viewer broadcast at 30 Hz — takes 6.5% of a core and 103 MB, and each
+sandboxed robot takes 2–3% of a core and 18 MB.
+
+Two things follow, and they pull against each other:
+
+- **A grant is about twelve times what a real robot uses.** Budgeting by grant
+  is safe and enormously conservative: on this machine it allows about ten
+  arenas where the measured load would allow well over a hundred.
+- **The grant is real, not decorative.** A robot written to spend it gets
+  exactly 50.0% of a core and not a cycle more — every seat, including seats
+  restarted mid-session, lands in its own systemd scope with
+  `cpu.max = 50000 100000` and `memory.max = 536870912`. A team is *entitled*
+  to that 50%, so a venue that budgets on the 2–3% robots have used so far is
+  budgeting on teams staying bad at this.
+
+Also worth recording: **realtime fidelity held at 100% in both cases.** The
+starvation guard at [`src/server.ts:449`](src/server.ts:449) only starts
+dropping wall-clock time once the host is genuinely oversubscribed, which one
+arena on this machine is nowhere near. That is the number the admin console
+should watch, because it is the first thing to move when the budget is wrong.
+
+> Re-run this before a venue, on the venue's machine. The numbers above are one
+> laptop's; the method is the point, and `serve practice` plus four `seat` posts
+> is the whole of it.
+
+### What the admin sets
+
+```
+arenas.max                how many may run at once         (default: computed)
+arenas.seatCpuPercent     per-seat CPU grant               (default: 50)
+arenas.seatMemoryMb       per-seat memory grant            (default: 512)
+arenas.reserveCores       kept for the hub, the OS and the hall screen
+arenas.concurrentFixtures how many matches the schedule runs at once
+```
+
+`arenas.max` defaults to computed rather than to 4, because 4 was a guess made
+when nothing had been measured and it is wrong in both directions on different
+machines.
+
+### The hardware check
+
+The hub knows its own machine (`os.cpus()`, `os.totalmem()`) and it supervises
+every child, so it can read each arena's cgroup `cpu.stat` and `memory.current`
+directly. That gives the admin console three numbers, never one:
+
+- **what you set** — `arenas.max`
+- **what this machine guarantees** — `floor((cores − reserve) / (4 × seatCpu + arenaNode))`,
+  and the memory equivalent, whichever is smaller. At the defaults on the
+  machine above: 10 arenas.
+- **what is actually being used right now** — summed from the live cgroups,
+  next to the realtime fidelity of every running arena.
+
+Set `arenas.max` above the guaranteed figure and it is accepted, with a warning
+that names the consequence instead of grading the risk:
+
+> **14 arenas exceeds what this machine can guarantee (10).**
+> Typical robots use about a twelfth of their grant, so this will very likely
+> be fine. It stops being fine the moment enough teams push heavy robots — and
+> the most likely day for that is finals day. If it happens, matches run slower
+> than wall-clock rather than wrongly: a five-minute half takes longer in the
+> hall and the schedule slips. Practice arenas are shed first; fixtures in
+> `arenas.fixtureReserve` are never shed.
+
+Two refusals belong in the same check. Without cgroups or without `bwrap`
+([`sandboxAvailable()`](src/sandbox.ts) already tests both) there are no grants
+at all, so the console must say **unenforced** rather than compute a capacity it
+cannot hold anyone to. And a machine that cannot honour even one arena at the
+configured grant should refuse to start rather than discover it at kick-off.
+
+### Restricting practice fields
+
+"How many practice fields" is four limits with four different reasons, and
+[`create()`](src/fields.ts) has exactly one of them today — a global count, on
+fields that belong to nobody. Accounts make the other three possible.
+
+```
+practice.open      whether practice may be opened at all   (default: yes)
+practice.max       policy cap on practice arenas           (default: whatever is spare)
+practice.perTeam   fields one team may own at once         (default: 1, max 2)
+practice.idleMins  quiet before a field is warned          (default: 20, exists)
+practice.graceMins warned before it is actually closed     (default: 5)
+```
+
+**Capacity and policy are kept apart, and only one of them is the truth.**
+`arenas.max` minus `arenas.concurrentFixtures` is how many practice arenas the
+machine and the schedule can afford — that is capacity, and it is derived, not
+typed. `practice.max` is a *policy* limit on top: an organiser closing practice
+during finals, or holding it to two while the hall network is struggling. It may
+only ever subtract. Set it higher than the spare capacity and it does nothing,
+because a second number that can silently contradict the first is the thing this
+codebase keeps refusing. That is also why the fixture side is expressed as
+"how many matches run at once" rather than as a reserve to hand-tune: **a
+fixture must never queue behind a rehearsal**, and deriving its headroom from
+the schedule is what guarantees that without anyone remembering to.
+
+**`practice.perTeam` is the one that does the most work at a real event.** A
+global cap of eight is no protection at all if one team opens eight. One field
+per team is the default; its maximum is **2**, and that ceiling is not a guess
+— it is how many robots a team has, for the reason below.
+
+### One robot, one place
+
+The field count is a capacity knob. Underneath it sits a rule that is not a
+setting at all:
+
+> **Each of a team's robots may be in exactly one seat, anywhere on this
+> server, at any moment.**
+
+Nothing technical forces this. Four processes can read the same submission
+folder quite happily; it is read-only and they would all work. It is a rule
+because the sport has one: a team has two robots, and two robots cannot be on
+two fields. The simulation's job is to be the same sport — the argument that
+[rejected Pyodide](PHASES.md#phase-5--write-it-in-a-browser) and that keeps one
+seat grant for practice and finals alike.
+
+Three things fall out of it, and they are why it is worth the enforcement:
+
+- **"What is my robot doing right now" gets one answer.** One robot, one seat,
+  one output buffer, one place to look. A team debugging a robot that exists in
+  three places at once cannot be helped by anybody.
+- **The fixture conflict disappears without a second rule.** During their
+  match both robots are seated by the hub, so a team has nothing left to
+  rehearse with. No special case needed.
+- **The `practice.perTeam` ceiling stops being arbitrary.** A team can reach
+  two fields only by splitting robot 1 onto one and robot 2 onto another. Three
+  is not "discouraged", it is unreachable.
+
+**Ownership and occupancy are two different ledgers,** which is what keeps
+invitations alive:
+
+- **A guest spends no *field* allowance.** They own nothing; accepting an
+  invitation never costs a team their own right to open a field.
+- **A guest does spend their own *robot* occupancy,** because their robots are
+  genuinely in seats. So a team already running both robots at home is told
+  plainly: *robot 1 is on your own field — take it off to join NSW Lightning's.*
+  That is a legible sentence, which is the test.
+- **A laptop connection counts too.** A live `AGENT_PATH` program claims a
+  robot identity, and Phase 1 already settled that identity comes from the
+  token rather than the client's say-so. It occupies the robot exactly as a
+  submission does.
+
+**Where the check has to live, and why that is a real change.** The hub proxies
+`/a/<id>/...` blindly today — a seat request is answered by the child, which
+can only see its own field. Occupancy is server-wide, so the hub has to stop
+being transparent for exactly one action: it intercepts the seat request,
+checks the robot is free, and only then forwards it. Getting this wrong is
+silent — every field would look correct on its own.
+
+The table itself needs no persistence. Arenas die with the hub, so occupancy
+dies with it too, and the two can never disagree about what is running.
+
+**What it costs, and why that is acceptable.** A team cannot run their striker
+against three opponents at once to gather data faster. That case is real, and
+it is already served better elsewhere: [`bench`](src/bench.ts) plays a robot
+over a range of seeds headless, on the team's own machine, and prints numbers —
+which is what "gather data faster" actually wants, and it neither queues for a
+venue's CPU nor needs the venue at all. The practice field is for watching one
+rehearsal; the bench is for measuring many.
+
+Two more behaviours follow from ownership:
+
+- **A team's field closes when their fixture's pre-game opens.** It frees
+  capacity at exactly the moment capacity is wanted, and no team is left
+  rehearsing while the referee is trying to seat them. They are told why.
+- **A field is closed when its team stops using it** — see below.
+
+### Giving a field back
+
+A field held by a team who went home is the most common way a venue runs out of
+capacity, and today's signal for it is weak: [`hold()`](src/fields.ts) feeds one
+counter from every HTTP request and every WebSocket upgrade, `/agent` included.
+So a single laptop robot left connected keeps an arena alive indefinitely, while
+a team thinking hard with the tab closed can lose theirs.
+
+**What counts as using a field:**
+
+- **A person is present** — the owner or an invited guest holding a viewer or
+  console socket. Resets the clock.
+- **Somebody interacted** — any `POST /practice-api/*`: a drag, a seat change,
+  start, stop, re-stage. Resets the clock.
+- **A robot is connected.** Does **not** reset the clock. This is a deliberate
+  change from today: a field of robots playing to an empty stand is precisely
+  the waste being reclaimed, and letting `/agent` hold an arena open means the
+  team that forgot to close a terminal outranks the team waiting in the queue.
+
+**Warned, then closed — never silently killed.** After `practice.idleMins` of
+quiet the field is marked for closing, with a banner on the field itself and a
+line on the owner's dashboard saying when. Touching anything cancels it. After
+`practice.graceMins` more, it closes. A fifteen-year-old who walked away for
+lunch should come back to an explanation, not an absence.
+
+**Closing keeps the arrangement.** Who was on the field, where, and where the
+ball was is a small `Arrangement` — Phase 4 already has the type. Write it to
+`workspaces/<team>/field.json` on close and restore it on reopen, and
+reclamation stops being a punishment: the team loses a process, not their setup.
+It belongs in the workspace folder rather than the database because it is the
+team's own scratch state, hand-editable like the rest of their folder, and
+losing it costs nothing.
+
+**Pressure scales with demand, instead of a flat maximum lifetime.** A hard
+ceiling on how long a field may live is the obvious guard against a team who
+pokes theirs every nineteen minutes to keep it — and it punishes everyone on a
+quiet afternoon to stop one person on a busy one. Better: when nobody is
+queued, be generous; when somebody is waiting, warn the longest-idle field
+first and shorten its grace. The limit only bites when it is actually needed,
+which is the only time it is fair.
+
+**Reclamation is also what frees robot occupancy** — and that makes one case
+urgent rather than tidy. Under [one robot, one place](#one-robot-one-place), a
+team whose robot is still held by an abandoned field cannot be seated in their
+own fixture. So the invariant needs an explicit winner: **a fixture pre-empts
+practice.** At pre-game the hub takes the team's robots back, closes or empties
+whatever practice seat held them, and says so on the field. Without that rule
+the occupancy invariant deadlocks at precisely the worst moment of the day.
+
+When a team asks for a field and every slot is taken, they get a **queue
+position and what is ahead of them**, not an error — and practice arenas are
+the ones shed first when the budget is over, because a rehearsal can wait and a
+scheduled match cannot.
+
+### Two rules that fall out of the numbers
+
+**One seat grant, server-wide, for practice and fixtures alike.** The tempting
+lever is to shrink practice seats to fit more fields in. It is not available:
+that makes a rehearsal run under different conditions from the match, which is
+the exact argument [Phase 5 used to reject Pyodide](PHASES.md#phase-5--write-it-in-a-browser)
+— a robot comfortably fast in practice would blow its budget in the final and
+the team finds out on the pitch. Lowering `seatCpuPercent` lowers it everywhere,
+and the console has to say so before it is saved. **How many run at once** is
+the only thing a venue is allowed to turn.
+
+**The grant belongs in the match record.** If a venue plays at 25% seat grants,
+that is a condition of play and part of what the result means — it goes in
+beside the seed and the code hashes, so a match can be replayed as itself.
+
+---
+
+## From a terminal
+
+Most of this is a browser, and deliberately so — Phase 2's gate is a referee
+who never touches a terminal. But three things cannot be browser-only, and one
+of them is not a convenience at all.
+
+The existing commands stay flat and unchanged; these join them.
+
+```
+league      run the league server                    [--port --data --arenas-max …]
+capacity    what this machine can actually run       [--measure]
+account     create, disable or reset an account      [--team --role --passwd]
+invite      mint a registration invite               [--role --team]
+arenas      what is running; stop one                [--stop <id>]
+amend       append an amendment to a draw            [--name --fixture --reason]
+```
+
+**`account` is mandatory, not optional — and it is a debt the database choice
+incurred.** The first admin cannot be created from a browser that requires an
+admin to log into; something has to break that circle from outside. Worse, this
+codebase's standing promise is that an organiser can open the thing that is
+broken in a text editor at eleven at night, and that promise still holds for
+workspaces, submissions, draws and results — all still files. It does **not**
+hold for accounts any more, because accounts are in SQLite. So the escape hatch
+has to be rebuilt as commands, for exactly the failure most likely to happen
+under pressure: somebody cannot log in, twenty minutes before their match.
+`account --passwd` and `invite` are that hatch.
+
+**`capacity` is the one worth building first**, because
+[The arena budget](#the-arena-budget) currently tells a venue to re-measure on
+its own machine, and advice that requires writing a `/proc` sampler is advice
+nobody takes. Without `--measure` it computes instantly from `os.cpus()`,
+`os.totalmem()` and [`sandboxUnavailableReason()`](src/sandbox.ts) — which
+already exists and is already written "for an operator to fix", but today is
+only ever reached at spawn time, which is to say during a match. With
+`--measure` it runs one real arena for half a minute and reports what it cost:
+
+```
+  this machine
+    22 logical CPUs · 31 GB · cgroup v2 ✓ · bwrap 0.11.1 ✓
+
+  per-seat grant       50% of a core · 512 MB
+  per-arena grant      2.00 cores · 2.00 GB
+
+  measured  (one arena, four calibration robots, 30s)
+    arena node         6.5% of a core · 103 MB
+    each robot         2–3% of a core · 18 MB
+    whole arena        0.17 cores · 176 MB · realtime 100.0%
+
+  guaranteed capacity  10 arenas
+  measured capacity    ~60 arenas  — not a promise: a team may spend its grant
+
+  configured           arenas.max 8 · concurrentFixtures 2 · practice.max 6
+```
+
+It measures against **the repo's own example robot**, not a pushed team, for
+two reasons: nobody has pushed anything the week before an event, when this
+question actually gets asked; and a fixed calibration robot makes two venues'
+numbers comparable. The "not a promise" line is the whole asymmetry stated
+where an organiser will actually read it.
+
+**What stays out of the terminal.** Refereeing, by definition. Team submission,
+because [`python/submit.py`](python/submit.py) is already the terminal route
+and Phase 5's rule is one way in, not two. And `serve` itself does not change:
+a team running one match on a laptop gets today's flags and today's behaviour,
+with no league, no database and no account.
+
+---
+
 ## What this gives up, knowingly
 
-**One machine's CPU is the real ceiling.** Every arena is a physics loop plus up
-to four sandboxed CPython processes. Four fixture arenas and four practice
-fields is sixteen student programs plus eight game loops on a venue laptop.
-`maxFields` is capped at 4 today for exactly this reason, and the answer at
-league scale is admission control and a queue, not a bigger number — plus the
-honesty to tell a team "you are third in line" rather than to run their field
-badly.
+**One machine's CPU is the real ceiling, and it is the admin's to set.** See
+[The arena budget](#the-arena-budget) — measured rather than guessed, and
+configurable with a warning that names the consequence rather than saying
+"high".
 
 **Headless and wall-clock still are not the same result.** A slow program misses
 more control cycles headless, so a division is played one way or the other. The
@@ -367,9 +686,13 @@ than a season.
 
 ## Getting there
 
-The phases that build this are [Phase 6 through Phase 9](PHASES.md#phase-6--accounts-and-the-front-door).
-The ordering is the same argument as everywhere else: identity first because
-every other screen asks who is looking; the supervisor second because it is what
-lets more than one thing happen at a time; the referee's day third because it is
-the interaction a scored match cannot happen without; admin last because it is
-the only one whose absence can be worked around with a terminal.
+The phases that build this are [Phase 6 through Phase 10](PHASES.md#phase-6--accounts-and-the-front-door).
+The ordering is the same argument as everywhere else: identity first, because
+every other screen asks who is looking. The supervisor second, because it is
+what lets more than one thing happen at a time — and it comes before ownership
+on purpose, since a competition day is meaningfully shorter the moment two
+fixtures can play at once, whether or not practice has grown owners yet.
+Ownership third, which is where a field belongs to a team and a team finally
+gets the Run button. The referee's day fourth, because it is the interaction a
+scored match cannot happen without. Admin last, because it is the only one
+whose absence can be worked around with a terminal.
