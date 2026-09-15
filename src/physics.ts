@@ -77,6 +77,8 @@ const WALL_BOUNCE = 0.45;
 /** Ball loses more energy on wall bounces than robots do — carpet and wall panels absorb more. */
 export const BALL_BOUNCE = 0.35;
 const BODY_BOUNCE = 0.35;
+/** Ball off a robot bumper: more elastic than robot-robot (0.35) but not fully elastic. */
+export const BALL_ROBOT_BOUNCE = 0.6;
 
 /** Below this speed (mm/s) the ball is treated as stationary. */
 const REST_SPEED = 12;
@@ -269,7 +271,7 @@ export function collideWithPerimeter(b: Body, allowGoalEntry: boolean, bounce = 
 }
 
 /** Resolve overlap between two circular bodies, conserving momentum. */
-export function collideBodies(a: Body, b: Body, minDistDelta = 0): boolean {
+export function collideBodies(a: Body, b: Body, minDistDelta = 0, restitution = BODY_BOUNCE): boolean {
   // If one body is an airborne ball elevated above bumper height (85 mm),
   // it flies clear over the other body without horizontal impact.
   if ((a.y !== undefined && a.y > 85) || (b.y !== undefined && b.y > 85)) {
@@ -301,7 +303,7 @@ export function collideBodies(a: Body, b: Body, minDistDelta = 0): boolean {
   const velAlongNormal = rvx * nx + rvz * nz;
   if (velAlongNormal > 0) return true;
 
-  const j = (-(1 + BODY_BOUNCE) * velAlongNormal) / invSum;
+  const j = (-(1 + restitution) * velAlongNormal) / invSum;
   a.vx -= j * nx * invA;
   a.vz -= j * nz * invA;
   b.vx += j * nx * invB;

@@ -28,6 +28,7 @@ import { ballDiameter, type League } from './leagues';
 import {
   BALL_BOUNCE,
   collideBodies,
+  BALL_ROBOT_BOUNCE,
   collideWithPerimeter,
   separateBodies,
   distance,
@@ -791,12 +792,11 @@ export class World {
     for (const robot of actives) {
       const recess = dribblerRecess(robot, ballBefore, this.config.league);
       const ballTrial = { ...ballBefore };
-      if (collideBodies(robot, ballTrial, recess)) {
+      if (collideBodies(robot, ballTrial, recess, BALL_ROBOT_BOUNCE)) {
         ballDX += ballTrial.x - ballBefore.x;
         ballDZ += ballTrial.z - ballBefore.z;
-        // A robot striking the ball imparts a little of its own motion.
-        ballDVX += ballTrial.vx - ballBefore.vx + robot.vx * 0.25;
-        ballDVZ += ballTrial.vz - ballBefore.vz + robot.vz * 0.25;
+        ballDVX += ballTrial.vx - ballBefore.vx;
+        ballDVZ += ballTrial.vz - ballBefore.vz;
       }
     }
     this.ball.x += ballDX;
