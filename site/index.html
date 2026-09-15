@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RCJA Soccer Simulation</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <!--
+      One shell for everybody, with the areas a visitor may not enter simply
+      absent from the navigation - and refused by the server, which is the
+      check that actually matters. The referee console and the workspace
+      editor are their own bundles behind their own paths; this is the site
+      around them.
+    -->
+    <header class="top">
+      <a class="brand" href="/">
+        <span class="mark"></span>
+        <span>RCJA Soccer Simulation</span>
+      </a>
+      <nav id="nav"></nav>
+      <div class="who" id="who"></div>
+    </header>
+
+    <main id="view" class="view">
+      <p class="dim">Loading…</p>
+    </main>
+
+    <footer class="foot">
+      <span class="dim">Watching is open to anybody. Entering needs an invitation from the organiser.</span>
+    </footer>
+
+    <script type="module" src="/main.ts"></script>
+  </body>
+</html>

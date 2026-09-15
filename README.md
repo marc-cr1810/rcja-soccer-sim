@@ -69,11 +69,17 @@ npm run serve            # then open http://localhost:8080
 | `src/lineup.ts` | **New.** Turning `--home`/`--away` into the submissions to spawn and play. |
 | `src/tournament.ts` | **New.** A draw, the fixtures in it, and the table folded out of them. |
 | `src/tournament-store.ts` `src/tournament-run.ts` | **New.** Where a tournament lives on disk, and playing a draw through resumably. |
+| `src/practice.ts` `src/fields.ts` | **New.** A field arranged by hand, and a child process per field on a venue server. |
+| `src/workspace.ts` | **New.** A team's code kept on the server, for a student who cannot install Python. |
+| `src/accounts.ts` `src/capabilities.ts` | **New.** Who everybody is, and what that lets them do. |
+| `src/authority.ts` | **New.** Who is making this request — asked, so accounts stay above the match server. |
+| `src/league.ts` | **New.** The front door: the public pages, the login, and the draw behind them. |
 | `viewer/` | **New.** The spectator client, using the lab's renderer. |
 | `referee/` | **New.** The referee console — a separate bundle, so the spectator one can never carry it. |
+| `practice/` `workspace/` `site/` | **New.** The practice console, the browser editor, and the league's public site. |
 | `python/` | **New.** The client library teams write against, and examples. |
 
-`npm test` runs 334 tests.
+`npm test` runs 452 tests.
 
 ### Python robots
 

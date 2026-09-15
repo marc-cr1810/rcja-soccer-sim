@@ -110,13 +110,22 @@ function logLine(text: string): void {
   while (log.childNodes.length > 20) log.lastChild?.remove();
 }
 
-/** Call a referee action. The token is never sent anywhere except this server's own /referee-api. */
+/**
+ * Call a referee action.
+ *
+ * The token is never sent anywhere except this server's own /referee-api, and
+ * on a league server there is no token at all: the person signed in to the
+ * site, and the session cookie the browser already sends is what authorises
+ * this. Either way the server decides — this only avoids sending a header it
+ * does not have.
+ */
 async function act(action: string, body?: unknown): Promise<boolean> {
-  if (!token) return false;
   try {
+    const headers: Record<string, string> = { 'content-type': 'application/json' };
+    if (token) headers.authorization = `Bearer ${token}`;
     const res = await fetch(`/referee-api/${action}`, {
       method: 'POST',
-      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      headers,
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
     if (res.ok) {
@@ -369,4 +378,19 @@ loginForm.addEventListener('submit', (event) => {
   enterConsole();
 });
 
-if (token) enterConsole();
+if (token) {
+  enterConsole();
+} else {
+  // No token, but the server may already know who this is: on a league server
+  // the console is only served to a session that may control a match, so
+  // asking is the difference between the console opening and a login screen
+  // demanding a secret that was replaced by an account.
+  void fetch('/referee-api/session')
+    .then((res) => {
+      if (res.ok) enterConsole();
+    })
+    .catch(() => {
+      // A match server without --referee, or no network. The login stays up,
+      // which is the right fallback in both cases.
+    });
+}

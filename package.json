@@ -18,9 +18,11 @@
     "build:referee": "vite build --config vite.referee.config.ts",
     "build:practice": "vite build --config vite.practice.config.ts",
     "build:workspace": "vite build --config vite.workspace.config.ts",
+    "build:site": "vite build --config vite.site.config.ts",
     "dev:referee": "vite --config vite.referee.config.ts",
     "dev:practice": "vite --config vite.practice.config.ts",
     "dev:workspace": "vite --config vite.workspace.config.ts",
+    "dev:site": "vite --config vite.site.config.ts",
     "bench": "tsx src/cli.ts bench"
   },
   "devDependencies": {
@@ -42,5 +44,8 @@
     "codemirror": "^6.0.2",
     "three": "^0.169.0",
     "ws": "^8.18.0"
+  },
+  "engines": {
+    "node": ">=22.5"
   }
 }

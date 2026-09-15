@@ -8,7 +8,8 @@
  * field over the same unauthenticated socket every spectator uses, and acts
  * through `POST /practice-api/*` — which exists only on a server that is a
  * practice field, and asks for no credential, because a practice field is
- * open to whoever has the link until Phase 6 builds accounts.
+ * open to whoever has the link. Accounts exist, but a field that belongs to a
+ * team is Phase 8's subject rather than this one's.
  *
  * The one genuinely new thing here is dragging. Everything else a team can do
  * to a field — start it, stop it, put the situation back, swap what is

@@ -8,35 +8,13 @@ import { MAX_FILES, MAX_FILE_BYTES, WorkspaceStore } from './workspace';
 let dir: string;
 let store: WorkspaceStore;
 
-const TOKENS = new Map([
-  ['secret-act', 'ACT Robotics'],
-  ['secret-nsw', 'NSW'],
-]);
-
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'rcja-workspace-'));
-  store = new WorkspaceStore({ dir, tokens: TOKENS });
+  store = new WorkspaceStore({ dir });
 });
 
 afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
-});
-
-describe('who a token is', () => {
-  it('names the team that holds it', () => {
-    expect(store.teamFor('secret-act')).toBe('ACT Robotics');
-    expect(store.teamFor('secret-nsw')).toBe('NSW');
-  });
-
-  it('refuses anything else, including nothing at all', () => {
-    expect(store.teamFor('secret-qld')).toBeNull();
-    expect(store.teamFor('')).toBeNull();
-  });
-
-  it('is disabled entirely when a venue configured no teams', () => {
-    expect(new WorkspaceStore({ dir, tokens: new Map() }).enabled).toBe(false);
-    expect(store.enabled).toBe(true);
-  });
 });
 
 describe('reading a workspace', () => {

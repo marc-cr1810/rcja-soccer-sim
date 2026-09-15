@@ -7,6 +7,7 @@ dist-viewer/
 dist-referee/
 dist-practice/
 dist-workspace/
+dist-site/
 
 # Runtime state a server accumulates in whatever directory it is run from:
 # pushed submissions, teams' working folders, and the draws and results of
@@ -14,6 +15,12 @@ dist-workspace/
 submissions/
 workspaces/
 tournaments/
+
+# A league server's accounts database, and nothing else: draws, results,
+# submissions and workspaces are the files above. The database holds who; the
+# disk holds what happened.
+league/
+*.db
 
 # Probe output: trace logs and generated sensor frames. The probe SCRIPTS in
 # scratch/ are worth keeping; their several-megabyte output is not.

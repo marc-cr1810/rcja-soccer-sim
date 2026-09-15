@@ -44,9 +44,13 @@ It prints where the workspace is and which teams it knows:
 ```
 
 Hand each team their own secret, out of band. This is the same hand-issued
-arrangement as the Phase 1 push token and the referee's console token, and it
-is replaced by real accounts in Phase 6 — what those tokens are *for* does not
-change, only where they come from.
+arrangement as the Phase 1 push token and the referee's console token.
+
+**At a real event, run a [league server](running-a-league.md) instead.** There
+the team signs in to the site and this page opens with nothing to paste — the
+secret becomes their account, which is the only thing that changes about it.
+The arrangement here is the laptop one, and it stays, because a laptop has
+nobody to register with.
 
 | flag | what it does |
 |---|---|

@@ -14,17 +14,22 @@
  * path off the viewer path rather than opening a second port.
  *
  * Nothing here is authenticated. A practice field is open to whoever has the
- * link: that is Phase 4's deliberate position, and Phase 6 is where it gets
- * accounts. What bounds it instead is a cap on how many can run at once and a
- * field that shuts itself down once nobody is watching.
+ * link: that is Phase 4's deliberate position, and it survives Phase 6 having
+ * built accounts, because a field that *belongs* to a team - who may open one,
+ * who may drag whose robot, what happens to an abandoned one - is Phase 8's
+ * whole subject. What bounds it meanwhile is a cap on how many can run at once
+ * and a field that shuts itself down once nobody is watching.
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { connect, createServer } from 'node:net';
 import type { Duplex } from 'node:stream';
-import { Agent, request, type IncomingMessage, type ServerResponse } from 'node:http';
+import { type IncomingMessage, type ServerResponse } from 'node:http';
+import type { Agent } from 'node:http';
 import { join, resolve } from 'node:path';
+
+import { proxyRequest, proxyUpgrade, upstreamAgent } from './proxy';
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
 
@@ -92,16 +97,8 @@ export class FieldSupervisor {
   private readonly fields = new Map<string, Field>();
   private readonly sweep: NodeJS.Timeout;
   private readonly log: (line: string) => void;
-  /**
-   * Its own agent, with no connection pool.
-   *
-   * Node's global agent keeps connections alive between requests, which is
-   * exactly wrong for a child this process may kill at any moment: a pooled
-   * socket to a field that has been stopped is a handle nothing will ever
-   * close, and a process holding one never exits. It cost a whole test run
-   * hanging after every test in it had passed.
-   */
-  private readonly upstream = new Agent({ keepAlive: false });
+  /** Its own agent, with no connection pool — see `upstreamAgent`. */
+  private readonly upstream: Agent = upstreamAgent();
 
   constructor(private readonly opts: FieldSupervisorOptions = {}) {
     this.log = opts.log ?? (() => {});
@@ -186,27 +183,11 @@ export class FieldSupervisor {
     if (!field) return false;
     this.hold(field);
 
-    const upstream = request(
-      {
-        host: '127.0.0.1',
-        port: field.port,
-        path: rest,
-        method: req.method,
-        headers: req.headers,
-        agent: this.upstream,
-      },
-      (answer) => {
-        res.writeHead(answer.statusCode ?? 502, answer.headers);
-        answer.pipe(res);
-      },
-    );
-    upstream.on('error', () => {
-      if (!res.headersSent) res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' });
-      res.end('practice field is not answering');
-      this.release(field);
+    proxyRequest({ port: field.port }, rest, req, res, {
+      agent: this.upstream,
+      unreachable: 'practice field is not answering',
+      onClose: () => this.release(field),
     });
-    res.on('close', () => this.release(field));
-    req.pipe(upstream);
     return true;
   }
 
@@ -222,26 +203,9 @@ export class FieldSupervisor {
     if (!field) return false;
     this.hold(field);
 
-    const upstream = connect(field.port, '127.0.0.1', () => {
-      const headers = [`GET ${rest} HTTP/1.1`];
-      for (const [name, value] of Object.entries(req.headers)) {
-        if (Array.isArray(value)) for (const one of value) headers.push(`${name}: ${one}`);
-        else if (value !== undefined) headers.push(`${name}: ${value}`);
-      }
-      upstream.write(`${headers.join('\r\n')}\r\n\r\n`);
-      if (head.length > 0) upstream.write(head);
-      upstream.pipe(socket);
-      socket.pipe(upstream);
+    proxyUpgrade({ port: field.port }, rest, req, socket, head, {
+      onClose: () => this.release(field),
     });
-
-    const done = (): void => {
-      this.release(field);
-      upstream.destroy();
-      socket.destroy();
-    };
-    upstream.on('error', done);
-    socket.on('error', done);
-    socket.on('close', done);
     return true;
   }
 

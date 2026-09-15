@@ -32,6 +32,7 @@ import {
 import { VIEW_HZ, type ViewMessage } from './view';
 import { AGENT_PATH, AgentGateway } from './gateway';
 import { slugifyTeam, TOKEN_FILENAME } from './manifest';
+import { handIssuedAuthority, type Authority } from './authority';
 import { validateSubmission } from './submission';
 import type { PracticeSession, ResolveMode, SeatFill } from './practice';
 import { WorkspaceStore, type RobotNumber } from './workspace';
@@ -96,10 +97,30 @@ export interface ServerOptions {
   workspacesDir?: string;
   /**
    * Hand-issued team credentials, token to team name — the same style as
-   * `refereeToken`, and replaced by real accounts in Phase 6. Empty (the
-   * default) means `/workspace-api/*` answers 404 for everything.
+   * `refereeToken`. Empty (the default) means `/workspace-api/*` answers 404
+   * for everything.
+   *
+   * This is the arrangement a match server on a laptop still runs on. A league
+   * server passes an `authority` instead and never sets this.
    */
   workspaceTokens?: ReadonlyMap<string, string>;
+  /**
+   * Who is making a request, when something above this server knows better.
+   *
+   * Absent — the default — builds `handIssuedAuthority` from `refereeToken`
+   * and `workspaceTokens` above, which is exactly the three checks this file
+   * used to make inline. A league server passes one backed by accounts, and
+   * that is the whole of how accounts reach a match: a function, not a
+   * database, and nothing here knows which it was handed.
+   */
+  authority?: Authority;
+  /**
+   * Interface to bind. Absent binds every interface, as it always has.
+   *
+   * A league server runs its world on loopback and reaches it through its own
+   * port, so the world is not separately exposed on the venue's network.
+   */
+  host?: string;
   /**
    * Let anyone with the link open a practice field on this server.
    *
@@ -202,7 +223,7 @@ export class MatchServer {
   /** The practice fields this server is hosting for other people, if it does that. */
   private readonly fields: FieldSupervisor | null;
   private stopped = false;
-  private readonly refereeToken: string | null;
+  private readonly authority: Authority;
   private readonly realtime: boolean;
   private readonly pythonLibDir: string | null;
   private readonly submissionsDir: string;
@@ -219,15 +240,17 @@ export class MatchServer {
           ...(opts.practiceFields === true ? {} : opts.practiceFields),
         })
       : null;
-    this.refereeToken = opts.refereeToken ?? null;
+    this.authority =
+      opts.authority ??
+      handIssuedAuthority({
+        refereeToken: opts.refereeToken ?? null,
+        workspaceTokens: opts.workspaceTokens,
+      });
     this.realtime = opts.realtime ?? true;
     this.pythonLibDir = opts.pythonLibDir ? resolve(opts.pythonLibDir) : null;
     this.submissionsDir = resolve(opts.submissionsDir ?? 'submissions');
     this.workspaceRoot = opts.workspaceRoot ? resolve(opts.workspaceRoot) : null;
-    this.workspaces = new WorkspaceStore({
-      dir: resolve(opts.workspacesDir ?? 'workspaces'),
-      tokens: opts.workspaceTokens ?? new Map(),
-    });
+    this.workspaces = new WorkspaceStore({ dir: resolve(opts.workspacesDir ?? 'workspaces') });
 
     this.http.on('upgrade', (req, socket, head) => {
       // A field's own sockets - its viewers and its robots - belong to the
@@ -264,7 +287,11 @@ export class MatchServer {
     this.agentSocketPath = join(this.agentScratchDir, 'agents.sock');
     await new Promise<void>((ok) => this.agentSocket.listen(this.agentSocketPath, ok));
 
-    await new Promise<void>((ok) => this.http.listen(this.opts.port ?? 8080, ok));
+    await new Promise<void>((ok) =>
+      this.opts.host
+        ? this.http.listen(this.opts.port ?? 8080, this.opts.host, ok)
+        : this.http.listen(this.opts.port ?? 8080, ok),
+    );
     const address = this.http.address();
     if (address === null || typeof address === 'string') {
       throw new Error('server is not listening on a TCP port');
@@ -382,7 +409,7 @@ export class MatchServer {
    * cheap — a 100 Hz setInterval is not something to rely on.
    */
   async play(options: MatchOptions): Promise<MatchResult> {
-    if (options.refereed && !this.refereeToken) {
+    if (options.refereed && !this.authority.refereed) {
       throw new Error(
         'a refereed match needs a refereeToken configured on the server — otherwise nothing could ever kick it off',
       );
@@ -672,7 +699,8 @@ export class MatchServer {
     }
     // The practice console, on its own path like the referee's. No token:
     // a practice field is open to whoever has the link, which is Phase 4's
-    // deliberate position until Phase 6 builds accounts - see PHASES.md.
+    // deliberate position. Accounts exist now, but a field that *belongs* to
+    // a team is Phase 8's subject - see PHASES.md.
     if (url === '/practice' || url.startsWith('/practice/')) {
       // `/practice` has to become `/practice/` before anything is served from
       // it: the console's assets are relative, so that a field reached at
@@ -686,6 +714,20 @@ export class MatchServer {
       }
       const sub = url.slice('/practice'.length);
       await this.serveStatic(res, this.practiceRoot, sub, 'no practice console built; run: npm run build:practice');
+      return;
+    }
+    // "Does this server already know who I am?" — the one referee route that
+    // reads rather than acts. A league server authenticates the console with
+    // the session the person already has, so the bundle has to be able to ask
+    // whether it needs to show a login at all rather than demanding a token
+    // that no longer exists.
+    if (url === '/referee-api/session' && req.method === 'GET') {
+      if (!this.authority.refereed) {
+        this.respondJson(res, 404, { ok: false, reason: 'referee mode is not enabled on this server' });
+        return;
+      }
+      const allowed = await this.authority.referee(req);
+      this.respondJson(res, allowed ? 200 : 401, { ok: allowed });
       return;
     }
     if (req.method === 'POST' && url.startsWith('/referee-api/')) {
@@ -908,13 +950,11 @@ export class MatchServer {
   }
 
   private async handleRefereeAction(req: IncomingMessage, res: ServerResponse, action: string): Promise<void> {
-    if (!this.refereeToken) {
+    if (!this.authority.refereed) {
       this.respondJson(res, 404, { ok: false, reason: 'referee mode is not enabled on this server' });
       return;
     }
-    const auth = req.headers.authorization ?? '';
-    const presented = auth.startsWith('Bearer ') ? auth.slice('Bearer '.length) : '';
-    if (presented !== this.refereeToken) {
+    if (!(await this.authority.referee(req))) {
       this.respondJson(res, 401, { ok: false, reason: 'invalid or missing referee token' });
       return;
     }
@@ -1086,7 +1126,7 @@ export class MatchServer {
     res: ServerResponse,
     action: string,
   ): Promise<void> {
-    if (!this.workspaces.enabled) {
+    if (!this.authority.workspaces) {
       this.respondJson(res, 404, {
         ok: false,
         reason: 'this server is not hosting team workspaces',
@@ -1094,9 +1134,7 @@ export class MatchServer {
       return;
     }
 
-    const auth = req.headers.authorization ?? '';
-    const presented = auth.startsWith('Bearer ') ? auth.slice('Bearer '.length) : '';
-    const team = this.workspaces.teamFor(presented);
+    const team = await this.authority.team(req);
     if (!team) {
       this.respondJson(res, 401, { ok: false, reason: 'invalid or missing team token' });
       return;
@@ -1257,6 +1295,17 @@ export class MatchServer {
       return;
     }
 
+    // Who this push may be written as, asked before a byte of it is read.
+    // On a laptop the answer is "anybody", which is what it has always been
+    // and what a team practising in a classroom needs. On a league server it
+    // is one team, and the manifest is held to it below — the rule Phase 1
+    // wrote down for the join and this door never got.
+    const submitter = await this.authority.submitter(req);
+    if (!submitter) {
+      this.respondJson(res, 401, { ok: false, reason: 'invalid or missing push key' });
+      return;
+    }
+
     const body = await this.readBody(req, MAX_SUBMIT_BYTES);
     if (body === null) {
       this.respondJson(res, 413, { ok: false, reason: 'push too large' });
@@ -1322,6 +1371,13 @@ export class MatchServer {
       }
 
       const manifest = result.value;
+      if (!submitter.open && slugifyTeam(manifest.team) !== slugifyTeam(submitter.team)) {
+        this.respondJson(res, 403, {
+          ok: false,
+          reason: `manifest.json says the team is "${manifest.team}", but this key belongs to "${submitter.team}"`,
+        });
+        return;
+      }
       const teamDir = join(this.submissionsDir, slugifyTeam(manifest.team));
       const target = join(teamDir, String(manifest.robot));
       await mkdir(teamDir, { recursive: true });

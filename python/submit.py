@@ -22,6 +22,13 @@ from pathlib import Path
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--dir", default=".", help="the robot's folder (with manifest.json in it)")
 parser.add_argument("--url", default="http://localhost:8080/submit")
+parser.add_argument(
+    "--key",
+    help=(
+        "your team's push key, from /team/settings on a league server. "
+        "A match server on a laptop needs none."
+    ),
+)
 args = parser.parse_args()
 
 folder = Path(args.dir)
@@ -45,9 +52,14 @@ for path in sorted(folder.iterdir()):
 print(f"pushing {team} robot {robot} to {args.url}: {', '.join(sorted(files))}", file=sys.stderr)
 
 body = json.dumps({"files": files}).encode("utf-8")
-request = urllib.request.Request(
-    args.url, data=body, headers={"Content-Type": "application/json"}, method="POST"
-)
+headers = {"Content-Type": "application/json"}
+# The key says which team this push is. A league server holds the manifest to
+# it and refuses a push that names somebody else - the team comes from the
+# credential, never from the file, which is the same rule the join has always
+# been held to. A match server on a laptop has no accounts and wants no key.
+if args.key:
+    headers["Authorization"] = f"Bearer {args.key}"
+request = urllib.request.Request(args.url, data=body, headers=headers, method="POST")
 
 try:
     with urllib.request.urlopen(request) as response:

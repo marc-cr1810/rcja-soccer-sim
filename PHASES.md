@@ -280,11 +280,25 @@ phase that can answer it.
 
 ---
 
-## Phase 6 — Accounts and the front door
+## Phase 6 — Accounts and the front door ✅
 
 *Gate: a visitor with no account opens the site and sees what is upcoming, in
 progress and already played; a team registers itself, logs in, and finds its
 existing push credential and workspace exactly where they were.*
+
+Passed. A draw of two teams was run under `league`; the front page showed the
+fixture move from **next** to **on now**, with the score and clock ticking, to
+**played**, to a record page carrying the seed, the code hashes and the whole
+referee event log — all of it to a browser with no account. A team registered
+from an invitation code, minted a push key, pushed with
+`python3 python/submit.py --key …`, watched that push be refused when its
+manifest named somebody else, and opened the browser editor with no secret to
+paste. An organiser made from the terminal refereed the match from `/referee`
+with no hand-issued token anywhere, and `npm run serve` still creates no
+`league.db` and still serves the viewer at `/`.
+
+`src/accounts.ts` · `src/capabilities.ts` · `src/authority.ts` ·
+`src/league.ts` · `site/` · [docs/running-a-league.md](docs/running-a-league.md)
 
 Phases 1, 2 and 5 each shipped a hand-issued secret and each said, in the same
 words, that Phase 6 replaces where it comes from. This is that — and only that.
@@ -324,7 +338,45 @@ what the four of them add up to.
   under pressure — somebody cannot log in, twenty minutes before their match.
 - **Optional, not load-bearing.** `serve` on a laptop is untouched: no login, no
   front page, no database file created, nothing to opt into. Accounts are a
-  layer above `MatchServer`, never a path threaded through it.
+  layer above `MatchServer`, never a path threaded through it. The seam that
+  buys this is one injected object: `MatchServer` asks an `Authority` who is
+  making a request, and is handed the hand-issued one by default and an
+  account-backed one by a league server. It is a function reference, not a
+  database, and 407 existing tests passing unchanged is the proof.
+
+**Found while building it, and worth writing down: `POST /submit` had no
+authentication at all.** The team came from the pushed `manifest.json`, so
+anybody who could reach a venue server could push over anybody's robot. Phase 1
+wrote the rule down — *a secret enough to bind a push to a team name* — and
+built it only for the workspace push, which got it for free by going through a
+token. So this phase is not moving the push credential to a new source; it is
+the first time the laptop push is authenticated, and `python/submit.py` gained
+the `--key` it always should have had.
+
+Caught by playing it rather than by testing it, four times:
+
+- **Importing `node:sqlite` is what emits its experimental warning**, so a top
+  level import in `cli.ts` made every command in the CLI print it — including
+  `match`, `bench` and the plain `serve` this phase promised to leave alone.
+  The accounts layer is now imported inside the three commands that use it,
+  which also means a laptop never loads a database driver it will never open.
+- **The viewer's assets were absolute**, so mounting it at `/live/` fetched the
+  *site's* `/assets/…` and the spectator page arrived unstyled and stuck on
+  "connecting…". The practice and workspace bundles had already solved this
+  with a relative base; the viewer had never needed it, because until now it
+  was only ever served from `/`. It was also silently wrong under `/f/<id>/`.
+- **Both existing consoles demanded a token that no longer exists.** The
+  referee console and the workspace editor each open on a login screen asking
+  for a secret, and on a league server the person is already signed in. Both
+  now ask the server whether it knows them before showing it — which is the
+  difference between the console opening and a referee hunting for a string
+  nobody issued them.
+- **The site went down when the last fixture ended.** `league` began as
+  `tournament` with a front door on it, and a tournament is a batch job: it
+  prints the table and stops. A venue's front door is not — the moment the
+  final whistle goes is the moment everybody opens the table. Playing the draw
+  out was the only way to find it; every test and every earlier run stopped
+  while fixtures remained.
 
 ---
 

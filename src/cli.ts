@@ -8,6 +8,7 @@
  */
 
 import { MatchServer } from './server';
+import { isRole, type Role } from './capabilities';
 import { Match, KICKOFF_COUNTDOWN_SECONDS, type MatchAgents } from './match';
 import { PracticeSession } from './practice';
 import { referenceTeam } from './reference';
@@ -17,7 +18,7 @@ import { botRoster } from './bots';
 import { resolveLineup, spawnLineup, type SpawnedLineup } from './lineup';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { DEFAULT_OPTIONS, formatBench, runBench, type BenchResult } from './bench';
 import { slugifyTeam } from './manifest';
 import { isLeagueId, type LeagueId } from './leagues';
@@ -205,6 +206,11 @@ function leagueFrom(flags: Map<string, string>): LeagueId | undefined {
   return raw;
 }
 
+function siteRoot(): string | undefined {
+  const built = resolve('dist-site');
+  return existsSync(built) ? built : undefined;
+}
+
 function practiceRoot(): string | undefined {
   const built = resolve('dist-practice');
   return existsSync(built) ? built : undefined;
@@ -228,8 +234,9 @@ async function serve(flags: Map<string, string>): Promise<void> {
   // server says so, and gets a child process per field (see fields.ts).
   const practiceFields = flags.get('practice-fields') === 'true';
   // Opt-in the same way: a venue that wants teams editing in a browser says
-  // so, and hands each team a secret out of band. Phase 6 replaces this with
-  // registration; until then it is the same shape as the referee's token.
+  // so, and hands each team a secret out of band. A real competition runs
+  // `league` instead, where the secret is an account - this is the laptop
+  // arrangement, and it stays because a laptop has nobody to register with.
   const workspaceTokens = teamTokens(flags);
   const wsRoot = workspaceTokens.size > 0 ? workspaceRoot() : undefined;
   const server = new MatchServer({
@@ -751,6 +758,346 @@ async function tournament(flags: Map<string, string>): Promise<void> {
   await server.close();
 }
 
+
+/**
+ * Quieten exactly one warning, and nothing else.
+ *
+ * `node:sqlite` is experimental before Node 24 and says so on first use. A
+ * state coordinator reading the word "experimental" while a hall fills up is a
+ * support call, and the alternative — telling venues to pass `--no-warnings` —
+ * would hide every other warning too. So the default listener is replaced with
+ * one that drops this single message and prints the rest as Node would.
+ *
+ * It has to run *before* `node:sqlite` is imported, which is why the three
+ * commands that use it import `./accounts` and `./league` dynamically rather
+ * than at the top of this file. That is not only about the warning: a plain
+ * `serve`, `match` or `bench` should not load a database driver it will never
+ * open, and before this was lazy every command in the CLI printed the warning.
+ */
+function quietenSqliteWarning(): void {
+  process.removeAllListeners('warning');
+  process.on('warning', (warning) => {
+    if (warning.name === 'ExperimentalWarning' && /SQLite/i.test(warning.message)) return;
+    console.warn(`${warning.name}: ${warning.message}`);
+  });
+}
+
+function leagueData(flags: Map<string, string>): string {
+  return resolve(flags.get('data') ?? 'league');
+}
+
+/** A password, off the terminal rather than out of a shell history. */
+async function askSecret(prompt: string): Promise<string> {
+  if (!process.stdin.isTTY) {
+    console.error(`\n  ${prompt} — but this is not a terminal. Use --password.\n`);
+    process.exit(1);
+  }
+  process.stdout.write(`  ${prompt}: `);
+  process.stdin.setRawMode(true);
+  process.stdin.resume();
+  let typed = '';
+  for await (const chunk of process.stdin) {
+    const text = (chunk as Buffer).toString('utf8');
+    if (text === '\r' || text === '\n' || text === '\u0004') break;
+    if (text === '\u0003') {
+      process.stdin.setRawMode(false);
+      process.stdout.write('\n');
+      process.exit(130);
+    }
+    if (text === '\u007f' || text === '\b') typed = typed.slice(0, -1);
+    else typed += text;
+  }
+  process.stdin.setRawMode(false);
+  process.stdin.pause();
+  process.stdout.write('\n');
+  return typed;
+}
+
+async function passwordFrom(flags: Map<string, string>, prompt: string): Promise<string> {
+  const given = flags.get('password');
+  if (given && given !== 'true') return given;
+  const first = await askSecret(prompt);
+  const again = await askSecret('and again');
+  if (first !== again) {
+    console.error('\n  those did not match\n');
+    process.exit(1);
+  }
+  return first;
+}
+
+function roleFrom(flags: Map<string, string>): Role {
+  const raw = flags.get('role');
+  if (!raw || raw === 'true' || !isRole(raw) || raw === 'guest') {
+    console.error('\n  --role must be team, referee or admin\n');
+    process.exit(1);
+  }
+  return raw;
+}
+
+/**
+ * The way in from outside the browser.
+ *
+ * The first admin cannot be made from a page that requires an admin to log
+ * into, so this has to exist. It is also a debt the database choice incurred:
+ * the standing promise that an organiser can fix the broken thing in a text
+ * editor at eleven at night still holds for workspaces, submissions, draws and
+ * results, and does not hold for accounts. `--passwd` rebuilds that hatch for
+ * the failure most likely to happen under pressure — somebody cannot log in,
+ * twenty minutes before their match.
+ */
+async function account(flags: Map<string, string>): Promise<void> {
+  quietenSqliteWarning();
+  const { Accounts, MIN_PASSWORD } = await import('./accounts');
+  const accounts = new Accounts({ file: join(leagueData(flags), 'league.db') });
+
+  try {
+    if (flags.get('list') === 'true') {
+      const all = accounts.list();
+      if (all.length === 0) {
+        console.log('\n  no accounts yet — make one:  npm run serve -- account --create --role admin --name "Your Name"\n');
+        return;
+      }
+      console.log('');
+      for (const one of all) {
+        const state = one.disabledAt ? '  (disabled)' : '';
+        console.log(`  ${one.role.padEnd(8)}  ${one.slug.padEnd(24)}  ${one.displayName}${state}`);
+      }
+      console.log('');
+      return;
+    }
+
+    if (flags.get('passwd') === 'true') {
+      const slug = flags.get('name');
+      if (!slug || slug === 'true') {
+        console.error('\n  --passwd needs --name "who"\n');
+        process.exit(1);
+      }
+      const password = await passwordFrom(flags, `new password for "${slug}" (at least ${MIN_PASSWORD} characters)`);
+      const done = accounts.setPassword(slug, password);
+      if (!done.ok) {
+        console.error(`\n  ${done.reason}\n`);
+        process.exit(1);
+      }
+      console.log(`\n  done — ${done.value.displayName} can log in again, and every old session is closed\n`);
+      return;
+    }
+
+    if (flags.get('create') === 'true') {
+      const role = roleFrom(flags);
+      const name = flags.get('name');
+      if (!name || name === 'true') {
+        console.error('\n  --create needs --name "Their Name"\n');
+        process.exit(1);
+      }
+      const password = await passwordFrom(flags, `a password (at least ${MIN_PASSWORD} characters)`);
+      const made = accounts.createAccount({ role, displayName: name, password });
+      if (!made.ok) {
+        console.error(`\n  ${made.reason}\n`);
+        process.exit(1);
+      }
+      accounts.record(null, 'account.manage', made.value.slug, 'created from the terminal');
+      console.log(`\n  ${made.value.role} account "${made.value.displayName}" created`);
+      console.log(`  they log in as:   ${made.value.slug}\n`);
+      return;
+    }
+
+    console.log(`
+  account --create --role admin|referee|team --name "Their Name"
+  account --passwd --name <slug>
+  account --list
+
+  --data <dir>   where league.db lives (default: ./league)
+`);
+  } finally {
+    accounts.close();
+  }
+}
+
+/**
+ * An invitation, single-use.
+ *
+ * A team invite carries the team's name so that registering cannot rename it:
+ * the organiser decides who "ACT Robotics" is, the team decides their own
+ * password. Same ergonomics as the hand-issued secret this replaces — an
+ * organiser hands a team a string — and strictly better, because the string
+ * stops working the moment it is used.
+ */
+async function invite(flags: Map<string, string>): Promise<void> {
+  quietenSqliteWarning();
+  const { Accounts } = await import('./accounts');
+  const accounts = new Accounts({ file: join(leagueData(flags), 'league.db') });
+  try {
+    if (flags.get('list') === 'true') {
+      const all = accounts.listInvites();
+      if (all.length === 0) {
+        console.log('\n  no invitations issued\n');
+        return;
+      }
+      console.log('');
+      for (const one of all) {
+        const state = one.usedAt ? 'used' : one.expiresAt < new Date().toISOString() ? 'expired' : 'open';
+        console.log(`  ${state.padEnd(8)}  ${one.role.padEnd(8)}  ${(one.team ?? '').padEnd(24)}  ${one.code}`);
+      }
+      console.log('');
+      return;
+    }
+
+    const role = roleFrom(flags);
+    const team = flags.get('team');
+    const made = accounts.createInvite({ role, team: team && team !== 'true' ? team : null });
+    if (!made.ok) {
+      console.error(`\n  ${made.reason}\n`);
+      process.exit(1);
+    }
+    console.log(`\n  invitation for ${made.value.role}${made.value.team ? ` "${made.value.team}"` : ''}`);
+    console.log(`  code:     ${made.value.code}`);
+    console.log(`  expires:  ${made.value.expiresAt.slice(0, 10)}`);
+    console.log(`  (hand this over; it works once)\n`);
+  } finally {
+    accounts.close();
+  }
+}
+
+/**
+ * The venue deployment: a front door, and the draw being played behind it.
+ *
+ * This is `tournament` with a site in front of it and accounts underneath, and
+ * it is deliberately the same `runDraw` loop — so a league resumes after a
+ * crash for the same reason a tournament does, which is that the next fixture
+ * is the first one with no result on disk.
+ *
+ * Without `--name` it serves the front door and plays nothing, which is what a
+ * venue wants the evening before: teams registering, pushing and checking the
+ * schedule while nothing is on.
+ */
+async function league(flags: Map<string, string>): Promise<void> {
+  quietenSqliteWarning();
+  const { LeagueServer } = await import('./league');
+  const root = tournamentsRoot();
+  const name = flags.get('name');
+  const id = name && name !== 'true' ? slugifyTeam(name) : null;
+
+  let made: Draw | null = null;
+  if (id) {
+    try {
+      made = await loadDraw(root, id);
+    } catch {
+      console.error(`\n  no draw called "${id}" under ${root}` + `\n  make one:  npm run serve -- draw --name "${id}"\n`);
+      process.exit(1);
+    }
+  }
+
+  const refereed = (made?.refereed ?? true) && flags.get('headless') !== 'true';
+  const site = siteRoot();
+  const server = new LeagueServer({
+    port: num(flags, 'port', 8080),
+    dataDir: leagueData(flags),
+    tournamentsDir: root,
+    tournamentId: id,
+    siteRoot: site,
+    log: (line) => console.log(`  ${line}`),
+    world: {
+      viewerRoot: viewerRoot(),
+      refereeRoot: refereeRoot(),
+      workspaceRoot: workspaceRoot(),
+      workspacesDir: flags.get('workspaces-dir'),
+      pythonLibDir: pythonLibDir(),
+      realtime: refereed,
+      viewHz: num(flags, 'view-hz', 60),
+      kickoffCountdown: flags.has('kickoff-countdown')
+        ? num(flags, 'kickoff-countdown', KICKOFF_COUNTDOWN_SECONDS)
+        : undefined,
+    },
+  });
+
+  const port = await server.listen();
+  console.log(`\n  RCJA Soccer Simulation — league server`);
+  console.log(`  front page:  http://localhost:${port}`);
+  console.log(`  watch:       http://localhost:${port}/live/`);
+  if (!site) console.log(`  (no site built yet — run: npm run build:site)`);
+  if (made) console.log(`  playing:     ${made.name} — ${made.fixtures.length} fixtures`);
+  else console.log(`  playing:     nothing — pass --name <draw> to run one`);
+  if (server.accounts.empty) {
+    console.log(`\n  there are no accounts yet. Make the first admin:`);
+    console.log(`    npm run serve -- account --create --role admin --name "Your Name"`);
+  }
+  console.log(`\n  ctrl-c to stop; re-run to carry on where it stopped\n`);
+
+  if (!made) return;
+
+  const libDir = pythonLibDir();
+  let running: SpawnedLineup | null = null;
+  process.on('SIGINT', () => {
+    running?.stop();
+    process.exit(0);
+  });
+
+  const results = await runDraw(root, made, {
+    onFixtureStart: (fixture, played, total) => {
+      // The front page's "now playing" band is this, and only this: the league
+      // server never guesses what is on from the draw, because a fixture that
+      // is next and a fixture that is being played are different things to a
+      // person standing in the hall.
+      server.setLive(fixture);
+      console.log(`  fixture ${played + 1} of ${total}:  ${fixture.home} v ${fixture.away}`);
+    },
+    onFixtureDone: (fixture, result) => {
+      server.setLive(null);
+      const score = result.legs
+        .map((leg) => `${leg.result.score.violet}-${leg.result.score.lime}`)
+        .join(', ');
+      console.log(`  played:  ${fixture.home} v ${fixture.away}  ${score}\n`);
+    },
+    playLeg: async (fixture, seed, leg) => {
+      const teams = { violet: fixture.home, lime: fixture.away };
+      const submissions: Record<string, string> = {};
+      let lineup: SpawnedLineup | null = null;
+
+      if (libDir) {
+        const resolved = await resolveLineup(server.matches.submissionsDirectory, teams);
+        const ids = Object.keys(resolved);
+        if (ids.length > 0) {
+          lineup = await spawnLineup(server.matches, resolved, { pythonLibDir: libDir }, (line) =>
+            console.log(`  ${line}`),
+          );
+          running = lineup;
+          for (const [id, entry] of Object.entries(resolved)) {
+            if (entry) submissions[id] = await hashSubmission(entry.dir);
+          }
+        }
+      }
+
+      if (made!.legs > 1) console.log(`    leg ${leg + 1} of ${made!.legs}  (seed ${formatSeedValue(seed)})`);
+
+      try {
+        const result = await server.matches.play({
+          agents: agentsFor(undefined),
+          transports: lineup?.transports,
+          teams,
+          league: made!.league,
+          halfSeconds: made!.halfSeconds,
+          seed,
+          refereed,
+        });
+        return { result, submissions };
+      } finally {
+        lineup?.stop();
+        running = null;
+        server.matches.agents.closeAll();
+      }
+    },
+  });
+
+  server.setLive(null);
+  console.log(`\n${formatTable(made, results)}`);
+  // And then it keeps serving. A tournament is a batch job and stops when the
+  // last fixture is played; a league server is a venue's front door, and the
+  // moment the final ends is the moment everyone goes to look at the table.
+  // Closing here took the front page, the schedule and every login down with
+  // it — caught by playing the draw out rather than by any test.
+  console.log(`  every fixture has been played — the site stays up until ctrl-c\n`);
+}
+
 /** The table as it stands, without playing anything. */
 async function table(flags: Map<string, string>): Promise<void> {
   const root = tournamentsRoot();
@@ -801,6 +1148,10 @@ function usage(): void {
     tournament  play a draw through, resumably                 [--name --headless --port --referee-token]
     table       print a tournament's table as it stands        [--name]
 
+    league    run the venue: a front page, accounts, and a draw  [--name --port --data --headless]
+    account   make or repair an account                          [--create --passwd --list --role --name --data]
+    invite    issue a single-use registration code               [--role --team --list --data]
+
   --opponent puts a test robot on the lime side instead of the reference
   agent: naive-chaser, shover, chaser+camper, spinner, waller, wanderer, statue
 
@@ -811,6 +1162,16 @@ function usage(): void {
   TEAM=SECRET does one team inline, for trying it out. --workspaces-dir moves
   where the folders are kept (default ./workspaces). Needs npm run
   build:workspace. See docs/writing-in-a-browser.md.
+
+  league is the tournament deployment, and serve is unchanged by it: no
+  login, no front page, no database file. A league server owns accounts (in
+  <data>/league.db, default ./league) and shows a front page of what is
+  upcoming, on now and already played, while the football happens in the same
+  match server a team runs on a laptop. Watching needs no account; entering,
+  refereeing and administering do. Make the first admin with the account
+  command, then hand out invite codes — an admin cannot come from a page that
+  needs
+  an admin to log into. See docs/running-a-league.md.
 
   --practice-fields lets anyone with the link open a practice field on the
   match server: POST /practice answers with a URL, and each field is its own
@@ -912,6 +1273,15 @@ switch (command) {
     break;
   case 'table':
     await table(flags);
+    break;
+  case 'league':
+    await league(flags);
+    break;
+  case 'account':
+    await account(flags);
+    break;
+  case 'invite':
+    await invite(flags);
     break;
   default:
     usage();

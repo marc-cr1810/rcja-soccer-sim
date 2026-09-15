@@ -1,6 +1,6 @@
 # Documentation
 
-Six things, in the order a team actually needs them:
+Seven things, in the order a team actually needs them:
 
 1. **[Writing a robot](writing-a-robot.md)** — the folder format a submission
    is, the argv convention every entry script follows, and where the sensor
@@ -20,7 +20,10 @@ Six things, in the order a team actually needs them:
 6. **[Running a tournament](running-a-tournament.md)** — for whoever is
    running the event rather than entering it: a draw, a division played
    through with a referee, and a table that survives the laptop being closed.
+7. **[Running a league](running-a-league.md)** — the venue deployment: a
+   public front page, accounts for teams, referees and organisers, and the
+   same fixture loop behind it. Watching still needs no account.
 
 The top-level [README](../README.md) is the pitch — what this is, why the
 physics is shaped the way it is, what the league itself looks like. These
-six are the manual.
+seven are the manual.

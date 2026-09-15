@@ -22,9 +22,11 @@
  * would be an editor you cannot use. Validation happens at the moment they
  * push, which is exactly where it happens for a team on a laptop.
  *
- * Identity is a hand-issued token, matching Phase 1's push credential and
- * Phase 2's referee one: a secret per team, created by the admin running the
- * venue. Registration and real accounts are Phase 6's job.
+ * Identity is not decided here. Who a request is has moved to `authority.ts`,
+ * which answers it from a hand-issued secret on a laptop and from an account
+ * on a league server; this file takes a team name it has been told and reads
+ * and writes that team's folder. Keeping the two apart is what let accounts
+ * arrive without this file changing at all.
  */
 
 import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
@@ -55,15 +57,6 @@ export const MAX_FILES = 32;
 export interface WorkspaceOptions {
   /** Where team folders live. Defaults to ./workspaces alongside ./submissions. */
   dir: string;
-  /**
-   * Hand-issued credentials, token to team name.
-   *
-   * Keyed by token rather than by team because that is the direction every
-   * lookup goes: a request presents a secret and the server has to decide who
-   * that is. Storing it the other way round would mean scanning every team on
-   * every request.
-   */
-  tokens: ReadonlyMap<string, string>;
 }
 
 export interface WorkspaceFile {
@@ -73,22 +66,9 @@ export interface WorkspaceFile {
 
 export class WorkspaceStore {
   private readonly dir: string;
-  private readonly tokens: ReadonlyMap<string, string>;
 
   constructor(opts: WorkspaceOptions) {
     this.dir = opts.dir;
-    this.tokens = opts.tokens;
-  }
-
-  /** Whether any team is configured at all. */
-  get enabled(): boolean {
-    return this.tokens.size > 0;
-  }
-
-  /** The team a token belongs to, or null if it belongs to nobody. */
-  teamFor(token: string): string | null {
-    if (!token) return null;
-    return this.tokens.get(token) ?? null;
   }
 
   /** Where one robot's folder lives. */

@@ -362,12 +362,26 @@ function serverAddress(): string {
   return location.host;
 }
 
+/**
+ * The path this page was served under.
+ *
+ * On a match server that is `/` and nothing changes. On a league server the
+ * viewer is mounted at `/live/` and reached through a proxy, so the socket has
+ * to be opened under the same prefix or it arrives at the front door instead
+ * of at the world. The practice console has derived its prefix this way since
+ * Phase 4, for the same reason and with the same three lines.
+ */
+function basePath(): string {
+  const path = location.pathname;
+  return path.endsWith('/') ? path : path.replace(/[^/]*$/, '');
+}
+
 /** How long to let a socket sit in CONNECTING before calling it a failure. */
 const CONNECT_TIMEOUT = 4000;
 
 function connect(): void {
   const host = serverAddress();
-  const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${host}`;
+  const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${host}${basePath()}`;
   const socket = new WebSocket(url);
   let everLive = false;
 

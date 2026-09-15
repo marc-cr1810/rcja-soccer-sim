@@ -14,10 +14,13 @@
  * rehearsal on a different Python, without the CPU and memory ceilings, is a
  * rehearsal of a different sport.
  *
- * The credential is a hand-issued team secret, matching the push token from
- * Phase 1 and the referee's from Phase 2. Real accounts are Phase 6's job; the
- * shape of this page does not change when they arrive, only where the secret
- * comes from.
+ * Who the team is comes from the credential, and there are two of them now.
+ * On a match server it is the hand-issued secret this page asks for, matching
+ * the push token from Phase 1 and the referee's from Phase 2. On a league
+ * server it is the session the team already has, so there is nothing to paste
+ * and the gate never appears — the page asks the server who it is talking to
+ * before showing a login for a secret nobody issued. Nothing else about this
+ * page changed when accounts arrived, which was the promise.
  */
 
 import { CodeEditor } from './editor';
@@ -71,9 +74,13 @@ const unsaved = new Set<string>();
 /* --- talking to the server --- */
 
 async function api(action: string, body: Record<string, unknown> = {}): Promise<any> {
+  const headers: Record<string, string> = { 'content-type': 'application/json' };
+  // On a league server there is no secret to paste: the team signed in to the
+  // site and the session cookie the browser already sends says who they are.
+  if (token) headers.authorization = `Bearer ${token}`;
   const response = await fetch(`${BASE}workspace-api/${action}`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+    headers,
     body: JSON.stringify({ robot, ...body }),
   });
   const payload = await response.json().catch(() => ({ ok: false, reason: 'the server said nothing' }));
@@ -209,16 +216,23 @@ function load(incoming: WorkspaceFile[]): void {
   }
 }
 
-async function openWorkspace(which: RobotNumber): Promise<boolean> {
+async function openWorkspace(
+  which: RobotNumber,
+  opts: { quiet?: boolean } = {},
+): Promise<boolean> {
   await saveActive();
   robot = which;
   const result = await api('open');
   if (!result.ok) {
     if (result.status === 401) {
       forget();
-      el.gateError.textContent = 'That secret is not one this server knows.';
-      el.gateError.hidden = false;
-    } else {
+      // Quiet on the way in: "that secret is wrong" is the wrong thing to say
+      // to somebody who has not typed one yet, which is every first visit.
+      if (!opts.quiet) {
+        el.gateError.textContent = 'That secret is not one this server knows.';
+        el.gateError.hidden = false;
+      }
+    } else if (!opts.quiet) {
       say(result.reason ?? 'could not open the workspace', 'bad');
     }
     return false;
@@ -339,17 +353,17 @@ addEventListener('visibilitychange', () => {
 });
 
 
-// A refresh should not cost a sign-in.
+// A refresh should not cost a sign-in — and on a league server neither should
+// a first visit, because the team is already signed in to the site. Opening
+// with whatever credential exists (a remembered secret, a session cookie, or
+// nothing at all) and letting the server answer is one path rather than two.
 try {
-  const remembered = localStorage.getItem(TOKEN_KEY);
-  if (remembered) {
-    token = remembered;
-    void openWorkspace(1).then((ok) => {
-      if (!ok) return;
-      el.gate.hidden = true;
-      el.app.hidden = false;
-    });
-  }
+  token = localStorage.getItem(TOKEN_KEY) ?? '';
 } catch {
-  // No storage; the gate stays up, which is the correct fallback.
+  // No storage. Everything below still works; nothing is remembered.
 }
+void openWorkspace(1, { quiet: true }).then((ok) => {
+  if (!ok) return;
+  el.gate.hidden = true;
+  el.app.hidden = false;
+});
