@@ -5,9 +5,10 @@
 help:
 	@echo "rcja-soccer-sim"
 	@echo ""
-	@echo "  make install         npm install"
-	@echo "  make link            npm link — puts 'rcja-soccer-sim' on your PATH"
+	@echo "  make install         bun install"
+	@echo "  make link            bun link — puts 'rcja-soccer-sim' on your PATH"
 	@echo "  make build           build viewer + referee bundles"
+	@echo "  make build-bin       build standalone binary (dist/bin/rcja-soccer-sim)"
 	@echo "  make dev-viewer      vite dev server for the viewer"
 	@echo "  make dev-referee     vite dev server for the referee console"
 	@echo ""
@@ -33,33 +34,36 @@ help:
 	@echo "  make clean           remove built viewer/referee bundles"
 
 install:
-	npm install
+	bun install
 
 link:
-	npm link
+	bun link
 
 build: build-viewer build-referee
 
+build-bin:
+	bun run build:bin
+
 build-viewer:
-	npm run build:viewer
+	bun run build:viewer
 
 build-referee:
-	npm run build:referee
+	bun run build:referee
 
 dev-viewer:
-	npm run dev:viewer
+	bun run dev:viewer
 
 dev-referee:
-	npm run dev:referee
+	bun run dev:referee
 
 serve: build-viewer
-	npm run serve
+	bun run serve
 
 serve-agents: build-viewer
-	npm run serve -- --agents
+	bun run serve -- --agents
 
 serve-referee: build-viewer build-referee
-	npm run serve -- --referee
+	bun run serve -- --referee
 
 play:
 	cd python && PYTHONPATH=. python3 examples/play.py
@@ -71,31 +75,34 @@ play-lime:
 	cd python && PYTHONPATH=. python3 examples/play.py --only lime
 
 match:
-	npm run serve -- match
+	bun run serve -- match
 
 ladder:
-	npm run serve -- ladder
+	bun run serve -- ladder
 
 bench:
-	npm run serve -- bench
+	bun run serve -- bench
 
 draw:
-	npm run serve -- draw --name "$(NAME)"
+	bun run serve -- draw --name "$(NAME)"
 
 tournament-serve: build-viewer
-	npm run serve -- tournament --name "$(NAME)"
+	bun run serve -- tournament --name "$(NAME)"
 
 table:
-	npm run serve -- table --name "$(NAME)"
+	bun run serve -- table --name "$(NAME)"
 
 test:
-	npm test
+	bun test
 
 test-watch:
-	npm run test:watch
+	bun run test:watch
 
 typecheck:
-	npm run typecheck
+	bun run typecheck
 
 clean:
-	rm -rf dist-viewer dist-referee
+	rm -rf dist dist-bin dist-viewer dist-referee dist-practice dist-workspace dist-site
+	rm -f scratch/*.jsonl scratch/locframes.json
+	rm -rf scratch/frames scratch/rotframes
+	find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true

@@ -111,6 +111,22 @@ function logLine(text: string): void {
 }
 
 /**
+ * Where this console was served from, with a trailing slash.
+ *
+ * The console used to be at exactly one address — `/referee/` on the one world
+ * a server had — so it asked for `/referee-api/…` and opened its socket at the
+ * root. Phase 7 moved every world into a child arena, so the same bundle is now
+ * served at `/a/<id>/referee/` and both of those absolute paths arrive at the
+ * hub's front door instead of at the match. The viewer and the practice console
+ * have derived their prefix this way since Phase 4 and 6 respectively, for the
+ * same reason and with the same three lines.
+ */
+function basePath(): string {
+  const path = location.pathname.endsWith('/') ? location.pathname : `${location.pathname}/`;
+  return new URL('../', `${location.origin}${path}`).pathname;
+}
+
+/**
  * Call a referee action.
  *
  * The token is never sent anywhere except this server's own /referee-api, and
@@ -123,7 +139,7 @@ async function act(action: string, body?: unknown): Promise<boolean> {
   try {
     const headers: Record<string, string> = { 'content-type': 'application/json' };
     if (token) headers.authorization = `Bearer ${token}`;
-    const res = await fetch(`/referee-api/${action}`, {
+    const res = await fetch(`${basePath()}referee-api/${action}`, {
       method: 'POST',
       headers,
       body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -306,7 +322,7 @@ function receive(message: ViewMessage): void {
 }
 
 function connect(): void {
-  const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`;
+  const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${basePath()}`;
   const socket = new WebSocket(url);
   socket.addEventListener('message', (event) => {
     receive(JSON.parse(String(event.data)) as ViewMessage);
@@ -385,7 +401,7 @@ if (token) {
   // the console is only served to a session that may control a match, so
   // asking is the difference between the console opening and a login screen
   // demanding a secret that was replaced by an account.
-  void fetch('/referee-api/session')
+  void fetch(`${basePath()}referee-api/session`)
     .then((res) => {
       if (res.ok) enterConsole();
     })

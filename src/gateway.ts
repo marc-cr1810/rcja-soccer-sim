@@ -13,7 +13,7 @@
  * the world, and it cannot take its opponent down with it.
  */
 
-import type { WebSocket } from 'ws';
+import type { ServerWebSocket } from 'bun';
 import { sanitise, type Transport } from './agent';
 import { PROTOCOL_VERSION, type ActuatorFrame, type SensorFrame } from './protocol';
 
@@ -66,6 +66,10 @@ export const AGENT_PATH = '/agent';
  * Holds only the newest command. If a program answers twice between polls the
  * older answer is already stale — it was a reply to a sensor frame the world
  * has moved past — and acting on it would be worse than dropping it.
+ *
+ * Bun's native WebSocket model uses a central dispatch rather than per-socket
+ * event listeners, so this transport exposes `onMessage`, `onClose`, and
+ * `onError` methods that `server.ts`'s websocket handler calls directly.
  */
 export class RemoteTransport implements Transport {
   private pending: ActuatorFrame | null = null;
@@ -76,7 +80,7 @@ export class RemoteTransport implements Transport {
   }
 
   private closed = false;
-  private socket: WebSocket;
+  private socket: ServerWebSocket<unknown>;
   /** Commands that arrived and were superseded before the next poll. */
   overruns = 0;
   /** Commands rejected as malformed. */
@@ -87,23 +91,10 @@ export class RemoteTransport implements Transport {
   constructor(
     readonly name: string,
     readonly robotId: string,
-    socket: WebSocket,
+    socket: ServerWebSocket<unknown>,
     private readonly motorCount: number,
   ) {
     this.socket = socket;
-    this.listen(socket);
-  }
-
-  private listen(socket: WebSocket): void {
-    socket.on('error', () => {
-      if (this.socket === socket) this.closed = true;
-    });
-    socket.on('message', (data) => {
-      if (this.socket === socket) this.receive(String(data));
-    });
-    socket.on('close', () => {
-      if (this.socket === socket) this.closed = true;
-    });
   }
 
   /**
@@ -117,7 +108,7 @@ export class RemoteTransport implements Transport {
    * Whatever the old connection had queued is dropped. It was an answer to a
    * sensor frame the world has long since moved past.
    */
-  reattach(socket: WebSocket): void {
+  reattach(socket: ServerWebSocket<unknown>): void {
     try {
       if (this.socket !== socket) this.socket.close();
     } catch {
@@ -127,14 +118,14 @@ export class RemoteTransport implements Transport {
     this.pending = null;
     this.closed = false;
     this.reconnects++;
-    this.listen(socket);
   }
 
   get connected(): boolean {
     return !this.closed;
   }
 
-  private receive(text: string): void {
+  /** Called by the central websocket.message handler for every message on this socket. */
+  onMessage(text: string): void {
     let message: AgentClientMessage;
     try {
       message = JSON.parse(text) as AgentClientMessage;
@@ -152,8 +143,18 @@ export class RemoteTransport implements Transport {
     this.pending = clean;
   }
 
+  /** Called by the central websocket.close handler. */
+  onClose(): void {
+    this.closed = true;
+  }
+
+  /** Called by the central websocket.error handler. */
+  onError(): void {
+    this.closed = true;
+  }
+
   send(frame: SensorFrame): void {
-    if (this.closed || this.socket.readyState !== this.socket.OPEN) return;
+    if (this.closed) return;
     try {
       this.socket.send(JSON.stringify({ type: 'sensors', frame } satisfies SensorMessage));
     } catch {
@@ -208,7 +209,7 @@ export class AgentGateway {
   /**
    * Seats a validated submission was issued a token for — set by whoever
    * spawns it (`lineup.ts`), checked at join. A seat absent from this map
-   * requires no token at all, which is what keeps `--agents` mode, `npm run
+   * requires no token at all, which is what keeps `--agents` mode, `bun run
    * bench`, and local dev working exactly as they did before this existed.
    */
   private readonly expectedTokens = new Map<string, string>();
@@ -259,114 +260,93 @@ export class AgentGateway {
     this.expectedTokens.delete(seatId);
   }
 
-  /** Handle a new connection on the agent path. */
-  accept(socket: WebSocket, motorCount = 4): void {
-    const reject = (reason: string): void => {
-      socket.send(JSON.stringify({ type: 'reject', reason } satisfies RejectMessage));
-      socket.close();
+  /**
+   * Handle the first (join) message on an agent connection.
+   *
+   * Returns the transport if accepted, or `null` if the connection was
+   * rejected (the socket has already been sent a reject message and closed).
+   * Called by server.ts's central websocket.message handler.
+   */
+  accept(ws: ServerWebSocket<unknown>, firstMessage: string, motorCount = 4): RemoteTransport | null {
+    const reject = (reason: string): null => {
+      try {
+        ws.send(JSON.stringify({ type: 'reject', reason } satisfies RejectMessage));
+        ws.close();
+      } catch {
+        // Already closed
+      }
+      return null;
     };
 
-    socket.once('message', (data) => {
-      let join: JoinMessage;
-      try {
-        join = JSON.parse(String(data)) as JoinMessage;
-      } catch {
-        reject('first message must be JSON');
-        return;
-      }
-      if (join.type !== 'join') {
-        reject('first message must be a join');
-        return;
-      }
-      // A mismatch here is a season boundary, not a typo: the frame shape
-      // changed and the program was written against the old one. Say so,
-      // rather than feeding it fields it will not understand.
-      if (join.protocol !== PROTOCOL_VERSION) {
-        reject(`protocol ${join.protocol}; this server speaks ${PROTOCOL_VERSION}`);
-        return;
-      }
-      if (join.team !== 'violet' && join.team !== 'lime') {
-        reject(`unknown team "${join.team}"`);
-        return;
-      }
-      if (join.robot !== 1 && join.robot !== 2) {
-        reject(`robot must be 1 or 2, not ${String(join.robot)}`);
-        return;
-      }
+    let join: JoinMessage;
+    try {
+      join = JSON.parse(firstMessage) as JoinMessage;
+    } catch {
+      return reject('first message must be JSON');
+    }
+    if (join.type !== 'join') {
+      return reject('first message must be a join');
+    }
+    // A mismatch here is a season boundary, not a typo: the frame shape
+    // changed and the program was written against the old one. Say so,
+    // rather than feeding it fields it will not understand.
+    if (join.protocol !== PROTOCOL_VERSION) {
+      return reject(`protocol ${join.protocol}; this server speaks ${PROTOCOL_VERSION}`);
+    }
+    if (join.team !== 'violet' && join.team !== 'lime') {
+      return reject(`unknown team "${join.team}"`);
+    }
+    if (join.robot !== 1 && join.robot !== 2) {
+      return reject(`robot must be 1 or 2, not ${String(join.robot)}`);
+    }
 
-      const id = `${join.team}-${join.robot}`;
+    const id = `${join.team}-${join.robot}`;
 
-      // Checked before any seat-state branching below, so a connection with
-      // the wrong (or no) token learns nothing about that seat beyond "you
-      // don't have what it takes" — not whether it's held, standing down, or
-      // free. A seat nobody ever called `expectToken` for (no submission
-      // spawned it) skips this entirely: self-declared joins, same as ever.
-      const expectedToken = this.expectedTokens.get(id);
-      if (expectedToken !== undefined && join.token !== expectedToken) {
-        reject(`${id} requires a valid token`);
-        return;
-      }
+    // Checked before any seat-state branching below, so a connection with
+    // the wrong (or no) token learns nothing about that seat beyond "you
+    // don't have what it takes" — not whether it's held, standing down, or
+    // free. A seat nobody ever called `expectToken` for (no submission
+    // spawned it) skips this entirely: self-declared joins, same as ever.
+    const expectedToken = this.expectedTokens.get(id);
+    if (expectedToken !== undefined && join.token !== expectedToken) {
+      return reject(`${id} requires a valid token`);
+    }
 
-      const held = this.seats.get(id);
+    const held = this.seats.get(id);
 
-      if (held?.transport.connected) {
-        reject(`${id} is already connected`);
-        return;
-      }
+    if (held?.transport.connected) {
+      return reject(`${id} is already connected`);
+    }
 
-      /*
-       * Rule 5.7: a robot that stops is a damaged robot, and it comes off.
-       *
-       * A program that loses its connection mid-match has stopped, whatever
-       * the reason - the laptop slept, the process crashed, someone kicked the
-       * cable - and it is not different in kind from a robot whose battery
-       * came loose. The referee takes it off for thirty seconds (5.7.2) and it
-       * comes back at a corner of its own penalty box (5.7.4). Letting the
-       * program reconnect and resume instantly would make a crash cost nothing
-       * and make a crash-loop a tactic: the robot would be immune to shoving
-       * for as long as it kept dying.
-       *
-       * So the seat is held, not freed, and the reconnect is refused until the
-       * stand-down is served. The team keeps the seat - nobody else can take
-       * it - and their match record keeps the disconnection in it.
-       */
-      const remaining = held ? (this.standDown?.(id) ?? 0) : 0;
-      if (held && remaining > 0) {
-        reject(
-          `${id} was disconnected during play and is standing down under rule 5.7.2; ` +
-            `${remaining.toFixed(0)} s remaining`,
-        );
-        return;
-      }
+    /*
+     * Rule 5.7: a robot that stops is a damaged robot, and it comes off.
+     *
+     * A program that loses its connection mid-match has stopped, whatever
+     * the reason - the laptop slept, the process crashed, someone kicked the
+     * cable - and it is not different in kind from a robot whose battery
+     * came loose. The referee takes it off for thirty seconds (5.7.2) and it
+     * comes back at a corner of its own penalty box (5.7.4). Letting the
+     * program reconnect and resume instantly would make a crash cost nothing
+     * and make a crash-loop a tactic: the robot would be immune to shoving
+     * for as long as it kept dying.
+     *
+     * So the seat is held, not freed, and the reconnect is refused until the
+     * stand-down is served. The team keeps the seat - nobody else can take
+     * it - and their match record keeps the disconnection in it.
+     */
+    const remaining = held ? (this.standDown?.(id) ?? 0) : 0;
+    if (held && remaining > 0) {
+      return reject(
+        `${id} was disconnected during play and is standing down under rule 5.7.2; ` +
+          `${remaining.toFixed(0)} s remaining`,
+      );
+    }
 
-      if (held) {
-        // Same seat, same transport object, new socket underneath, so the
-        // match keeps talking to the thing it is already holding.
-        held.transport.reattach(socket);
-        socket.send(
-          JSON.stringify({
-            type: 'welcome',
-            robot: id,
-            motors: motorCount,
-            protocol: PROTOCOL_VERSION,
-          } satisfies WelcomeMessage),
-        );
-        if (this.ready) {
-          for (const wake of this.waiters.splice(0)) wake();
-        }
-        return;
-      }
-
-      const teamName = join.name ?? (join.team === 'violet' ? 'Violet' : 'Lime');
-      const transport = new RemoteTransport(`${teamName}/${id}`, id, socket, motorCount);
-      this.seats.set(id, { transport, team: join.team, number: join.robot, teamName });
-      // The seat is deliberately NOT freed when the socket closes. A seat is a
-      // team's place in the match, and losing a connection is a robot fault,
-      // not a withdrawal - see the stand-down above. `closeAll` clears them
-      // between matches.
-
-
-      socket.send(
+    if (held) {
+      // Same seat, same transport object, new socket underneath, so the
+      // match keeps talking to the thing it is already holding.
+      held.transport.reattach(ws);
+      ws.send(
         JSON.stringify({
           type: 'welcome',
           robot: id,
@@ -374,11 +354,33 @@ export class AgentGateway {
           protocol: PROTOCOL_VERSION,
         } satisfies WelcomeMessage),
       );
-
       if (this.ready) {
         for (const wake of this.waiters.splice(0)) wake();
       }
-    });
+      return held.transport;
+    }
+
+    const teamName = join.name ?? (join.team === 'violet' ? 'Violet' : 'Lime');
+    const transport = new RemoteTransport(`${teamName}/${id}`, id, ws, motorCount);
+    this.seats.set(id, { transport, team: join.team, number: join.robot, teamName });
+    // The seat is deliberately NOT freed when the socket closes. A seat is a
+    // team's place in the match, and losing a connection is a robot fault,
+    // not a withdrawal - see the stand-down above. `closeAll` clears them
+    // between matches.
+
+    ws.send(
+      JSON.stringify({
+        type: 'welcome',
+        robot: id,
+        motors: motorCount,
+        protocol: PROTOCOL_VERSION,
+      } satisfies WelcomeMessage),
+    );
+
+    if (this.ready) {
+      for (const wake of this.waiters.splice(0)) wake();
+    }
+    return transport;
   }
 
   /** Resolves once all four robots have connected. */

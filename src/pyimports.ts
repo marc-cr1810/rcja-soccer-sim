@@ -11,27 +11,23 @@
  * mid-match.
  */
 
-import { spawn } from 'node:child_process';
-
 function pythonBin(): string {
   return process.env.RCJA_PYTHON ?? 'python3';
 }
 
-function runPython(script: string, stdin: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(pythonBin(), ['-c', script]);
-    let out = '';
-    let err = '';
-    child.stdout.on('data', (d: Buffer) => (out += d));
-    child.stderr.on('data', (d: Buffer) => (err += d));
-    child.on('error', reject);
-    child.on('close', (code) => {
-      if (code !== 0) reject(new Error(err.trim() || `python3 exited ${code}`));
-      else resolve(out);
-    });
-    child.stdin.write(stdin);
-    child.stdin.end();
+async function runPython(script: string, stdin: string): Promise<string> {
+  const proc = Bun.spawn([pythonBin(), '-c', script], {
+    stdin: Buffer.from(stdin),
+    stdout: 'pipe',
+    stderr: 'pipe',
   });
+  const [out, err, code] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
+  if (code !== 0) throw new Error(err.trim() || `python3 exited ${code}`);
+  return out;
 }
 
 const SCAN_SCRIPT = `

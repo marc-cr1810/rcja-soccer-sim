@@ -17,13 +17,11 @@
  * lost its logins — not a season, not a table, not a team's code, and an
  * organiser can still open a robot in a text editor at eleven at night.
  *
- * SQLite costs no dependency: `node:sqlite` is built into Node. It is
- * experimental before 24, which is why `cli.ts` quietens exactly that one
- * warning rather than letting a state coordinator read the word
- * "experimental" while a hall fills up.
+ * SQLite costs no dependency: `bun:sqlite` is built into Bun, with no
+ * experimental warning to quieten and nothing to install.
  */
 
-import { DatabaseSync } from 'node:sqlite';
+import { Database } from 'bun:sqlite';
 import { randomBytes, scryptSync, timingSafeEqual, createHash } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -87,7 +85,6 @@ const INVITE_DAYS = 14;
  * login that takes a second on a school laptop is a support call.
  */
 const SCRYPT_COST = 16384;
-const SCRYPT_KEYLEN = 64;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS accounts (
@@ -177,28 +174,26 @@ function digest(value: string): string {
 }
 
 /**
- * `scrypt$<salt>$<key>`, salt and key in hex.
- *
- * The format carries its own algorithm name so a later change of mind is a
- * migration rather than an archaeology exercise.
+ * Uses Bun.password with Argon2id, with backward compatibility for legacy scrypt hashes.
  */
 function hashPassword(password: string): string {
-  const salt = randomBytes(16);
-  const key = scryptSync(password, salt, SCRYPT_KEYLEN, { N: SCRYPT_COST });
-  return `scrypt$${salt.toString('hex')}$${key.toString('hex')}`;
+  return Bun.password.hashSync(password, { algorithm: 'argon2id' });
 }
 
 function verifyPassword(password: string, stored: string): boolean {
-  const [algorithm, saltHex, keyHex] = stored.split('$');
-  if (algorithm !== 'scrypt' || !saltHex || !keyHex) return false;
-  const expected = Buffer.from(keyHex, 'hex');
-  let actual: Buffer;
-  try {
-    actual = scryptSync(password, Buffer.from(saltHex, 'hex'), expected.length, { N: SCRYPT_COST });
-  } catch {
-    return false;
+  if (stored.startsWith('scrypt$')) {
+    const [algorithm, saltHex, keyHex] = stored.split('$');
+    if (algorithm !== 'scrypt' || !saltHex || !keyHex) return false;
+    const expected = Buffer.from(keyHex, 'hex');
+    let actual: Buffer;
+    try {
+      actual = scryptSync(password, Buffer.from(saltHex, 'hex'), expected.length, { N: SCRYPT_COST });
+    } catch {
+      return false;
+    }
+    return expected.length === actual.length && timingSafeEqual(expected, actual);
   }
-  return expected.length === actual.length && timingSafeEqual(expected, actual);
+  return Bun.password.verifySync(password, stored);
 }
 
 /**
@@ -214,16 +209,16 @@ export interface AccountsOptions {
 }
 
 export class Accounts {
-  private readonly db: DatabaseSync;
+  private readonly db: Database;
 
   constructor(opts: AccountsOptions) {
     if (opts.file !== ':memory:') mkdirSync(dirname(opts.file), { recursive: true });
-    this.db = new DatabaseSync(opts.file);
+    this.db = new Database(opts.file);
     // WAL so a read of the front page cannot be blocked by a write of a
     // session, which is the only contention this ever has.
-    if (opts.file !== ':memory:') this.db.exec('PRAGMA journal_mode = WAL');
-    this.db.exec('PRAGMA foreign_keys = ON');
-    this.db.exec(SCHEMA);
+    if (opts.file !== ':memory:') this.db.run('PRAGMA journal_mode = WAL');
+    this.db.run('PRAGMA foreign_keys = ON');
+    this.db.run(SCHEMA);
   }
 
   close(): void {
@@ -432,13 +427,13 @@ export class Accounts {
     const displayName = row.role === 'team' ? (row.team ?? '') : (input.displayName ?? '').trim();
     if (!displayName) return fail('a name is required');
 
-    this.db.exec('BEGIN IMMEDIATE');
+    this.db.run('BEGIN IMMEDIATE');
     try {
       const stillUnused = this.db
         .prepare('SELECT used_at FROM invites WHERE code = ?')
         .get(row.code) as { used_at: string | null } | undefined;
       if (!stillUnused || stillUnused.used_at) {
-        this.db.exec('ROLLBACK');
+        this.db.run('ROLLBACK');
         return fail('that invitation has already been used');
       }
       const created = this.createAccount({
@@ -448,14 +443,14 @@ export class Accounts {
         email: input.email ?? null,
       });
       if (!created.ok) {
-        this.db.exec('ROLLBACK');
+        this.db.run('ROLLBACK');
         return created;
       }
       this.db.prepare('UPDATE invites SET used_at = ? WHERE code = ?').run(now(), row.code);
-      this.db.exec('COMMIT');
+      this.db.run('COMMIT');
       return created;
     } catch (error) {
-      this.db.exec('ROLLBACK');
+      this.db.run('ROLLBACK');
       return fail((error as Error).message);
     }
   }

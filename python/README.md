@@ -26,8 +26,8 @@ offline, or not something a student is allowed to run.
 Start a server that waits for robots, in one terminal:
 
 ```bash
-npm run build:viewer
-npm run serve -- --agents
+bun run build:viewer
+bun run serve -- --agents
 ```
 
 Start four robots in another, and open <http://localhost:8080> to watch:
@@ -49,7 +49,7 @@ metre. Those are invisible at normal speed and none of them show up in a
 scoreline.
 
 ```bash
-npm run bench -- --spawn "python3 python/examples/play.py --only violet --url {url}"
+bun run bench -- --spawn "python3 python/examples/play.py --only violet --url {url}"
 ```
 
 One command. It starts your robots, plays three matches against the reference
@@ -60,16 +60,16 @@ about it — and then a list of what is wrong, with the rule each thing breaks.
 To measure a change rather than a robot, save the numbers first and compare:
 
 ```bash
-npm run bench -- --spawn "..." --json before.json
+bun run bench -- --spawn "..." --json before.json
 # edit the robot
-npm run bench -- --spawn "..." --baseline before.json
+bun run bench -- --spawn "..." --baseline before.json
 ```
 
 Every line then carries which way it moved and whether that is the good
 direction. Useful flags: `--seeds 1-10` for more matches, `--half 90` for
 longer ones, `--opponent shover` to play one of the deliberately poor robots,
 `--team both` for a mirror match against yourself, and `--noisy-sensors` to
-turn on the drift and the dropouts. `npm run serve -- --help` lists the rest.
+turn on the drift and the dropouts. `bun run serve -- --help` lists the rest.
 
 ## What your robot can see
 

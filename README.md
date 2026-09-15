@@ -6,7 +6,7 @@ driven by student Python instead of hand-built hardware.
 
 **Status: it plays, and you can watch it.** Matches run headless at about 400×
 real time, or live on a screen at the venue. A team can push a robot folder
-and have it validated and sandboxed on arrival, and `npm run serve` loads and
+and have it validated and sandboxed on arrival, and `bun run serve` loads and
 plays whatever has been pushed under the names given to `--home`/`--away`,
 falling back to the reference agent for any robot nobody has pushed yet.
 
@@ -43,9 +43,9 @@ to whichever venue server is in front of them.
 ## What works today
 
 ```bash
-npm install
-npm run build:viewer
-npm run serve            # then open http://localhost:8080
+bun install
+bun run build:viewer
+bun run serve            # then open http://localhost:8080
 ```
 
 | | |
@@ -69,24 +69,27 @@ npm run serve            # then open http://localhost:8080
 | `src/lineup.ts` | **New.** Turning `--home`/`--away` into the submissions to spawn and play. |
 | `src/tournament.ts` | **New.** A draw, the fixtures in it, and the table folded out of them. |
 | `src/tournament-store.ts` `src/tournament-run.ts` | **New.** Where a tournament lives on disk, and playing a draw through resumably. |
-| `src/practice.ts` `src/fields.ts` | **New.** A field arranged by hand, and a child process per field on a venue server. |
+| `src/practice.ts` `src/arenas.ts` `src/arena.ts` | **New.** A field arranged by hand, a child process per world, and what a fixture's world is told to play. |
 | `src/workspace.ts` | **New.** A team's code kept on the server, for a student who cannot install Python. |
 | `src/accounts.ts` `src/capabilities.ts` | **New.** Who everybody is, and what that lets them do. |
 | `src/authority.ts` | **New.** Who is making this request — asked, so accounts stay above the match server. |
-| `src/league.ts` | **New.** The front door: the public pages, the login, and the draw behind them. |
+| `src/league.ts` | **New.** The front door: the public pages, the login, and the draw behind them. Plays no football itself. |
+| `src/team-api.ts` | **New.** A team's two doors — pushing code and editing it — mounted by the hub and by a match server alike. |
+| `src/capacity.ts` `src/usage.ts` `src/measure.ts` | **New.** What this machine can run, what it is running, and what an arena really costs. |
+| `src/settings.ts` | **New.** What a venue has turned, in a file beside the database. |
 | `viewer/` | **New.** The spectator client, using the lab's renderer. |
 | `referee/` | **New.** The referee console — a separate bundle, so the spectator one can never carry it. |
 | `practice/` `workspace/` `site/` | **New.** The practice console, the browser editor, and the league's public site. |
 | `python/` | **New.** The client library teams write against, and examples. |
 
-`npm test` runs 452 tests.
+`bun test` runs the test suite.
 
 ### Python robots
 
 Teams write Python. See [python/README.md](python/README.md).
 
 ```bash
-npm run serve -- --agents          # waits for four programs
+bun run serve -- --agents          # waits for four programs
 cd python && PYTHONPATH=. python3 examples/play.py
 ```
 
@@ -129,7 +132,7 @@ programs on independent connections, and one should not be able to speak for
 the other.
 
 ```bash
-npm run serve -- --home "Your Team Name" --away "Their Team Name"
+bun run serve -- --home "Your Team Name" --away "Their Team Name"
 ```
 
 Whichever of the four seats has a validated submission under that name plays
@@ -256,13 +259,13 @@ match this took goals from 17.5 to 4.8 and ball-out-of-play from 183 to 89.
 ## Watching it
 
 ```bash
-npm run build:viewer && npm run serve       # then open http://localhost:8080
+bun run build:viewer && bun run serve       # then open http://localhost:8080
 ```
 
 The viewer is served by the match server, so it watches whatever is on the port
 it was loaded from and there is nothing to configure.
 
-Working on the viewer itself, `npm run dev:viewer` serves it from Vite instead,
+Working on the viewer itself, `bun run dev:viewer` serves it from Vite instead,
 on port 5173, with hot reload — and Vite knows nothing about any match, so in
 dev the client looks for a match server on its own default port. Start one
 alongside. A screen watching a different machine, or a second server on another
@@ -277,7 +280,7 @@ to go on.
 ## Measuring a robot
 
 ```bash
-npm run bench -- --spawn "python3 python/examples/play.py --only violet --url {url}"
+bun run bench -- --spawn "python3 python/examples/play.py --only violet --url {url}"
 ```
 
 Starts your programs, plays them against the reference team at about ten times
@@ -300,14 +303,12 @@ which is what makes it usable in a loop.
 
 ## Next
 
-1. Accounts and a front page, replacing the hand-issued tokens: anyone can
-   see what is on, and a team registers itself instead of being handed a
-   secret.
-2. A league server that supervises rather than plays — several fixtures and
-   several team-owned practice fields at once, each its own child process, and
-   a Run button in the browser workspace.
-3. The referee's pre-game, an admin console, and a VS Code extension that
-   shows a team what their robot actually saw.
+1. Practice fields that belong to a team, a Run button in the browser
+   workspace, and a queue when every arena is taken.
+2. The referee's day: assignments, a pre-game checklist, and the lineup lock
+   that decides whether a fix pushed ninety seconds ago is in this match.
+3. An administration screen for a venue, and a VS Code extension that shows a
+   team what their robot actually saw.
 
 [PHASES.md](PHASES.md) has the order and the gates; [END-STATE.md](END-STATE.md)
 has what it all adds up to.

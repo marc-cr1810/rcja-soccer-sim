@@ -13,8 +13,8 @@ opponent the bench is measuring you against, and it supplies them itself.
 
 Start the server first, in another terminal:
 
-    npm run build:viewer
-    npm run serve -- --agents
+    bun run build:viewer
+    bun run serve -- --agents
 
 Then open http://localhost:8080 and watch.
 """

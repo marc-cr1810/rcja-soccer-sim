@@ -4,23 +4,25 @@ For whoever is running the event, once it is bigger than one laptop.
 
 Everything else in this manual describes a **match server**: one process, one
 world, no accounts, nothing to log into. That is still exactly what it was, and
-`npm run serve` is unchanged — no login, no front page, no database file
+`bun run serve` is unchanged — no login, no front page, no database file
 created, nothing to opt into. A team practising in a classroom should never
 have to stand up an identity system to see their robot move.
 
 A **league server** is the other deployment. It owns accounts, the draw, the
-schedule and the public pages, and it shows the football happening in the same
-match server a team runs on a laptop.
+schedule and the public pages, and **plays no football itself** — every world it
+shows is a child process running the same match server a team runs on a laptop,
+several of them at once.
 
 ```bash
-npm run build:viewer && npm run build:referee && npm run build:workspace && npm run build:site
-npm run serve -- league --name state-round-1
+bun run build:viewer && bun run build:referee && bun run build:workspace && bun run build:site
+bun run serve -- league --name state-round-1
 ```
 
 ```
   RCJA Soccer Simulation — league server
   front page:  http://localhost:8080
-  watch:       http://localhost:8080/live/
+  watch:       http://localhost:8080/live
+  arenas:      up to 10 (computed; this machine guarantees 10) · 2 for fixtures · 8 for practice
   playing:     State Round 1 — 12 fixtures
 ```
 
@@ -50,15 +52,15 @@ The first organiser cannot be made from a page that requires an organiser to log
 into, so it is made from the terminal:
 
 ```bash
-npm run serve -- account --create --role admin --name "Your Name"
+bun run serve -- account --create --role admin --name "Your Name"
 ```
 
 It asks for a password twice and prints the name to log in as. Everybody else
 registers with a **single-use invitation code**:
 
 ```bash
-npm run serve -- invite --role team --team "ACT Robotics"
-npm run serve -- invite --role referee
+bun run serve -- invite --role team --team "ACT Robotics"
+bun run serve -- invite --role referee
 ```
 
 Hand the code over. The team goes to `/register`, pastes it and chooses their
@@ -74,8 +76,8 @@ terminal and the browser do the same thing.
 When somebody cannot log in twenty minutes before their match:
 
 ```bash
-npm run serve -- account --passwd --name act-robotics
-npm run serve -- account --list
+bun run serve -- account --passwd --name act-robotics
+bun run serve -- account --list
 ```
 
 That closes every session that password had opened, which is what changing it is
@@ -110,17 +112,16 @@ where they are, as files. Delete `league.db` and you have lost your logins: not
 a season, not a table, not a team's code, and you can still open a team's robot
 in a text editor at eleven at night.
 
-SQLite costs no dependency — `node:sqlite` is built into Node. It is
-experimental before Node 24, and the league commands quieten exactly that one
-warning rather than asking you to silence all of them.
+SQLite costs no dependency — `bun:sqlite` is built into Bun, with no
+experimental warning to quieten and nothing to install.
 
 ## What the front page shows
 
 Three bands, folded fresh out of the draw and whatever results exist:
 
-- **Now playing** — the fixture being played, with its score, half and clock,
-  linking through to the live viewer.
-- **Up next** — the fixtures after it.
+- **Now playing** — a card per fixture being played, with its score, half and
+  clock, each linking through to the arena playing it.
+- **Up next** — the fixtures after them.
 - **Results** — what has finished, and the table.
 
 A finished match's page is built entirely out of what a tournament already
@@ -136,10 +137,94 @@ Stop it with ctrl-c and start it again and it picks up where it stopped, having
 counted nothing twice. A fixture interrupted halfway leaves nothing behind and
 is replayed.
 
+## Arenas, and how many of them
+
+An **arena** is one child process holding one world: a fixture from the draw, or
+a practice field somebody opened. They are reached under `/a/<id>/` through the
+one port the venue configured, so a robot on a student's laptop still has
+somewhere to connect and the venue still opens one hole in one firewall.
+`/f/<id>/` keeps working, because it is in the docs and in students' history.
+
+**Arenas are not persisted.** A league server going down takes every arena with
+it — there is nothing meaningful to resume a physics loop and four sandboxed
+interpreters from — and a fixture interrupted that way writes no result and is
+simply replayed.
+
+Check what your machine can hold *before* the day:
+
+```bash
+bun run serve -- capacity
+bun run serve -- capacity --measure      # runs one real arena for half a minute
+```
+
+Bare, it is instant: it reads the machine, works out what a seat's grant costs,
+and prints what can be guaranteed. With `--measure` it plays a real arena of
+four calibration robots — the repository's own example striker and keeper, so
+that two venues' numbers mean the same thing — and reports what it actually
+cost. Expect a wide gap between the two: **a grant is about twelve times what a
+real robot uses.** Budgeting by grant is safe and very conservative; budgeting
+by measured load bets on teams staying bad at this.
+
+## Turning the budget
+
+Settings live in `league.json`, beside `league.db` under `--data`. It is an
+ordinary file, editable by hand:
+
+```json
+{
+  "arenas": {
+    "max": null,
+    "seatCpuPercent": 50,
+    "seatMemoryMb": 512,
+    "reserveCores": 1,
+    "concurrentFixtures": 2
+  },
+  "practice": { "open": true, "max": null, "idleMins": 20 }
+}
+```
+
+`arenas.max` of `null` means *whatever this machine can guarantee*, which is the
+default because 4 was a guess made before anything had been measured. Set it
+higher than the guaranteed figure and it is accepted, with a warning that names
+the consequence: matches run slower than wall-clock rather than wrongly, the
+schedule slips, and practice arenas are shed first.
+
+Two things follow from the numbers and are not settings you can turn:
+
+- **Practice capacity is derived.** It is `arenas.max` less
+  `arenas.concurrentFixtures`, so **a fixture never queues behind a rehearsal**.
+  `practice.max` is a policy cap on top and may only ever *subtract* — set it
+  above what is spare and it does nothing.
+- **One seat grant, for practice and finals alike.** Shrinking practice seats to
+  fit more fields in is not available: a rehearsal under different conditions is
+  a rehearsal of a different sport. Lowering `seatCpuPercent` lowers it
+  everywhere, and it is recorded in every match result as a condition of play.
+
+A broken `league.json` does not stop the server. It starts on the defaults and
+prints what it ignored, because an organiser with a stray comma twenty minutes
+before a match needs a server that comes up.
+
+## Refereeing
+
+A referee signs in and opens **`/referee`**, which lists the matches in progress;
+the console opens on the arena playing one. There is no token to hand out and
+nothing to paste. The hub decides from the session and the referee's capability
+whether to let them in, so a spectator never downloads match-control code at
+all.
+
+## Watching the machine
+
+`/admin` shows three numbers rather than one — what you set, what the hardware
+guarantees, and what is in use right now, read from the live processes — with a
+row per arena giving its kind, age, CPU, memory and how much of real time its
+match is managing to play, and a button to stop it. A venue's real failure mode
+is four things running that should not be and nobody knowing which machine they
+are on.
+
 ## What this is not yet
 
-Several matches at once, practice fields that belong to a team, a Run button, a
-referee's pre-game and lineup lock, and the full administration screen are the
-phases after this one — see [PHASES.md](../PHASES.md). Today a league server
-runs one world at a time, and a practice field is still opened on a match server
-with `--practice-fields`.
+Practice fields that belong to a team, a Run button, a queue, a referee's
+pre-game and lineup lock, and the full administration screen are the phases
+after this one — see [PHASES.md](../PHASES.md). Today a practice field is open
+to whoever has the link, as it has been since Phase 4; who may *open* one is an
+account, and who it belongs to once open is Phase 8.

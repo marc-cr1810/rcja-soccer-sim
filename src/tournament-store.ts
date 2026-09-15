@@ -15,7 +15,7 @@
  * nothing behind, so it is replayed rather than half-counted.
  */
 
-import { cp, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readdir, rename, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -34,13 +34,18 @@ export async function saveDraw(root: string, draw: Draw): Promise<string> {
   const dir = tournamentDir(root, draw.id);
   await mkdir(join(dir, RESULTS_DIRNAME), { recursive: true });
   const path = join(dir, DRAW_FILENAME);
-  await writeFile(path, JSON.stringify(draw, null, 2), { flag: 'wx' });
+  if (await Bun.file(path).exists()) {
+    const err = new Error(`EEXIST: file already exists, open '${path}'`);
+    (err as NodeJS.ErrnoException).code = 'EEXIST';
+    throw err;
+  }
+  await Bun.write(path, JSON.stringify(draw, null, 2));
   return dir;
 }
 
 export async function loadDraw(root: string, id: string): Promise<Draw> {
   const path = join(tournamentDir(root, id), DRAW_FILENAME);
-  return JSON.parse(await readFile(path, 'utf8')) as Draw;
+  return (await Bun.file(path).json()) as Draw;
 }
 
 /**
@@ -61,7 +66,7 @@ export async function loadResults(root: string, draw: Draw): Promise<FixtureResu
   for (const name of names) {
     if (!name.endsWith('.json')) continue;
     try {
-      const parsed = JSON.parse(await readFile(join(dir, name), 'utf8')) as FixtureResult;
+      const parsed = (await Bun.file(join(dir, name)).json()) as FixtureResult;
       byId.set(parsed.fixtureId, parsed);
     } catch {
       // A result that will not parse is a result that was never finished
@@ -81,7 +86,7 @@ export async function saveResult(root: string, draw: Draw, result: FixtureResult
   const scratch = await mkdtemp(join(tmpdir(), 'rcja-result-'));
   try {
     const staged = join(scratch, 'result.json');
-    await writeFile(staged, JSON.stringify(result, null, 2));
+    await Bun.write(staged, JSON.stringify(result, null, 2));
     const target = join(dir, `${result.fixtureId}.json`);
     try {
       await rename(staged, target);
@@ -116,7 +121,7 @@ export async function listEntrants(submissionsDir: string): Promise<string[]> {
     for (const robot of [1, 2] as const) {
       const dir = join(submissionsDir, slug, String(robot));
       try {
-        const raw = await readFile(join(dir, 'manifest.json'));
+        const raw = Buffer.from(await Bun.file(join(dir, 'manifest.json')).arrayBuffer());
         const names = new Set(await readdir(dir));
         const parsed = parseManifest(raw, names);
         if (!parsed.ok || parsed.value.robot !== robot) continue;

@@ -21,8 +21,8 @@ else — practice fields have no passwords until the league has accounts.
 On your own machine:
 
 ```bash
-npm run build:viewer && npm run build:practice
-npm run serve -- practice
+bun run build:viewer && bun run build:practice
+bun run serve -- practice
 ```
 
 That prints two URLs: one to watch the field, and one to arrange it. Push

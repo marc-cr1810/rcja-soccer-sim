@@ -4,7 +4,7 @@ The seed for `capacity --measure` (PHASES.md Phase 7). Samples /proc CPU and
 RSS for a practice field's own Node process and each of its sandboxed robots,
 and checks realtime fidelity by comparing the simulated clock against the wall.
 
-    npm run serve -- practice --port 8099 &
+    bun run serve -- practice --port 8099 &
     # fill all four seats, e.g.
     for s in violet-1 violet-2 lime-1 lime-2; do
       curl -s -X POST localhost:8099/practice-api/seat \

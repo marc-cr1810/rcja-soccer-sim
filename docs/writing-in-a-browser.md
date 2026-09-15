@@ -18,7 +18,7 @@ What a team needs: a browser, the address of the venue server, and a secret.
 Build the bundle once, then start the server with a team list:
 
 ```bash
-npm run build:viewer && npm run build:workspace
+bun run build:viewer && bun run build:workspace
 ```
 
 Write a JSON file of team names to secrets — one line per team you have

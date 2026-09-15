@@ -12,12 +12,10 @@
  * to take five minutes a half, because people are watching it.
  */
 
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { cp, mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
-import { randomBytes } from 'node:crypto';
+import type { ServerWebSocket, Server } from 'bun';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { extname, join, normalize, resolve } from 'node:path';
-import { WebSocketServer, type WebSocket } from 'ws';
 
 import {
   Match,
@@ -30,13 +28,44 @@ import {
   type SeatId,
 } from './match';
 import { VIEW_HZ, type ViewMessage } from './view';
-import { AGENT_PATH, AgentGateway } from './gateway';
-import { slugifyTeam, TOKEN_FILENAME } from './manifest';
+import { AGENT_PATH, AgentGateway, type RemoteTransport } from './gateway';
 import { handIssuedAuthority, type Authority } from './authority';
-import { validateSubmission } from './submission';
-import type { PracticeSession, ResolveMode, SeatFill } from './practice';
-import { WorkspaceStore, type RobotNumber } from './workspace';
-import { FieldSupervisor, type FieldSupervisorOptions } from './fields';
+import type { PracticeSession, SeatFill } from './practice';
+import { WorkspaceStore } from './workspace';
+import { TeamApi } from './team-api';
+import { ArenaSupervisor, type ArenaSupervisorOptions } from './arenas';
+import { FidelityMeter } from './usage';
+import {
+  AbandonBodySchema,
+  KickoffBodySchema,
+  PlaceBodySchema,
+  RemoveRobotBodySchema,
+  ResolveBodySchema,
+  ReturnRobotBodySchema,
+  RosterBodySchema,
+  SeatActionBodySchema,
+} from './api/schemas';
+import { readJsonBody, validateBody } from './api/validate';
+
+/**
+ * Per-connection data attached to every WebSocket.
+ *
+ * Bun's native WebSocket model uses a single `websocket` handler object on the
+ * server, so per-socket state is carried here instead of on event listeners.
+ *
+ * - `agent`: a robot program. `transport` is null until the first (join)
+ *   message arrives and is accepted; after that it holds the RemoteTransport
+ *   the match's agent loop polls.
+ * - `viewer`: a spectator screen. No data beyond the discriminant is needed —
+ *   the viewers set tracks the sockets themselves.
+ * - `proxy`: a connection being relayed to a child arena process. `upstream` is
+ *   the WebSocket client side of the relay; `release` decrements the arena's
+ *   open-connection count when the socket closes.
+ */
+type AgentWsData = { type: 'agent'; transport: RemoteTransport | null };
+type ViewerWsData = { type: 'viewer' };
+type ProxyWsData = { type: 'proxy'; upstream: WebSocket; release: () => void };
+type WsData = AgentWsData | ViewerWsData | ProxyWsData;
 
 export interface ServerOptions {
   port?: number;
@@ -125,9 +154,19 @@ export interface ServerOptions {
    * Let anyone with the link open a practice field on this server.
    *
    * Off unless asked for. Each field is a child process running its own
-   * `MatchServer`, reached back through this one's port — see `fields.ts`.
+   * `MatchServer`, reached back through this one's port — see `arenas.ts`.
    */
-  practiceFields?: FieldSupervisorOptions | boolean;
+  practiceFields?: ArenaSupervisorOptions | boolean;
+  /**
+   * One extra surface, mounted before anything else this server routes.
+   *
+   * There is exactly one caller: an arena's control API, which is how the hub
+   * tells a child to play a fixture and asks how it is going (`arena.ts`).
+   * It is a hook rather than another `if` in `serve()` because the thing on
+   * the other side of it is not a match server's business at all — a laptop
+   * running `serve` has no hub, mounts nothing here, and is unchanged.
+   */
+  control?: (req: Request, url: string) => Response | null | Promise<Response | null>;
 }
 
 /** The one page a venue server serves for practice: open a field, or rejoin one. */
@@ -172,19 +211,21 @@ document.getElementById('open').addEventListener('click', async () => {
 </main></body></html>`;
 }
 
-/** `/f/<id>/rest` split into the field and what to ask it for. */
-function splitFieldPath(url: string): { id: string; rest: string } | null {
-  if (!url.startsWith('/f/')) return null;
-  const after = url.slice('/f/'.length);
+/**
+ * `/a/<id>/rest` split into the arena and what to ask it for.
+ *
+ * `/f/<id>/` is kept as an alias and always will be: it is in the docs, in
+ * `python/submit.py`'s output and in students' browser history, and a link
+ * that stops working is a person standing in a hall with a dead URL.
+ */
+export function splitArenaPath(url: string): { id: string; rest: string } | null {
+  const prefix = url.startsWith('/a/') ? '/a/' : url.startsWith('/f/') ? '/f/' : null;
+  if (!prefix) return null;
+  const after = url.slice(prefix.length);
   const slash = after.indexOf('/');
   if (slash <= 0) return null;
   return { id: after.slice(0, slash), rest: after.slice(slash) };
 }
-
-const MAX_SUBMIT_BYTES = 2 * 1024 * 1024;
-const MAX_SUBMIT_FILES = 50;
-/** Flat filenames only — no subdirectories, this slice's whole team folder is one level. */
-const SAFE_SUBMIT_PATH = /^[A-Za-z0-9_.-]+$/;
 
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -196,24 +237,16 @@ const MIME: Record<string, string> = {
 };
 
 export class MatchServer {
-  private readonly http = createServer((req, res) => this.serve(req, res));
-  private readonly wss = new WebSocketServer({ noServer: true });
-  private readonly viewers = new Set<WebSocket>();
-  /** Where robot programs connect, on the same port as the viewers. */
-  readonly agents = new AgentGateway();
-  /**
-   * A second, private door to the same gateway, on a Unix socket rather than
-   * the public port.
-   *
-   * A sandboxed submission has no network — that is the point of sandboxing
-   * it — so it cannot reach the public `/agent` path over TCP even on
-   * loopback. This is the same escape hatch `submission.ts` uses for its
-   * one-tick check, held open for the server's whole lifetime instead of one
-   * validation: a filesystem path bound into the sandbox, not a network hole.
-   */
-  private readonly agentSocket = createServer();
+  private bunServer: Server<WsData> | null = null;
+  private agentBunServer: Server<AgentWsData> | null = null;
   private agentSocketPath: string | null = null;
   private agentScratchDir: string | null = null;
+
+  /** Spectator screens watching the current match. */
+  private readonly viewers = new Set<ServerWebSocket<WsData>>();
+  /** Where robot programs connect, on the same port as the viewers. */
+  readonly agents = new AgentGateway();
+
   private current: Match | null = null;
   private readonly viewerRoot: string | null;
   private readonly refereeRoot: string | null;
@@ -221,21 +254,31 @@ export class MatchServer {
   /** The practice field this server is running, if it is one. */
   private practice: PracticeSession | null = null;
   /** The practice fields this server is hosting for other people, if it does that. */
-  private readonly fields: FieldSupervisor | null;
+  private readonly arenas: ArenaSupervisor | null;
   private stopped = false;
+  /**
+   * How much of real time this server is managing to play, lately.
+   *
+   * Only ever moves in the realtime loops — a headless match plays as fast as
+   * it can on purpose, and measuring it against the wall would be measuring
+   * the wrong thing.
+   */
+  private readonly fidelity = new FidelityMeter();
   private readonly authority: Authority;
   private readonly realtime: boolean;
   private readonly pythonLibDir: string | null;
   private readonly submissionsDir: string;
   private readonly workspaceRoot: string | null;
   private readonly workspaces: WorkspaceStore;
+  /** A team's push and workspace doors, the same two a league server mounts. */
+  private readonly teams: TeamApi;
 
   constructor(private readonly opts: ServerOptions = {}) {
     this.viewerRoot = opts.viewerRoot ? resolve(opts.viewerRoot) : null;
     this.refereeRoot = opts.refereeRoot ? resolve(opts.refereeRoot) : null;
     this.practiceRoot = opts.practiceRoot ? resolve(opts.practiceRoot) : null;
-    this.fields = opts.practiceFields
-      ? new FieldSupervisor({
+    this.arenas = opts.practiceFields
+      ? new ArenaSupervisor({
           submissionsDir: resolve(opts.submissionsDir ?? 'submissions'),
           ...(opts.practiceFields === true ? {} : opts.practiceFields),
         })
@@ -251,26 +294,11 @@ export class MatchServer {
     this.submissionsDir = resolve(opts.submissionsDir ?? 'submissions');
     this.workspaceRoot = opts.workspaceRoot ? resolve(opts.workspaceRoot) : null;
     this.workspaces = new WorkspaceStore({ dir: resolve(opts.workspacesDir ?? 'workspaces') });
-
-    this.http.on('upgrade', (req, socket, head) => {
-      // A field's own sockets - its viewers and its robots - belong to the
-      // child process running it, not to this server, so they are handed
-      // straight through before anything here looks at them.
-      const forField = splitFieldPath(req.url ?? '/');
-      if (forField && this.fields?.proxyUpgrade(forField.id, forField.rest, req, socket, head)) {
-        return;
-      }
-      // One port for both, split by path: a venue has enough to configure
-      // without a second hole in a firewall for the robots.
-      const agent = (req.url ?? '/').split('?')[0] === AGENT_PATH;
-      this.wss.handleUpgrade(req, socket, head, (ws) => {
-        if (agent) this.agents.accept(ws);
-        else this.join(ws);
-      });
-    });
-    this.agentSocket.on('upgrade', (req, socket, head) => {
-      // No path split here: this door only ever speaks the agent protocol.
-      this.wss.handleUpgrade(req, socket, head, (ws) => this.agents.accept(ws));
+    this.teams = new TeamApi({
+      authority: this.authority,
+      workspaces: this.workspaces,
+      submissionsDir: this.submissionsDir,
+      pythonLibDir: this.pythonLibDir,
     });
   }
 
@@ -285,18 +313,37 @@ export class MatchServer {
   async listen(): Promise<number> {
     this.agentScratchDir = await mkdtemp(join(tmpdir(), 'rcja-agent-socket-'));
     this.agentSocketPath = join(this.agentScratchDir, 'agents.sock');
-    await new Promise<void>((ok) => this.agentSocket.listen(this.agentSocketPath, ok));
 
-    await new Promise<void>((ok) =>
-      this.opts.host
-        ? this.http.listen(this.opts.port ?? 8080, this.opts.host, ok)
-        : this.http.listen(this.opts.port ?? 8080, ok),
-    );
-    const address = this.http.address();
-    if (address === null || typeof address === 'string') {
-      throw new Error('server is not listening on a TCP port');
+    // The agent Unix socket: same gateway, no path routing — this door only
+    // ever speaks the agent protocol, so every connection is accepted as an
+    // agent directly.
+    this.agentBunServer = Bun.serve<AgentWsData>({
+      unix: this.agentSocketPath,
+      fetch(req, srv) {
+        srv.upgrade(req, { data: { type: 'agent', transport: null } });
+      },
+      websocket: {
+        message: (ws, data) => this.agentWsMessage(ws, data),
+        close: (ws) => this.agentWsClose(ws),
+      },
+    });
+
+    // The public TCP server: viewers, agents on /agent, and arena proxy WS.
+    this.bunServer = Bun.serve<WsData>({
+      port: this.opts.port ?? 8080,
+      hostname: this.opts.host,
+      fetch: (req, srv) => this.fetch(req, srv),
+      websocket: {
+        open: (ws) => this.wsOpen(ws),
+        message: (ws, data) => this.wsMessage(ws, data),
+        close: (ws) => this.wsClose(ws),
+      },
+    });
+
+    if (this.bunServer.port === undefined) {
+      throw new Error('server did not bind to a port');
     }
-    return address.port;
+    return this.bunServer.port;
   }
 
   /**
@@ -330,19 +377,18 @@ export class MatchServer {
   async close(): Promise<void> {
     this.stopped = true;
     this.practice?.close();
-    this.fields?.closeAll();
+    this.arenas?.closeAll();
     this.agents.closeAll();
-    for (const ws of this.viewers) ws.close();
+    for (const ws of this.viewers) { try { ws.close(); } catch {} }
     this.viewers.clear();
-    await new Promise<void>((ok) => this.wss.close(() => ok()));
-    await new Promise<void>((ok) => this.http.close(() => ok()));
-    await new Promise<void>((ok) => this.agentSocket.close(() => ok()));
+    this.bunServer?.stop(true);
+    this.agentBunServer?.stop(true);
     if (this.agentScratchDir) await rm(this.agentScratchDir, { recursive: true, force: true }).catch(() => {});
   }
 
   /** Stop every practice field this server is hosting, now. */
   closeFields(): void {
-    this.fields?.closeAll();
+    this.arenas?.closeAll();
   }
 
   /** How many screens are watching. */
@@ -350,7 +396,11 @@ export class MatchServer {
     return this.viewers.size;
   }
 
-  /** The match in progress, for a caller that needs to ask it something. */
+  /** Simulated seconds per wall second, or `null` until a window has closed. */
+  get realtimeFidelity(): number | null {
+    return this.fidelity.value;
+  }
+
   get currentMatch(): Match | null {
     return this.current;
   }
@@ -360,45 +410,310 @@ export class MatchServer {
     return this.submissionsDir;
   }
 
-  private join(ws: WebSocket): void {
+  // ── WebSocket handlers ────────────────────────────────────────────────────
+
+  private wsOpen(ws: ServerWebSocket<WsData>): void {
+    if (ws.data.type === 'viewer') {
+      this.joinViewer(ws);
+    } else if (ws.data.type === 'proxy') {
+      // Set up the upstream→client relay. Messages that arrived before open()
+      // fired are drained immediately.
+      const { upstream, queue } = ws.data as ProxyWsData & { queue?: (string | Buffer)[] };
+      if (upstream.readyState === WebSocket.OPEN) {
+        upstream.onmessage = (e) => { try { ws.send(e.data as string | Uint8Array); } catch {} };
+        upstream.onclose = () => { try { ws.close(); } catch {} };
+        upstream.onerror = () => { try { ws.close(); } catch {} };
+        for (const msg of (queue ?? []).splice(0)) { try { ws.send(msg as string | Uint8Array); } catch {} }
+      }
+    }
+  }
+
+  private wsMessage(ws: ServerWebSocket<WsData>, data: string | Buffer): void {
+    const { type } = ws.data;
+    if (type === 'proxy') {
+      try { (ws.data as ProxyWsData).upstream.send(data as string); } catch {}
+      return;
+    }
+    if (type === 'agent') {
+      const d = ws.data as AgentWsData;
+      if (!d.transport) {
+        d.transport = this.agents.accept(ws as ServerWebSocket<unknown>, String(data));
+      } else {
+        d.transport.onMessage(String(data));
+      }
+    }
+    // viewers never send messages
+  }
+
+  private wsClose(ws: ServerWebSocket<WsData>): void {
+    const { type } = ws.data;
+    if (type === 'proxy') {
+      const d = ws.data as ProxyWsData;
+      d.upstream.close();
+      d.release();
+    } else if (type === 'viewer') {
+      this.viewers.delete(ws);
+    } else if (type === 'agent') {
+      (ws.data as AgentWsData).transport?.onClose();
+    }
+  }
+
+  /** Called from the agent Unix socket server — only agent connections arrive there. */
+  private agentWsMessage(ws: ServerWebSocket<AgentWsData>, data: string | Buffer): void {
+    if (!ws.data.transport) {
+      ws.data.transport = this.agents.accept(ws as ServerWebSocket<unknown>, String(data));
+    } else {
+      ws.data.transport.onMessage(String(data));
+    }
+  }
+
+  private agentWsClose(ws: ServerWebSocket<AgentWsData>): void {
+    ws.data.transport?.onClose();
+  }
+
+  private joinViewer(ws: ServerWebSocket<WsData>): void {
     this.viewers.add(ws);
-    ws.on('error', () => this.viewers.delete(ws));
-    ws.on('close', () => this.viewers.delete(ws));
     // A viewer that joins at half time should see the field immediately rather
     // than a blank screen until the next frame, so bring it up to date at once.
     if (this.current) {
-      this.send(ws, {
+      this.sendToViewer(ws, {
         type: 'hello',
         league: this.current.league,
         teams: this.current.teams,
         halfSeconds: this.current.halfLength,
       });
-      this.send(ws, { type: 'frame', frame: this.current.snapshot() });
+      this.sendToViewer(ws, { type: 'frame', frame: this.current.snapshot() });
     }
   }
 
-  private send(ws: WebSocket, message: ViewMessage): void {
-    if (ws.readyState === ws.OPEN) {
-      try {
-        ws.send(JSON.stringify(message));
-      } catch {
-        this.viewers.delete(ws);
-      }
+  private sendToViewer(ws: ServerWebSocket<WsData>, message: ViewMessage): void {
+    try {
+      ws.send(JSON.stringify(message));
+    } catch {
+      this.viewers.delete(ws);
     }
   }
 
   private broadcast(message: ViewMessage): void {
     const text = JSON.stringify(message);
     for (const ws of this.viewers) {
-      if (ws.readyState === ws.OPEN) {
-        try {
-          ws.send(text);
-        } catch {
-          this.viewers.delete(ws);
-        }
+      try {
+        ws.send(text);
+      } catch {
+        this.viewers.delete(ws);
       }
     }
   }
+
+  // ── HTTP / WebSocket fetch handler ────────────────────────────────────────
+
+  /**
+   * Bun's fetch handler — replaces the node:http request listener.
+   *
+   * WebSocket upgrades are handled here too, by calling `server.upgrade()`.
+   * For arena proxy connections, a relay WebSocket client is opened to the
+   * child process and the two sockets are bridged at the message level.
+   */
+  private async fetch(req: Request, server: Server<WsData>): Promise<Response | undefined> {
+    const url = new URL(req.url).pathname;
+
+    // Control hook first — the only caller is arena.ts's FixtureArena.
+    if (this.opts.control) {
+      const controlled = await this.opts.control(req, url);
+      if (controlled) return controlled;
+    }
+
+    const isWs = req.headers.get('upgrade')?.toLowerCase() === 'websocket';
+
+    // A practice field hosted by this server: proxy everything under its prefix.
+    const arenaPath = splitArenaPath(url);
+    if (arenaPath && this.arenas) {
+      const port = this.arenas.portOf(arenaPath.id);
+      if (port === null) return Response.json({ ok: false, reason: 'no practice field by that name' }, { status: 404 });
+
+      if (isWs) {
+        const release = this.arenas.trackConnection(arenaPath.id);
+        if (!release) return Response.json({ ok: false, reason: 'no practice field by that name' }, { status: 404 });
+        try {
+          // Application-level WebSocket relay: connect to the arena's own WS
+          // server as a client and bridge messages between the two sockets.
+          // A queue catches upstream messages that arrive before wsOpen fires.
+          const queue: (string | Buffer)[] = [];
+          const upstream = new WebSocket(`ws://127.0.0.1:${port}${arenaPath.rest}`);
+          await new Promise<void>((ok, fail) => {
+            upstream.onopen = () => {
+              upstream.onmessage = (e) => queue.push(e.data as string);
+              ok();
+            };
+            upstream.onerror = () => fail(new Error('upstream failed'));
+          });
+          const data: ProxyWsData & { queue: typeof queue } = { type: 'proxy', upstream, release, queue };
+          server.upgrade(req, { data });
+        } catch {
+          release();
+          return new Response('arena is not answering', { status: 502 });
+        }
+        return; // undefined = upgrade handled
+      }
+
+      // HTTP proxy: forward directly with fetch().
+      const release = this.arenas.trackConnection(arenaPath.id);
+      if (!release) return Response.json({ ok: false, reason: 'no practice field by that name' }, { status: 404 });
+      try {
+        const upstream = await fetch(`http://127.0.0.1:${port}${arenaPath.rest}`, {
+          method: req.method,
+          headers: req.headers,
+          body: req.method !== 'GET' && req.method !== 'HEAD' ? req.body : undefined,
+        });
+        release();
+        return upstream;
+      } catch {
+        release();
+        return new Response('arena is not answering', { status: 502 });
+      }
+    }
+
+    // A team's own doors — pushing code and editing it — are not football and
+    // are mounted rather than implemented here, so a league server with no
+    // world can serve exactly the same two. See `team-api.ts`.
+    const team = await this.teams.handle(req, url);
+    if (team) return team;
+
+    if (url === '/practice' && this.arenas) {
+      // Opening a field is a POST; a GET here lists what is already running,
+      // so a venue can see what it is hosting without a console for it.
+      if (req.method === 'POST') {
+        try {
+          const field = await this.arenas.create({ kind: 'practice' });
+          return Response.json({ ok: true, field }, { status: 201 });
+        } catch (err) {
+          return Response.json({ ok: false, reason: (err as Error).message }, { status: 503 });
+        }
+      }
+      // A browser gets somewhere to click; anything else gets the list.
+      // Deliberately one small inline page rather than a fourth built bundle:
+      // it has one button on it, and a venue should not have to run a build
+      // step before a team can open a field.
+      if ((req.headers.get('accept') ?? '').includes('text/html')) {
+        return new Response(fieldsPage(this.arenas.list()), {
+          headers: { 'content-type': 'text/html; charset=utf-8' },
+        });
+      }
+      return Response.json({ ok: true, fields: this.arenas.list() });
+    }
+
+    if (url === '/practice-api/state' && req.method === 'GET') {
+      if (!this.practice) {
+        return Response.json({ ok: false, reason: 'this server is not a practice field' }, { status: 404 });
+      }
+      return Response.json({ ok: true, state: this.practice.state() });
+    }
+    if (req.method === 'POST' && url.startsWith('/practice-api/')) {
+      return this.handlePracticeAction(req, url.slice('/practice-api/'.length));
+    }
+    // The practice console, on its own path like the referee's. No token:
+    // a practice field is open to whoever has the link, which is Phase 4's
+    // deliberate position. Accounts exist now, but a field that *belongs* to
+    // a team is Phase 8's subject - see PHASES.md.
+    if (url === '/practice' || url.startsWith('/practice/')) {
+      // `/practice` has to become `/practice/` before anything is served from
+      // it: the console's assets are relative, so that a field reached at
+      // `/a/<id>/practice/` through a hub finds them at the same place a
+      // standalone one does. Without the trailing slash the browser resolves
+      // them a directory too high — and behind a hub that is not a 404 but the
+      // *viewer's* assets, so the page arrives looking broken rather than
+      // missing. The location is relative for the same reason: an absolute
+      // `/practice/` relayed through a hub sends the browser to the hub's own
+      // front door instead of back to this arena.
+      if (url === '/practice') {
+        return new Response(null, { status: 302, headers: { location: 'practice/' } });
+      }
+      const sub = url.slice('/practice'.length);
+      return this.serveStatic(this.practiceRoot, sub, 'no practice console built; run: bun run build:practice');
+    }
+    // "Does this server already know who I am?" — the one referee route that
+    // reads rather than acts. A league server authenticates the console with
+    // the session the person already has, so the bundle has to be able to ask
+    // whether it needs to show a login at all rather than demanding a token
+    // that no longer exists.
+    if (url === '/referee-api/session' && req.method === 'GET') {
+      if (!this.authority.refereed) {
+        return Response.json({ ok: false, reason: 'referee mode is not enabled on this server' }, { status: 404 });
+      }
+      const allowed = await this.authority.referee(req);
+      return Response.json({ ok: allowed }, { status: allowed ? 200 : 401 });
+    }
+    if (req.method === 'POST' && url.startsWith('/referee-api/')) {
+      return this.handleRefereeAction(req, url.slice('/referee-api/'.length));
+    }
+    // A separate root and a separate path from the spectator bundle — never
+    // one page with a referee panel bolted on. The static files themselves
+    // need no auth (a login screen has to be fetchable to log in from); only
+    // the actions under /referee-api do.
+    // The team workspace, on its own path like the referee console's. Every
+    // request under /workspace-api/ carries the team's own token; the bundle
+    // itself is served to anyone, because it is a login screen until one is
+    // presented.
+    if (url === '/workspace' || url.startsWith('/workspace/')) {
+      // Same redirect the practice console needs, for the same reason: the
+      // bundle's assets are relative, so without the trailing slash the
+      // browser resolves them a directory too high and the page arrives
+      // unstyled and inert.
+      if (url === '/workspace') {
+        return new Response(null, { status: 302, headers: { location: 'workspace/' } });
+      }
+      const sub = url.slice('/workspace'.length);
+      return this.serveStatic(
+        this.workspaceRoot,
+        sub,
+        'no team workspace built; run: bun run build:workspace',
+      );
+    }
+    if (url === '/referee' || url.startsWith('/referee/')) {
+      // Same redirect the practice and workspace consoles need, for the same
+      // reason: the console works out where its API and its socket are from
+      // where it was served, and without the trailing slash that resolves a
+      // directory too high — to the hub's front door rather than to the match.
+      if (url === '/referee') {
+        return new Response(null, { status: 302, headers: { location: 'referee/' } });
+      }
+      const sub = url.slice('/referee'.length);
+      return this.serveStatic(this.refereeRoot, sub, 'no referee console built; run: bun run build:referee');
+    }
+
+    // WebSocket upgrades for this server's own viewers and agents.
+    if (isWs) {
+      const asAgent = url.split('?')[0] === AGENT_PATH;
+      server.upgrade(req, { data: asAgent ? { type: 'agent', transport: null } : { type: 'viewer' } });
+      return; // undefined = upgrade handled
+    }
+
+    return this.serveStatic(this.viewerRoot, url, 'no viewer built; run: bun run build:viewer');
+  }
+
+  private async serveStatic(
+    root: string | null,
+    url: string,
+    missingMessage: string,
+  ): Promise<Response> {
+    if (!root) {
+      return new Response(missingMessage, { status: 404 });
+    }
+    const wanted = url === '/' ? 'index.html' : url.slice(1);
+    // Normalise before joining, so a path cannot climb out of the root.
+    const file = join(root, normalize(wanted));
+    if (!file.startsWith(root)) {
+      return new Response('no', { status: 403 });
+    }
+    const f = Bun.file(file);
+    if (!(await f.exists())) {
+      return new Response('not found', { status: 404 });
+    }
+    const ct = MIME[extname(file)] ?? 'application/octet-stream';
+    return new Response(f, { headers: { 'content-type': ct } });
+  }
+
+  // ── Match logic ────────────────────────────────────────────────────────────
 
   /**
    * Play one match, streaming it as it goes.
@@ -468,16 +783,23 @@ export class MatchServer {
       while (match.world.clock < until) {
         await sleep(framePeriod);
         const now = Date.now();
-        owed += (now - last) / 1000;
+        const wall = (now - last) / 1000;
+        owed += wall;
         last = now;
         // Never try to make up more than a moment: if the process was starved,
         // catching up by simulating a second of football at once would be worse
         // than dropping it.
         owed = Math.min(owed, 0.25);
+        const was = match.world.clock;
         while (owed >= dt && match.world.clock < until) {
           match.step(dt);
           owed -= dt;
         }
+        // Wall-clock spent against football played. Only while the world is
+        // actually running: a kick-off countdown is time a spectator expects
+        // to stand still, and counting it would read as the machine falling
+        // behind when it is doing exactly what it was told.
+        if (match.world.running) this.fidelity.advance(match.world.clock - was, wall);
         this.broadcast({ type: 'frame', frame: match.snapshot() });
       }
       match.world.running = false;
@@ -557,10 +879,12 @@ export class MatchServer {
       while (match.world.clock < until) {
         if (match.consumeHalfEndRequest() || match.isEnded) break;
 
+        let refereedWall = 0;
         if (this.realtime) {
           await sleep(framePeriod);
           const now = Date.now();
-          owed += (now - last) / 1000;
+          refereedWall = (now - last) / 1000;
+          owed += refereedWall;
           last = now;
           // Same starvation guard as the self-running loop: never try to make
           // up more than a moment of missed wall-clock time at once.
@@ -574,11 +898,17 @@ export class MatchServer {
         // audible: the countdown advances inside `step`. A pause freezes it
         // (paused = countdown stopped, clock stopped), so the gate has to
         // let an UNpaused countdown step even though play has not started.
+        const was = match.world.clock;
         if (match.world.running || (match.world.countdownActive && !match.world.paused)) {
           while (owed >= dt && match.world.clock < until) {
             match.step(dt);
             owed -= dt;
           }
+        }
+        // Only live play counts: a referee who has paused for two minutes to
+        // talk to a team has not made this machine slow.
+        if (this.realtime && match.world.running) {
+          this.fidelity.advance(match.world.clock - was, refereedWall);
         }
         this.broadcast({ type: 'frame', frame: match.snapshot() });
       }
@@ -624,7 +954,8 @@ export class MatchServer {
     while (!this.stopped) {
       await sleep(framePeriod);
       const now = Date.now();
-      owed += (now - last) / 1000;
+      const wall = (now - last) / 1000;
+      owed += wall;
       last = now;
       // Same starvation guard as the match loops: never make up more than a
       // moment at once.
@@ -633,10 +964,12 @@ export class MatchServer {
       session.syncSeats();
 
       if (session.match.world.running) {
+        const was = session.match.world.clock;
         while (owed >= dt) {
           session.match.step(dt);
           owed -= dt;
         }
+        this.fidelity.advance(session.match.world.clock - was, wall);
       } else {
         // Stopped is stopped: a field held still for a minute while somebody
         // arranges it must not then play that minute in one frame.
@@ -646,168 +979,8 @@ export class MatchServer {
     }
   }
 
-  /** Serve the built viewer or referee console, or a push/referee action, if there is one. */
-  private async serve(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    const url = (req.url ?? '/').split('?')[0] ?? '/';
-    if (req.method === 'POST' && url === '/submit') {
-      await this.handleSubmit(req, res);
-      return;
-    }
-    // A field this server is hosting for somebody else: everything under its
-    // prefix is the child's business, including its own practice API.
-    const forField = splitFieldPath(req.url ?? '/');
-    if (forField) {
-      if (this.fields?.proxy(forField.id, forField.rest, req, res)) return;
-      this.respondJson(res, 404, { ok: false, reason: 'no practice field by that name' });
-      return;
-    }
-    if (url === '/practice' && this.fields) {
-      // Opening a field is a POST; a GET here lists what is already running,
-      // so a venue can see what it is hosting without a console for it.
-      if (req.method === 'POST') {
-        try {
-          const field = await this.fields.create();
-          this.respondJson(res, 201, { ok: true, field });
-        } catch (err) {
-          this.respondJson(res, 503, { ok: false, reason: (err as Error).message });
-        }
-        return;
-      }
-      // A browser gets somewhere to click; anything else gets the list.
-      // Deliberately one small inline page rather than a fourth built bundle:
-      // it has one button on it, and a venue should not have to run a build
-      // step before a team can open a field.
-      if ((req.headers.accept ?? '').includes('text/html')) {
-        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-        res.end(fieldsPage(this.fields.list()));
-        return;
-      }
-      this.respondJson(res, 200, { ok: true, fields: this.fields.list() });
-      return;
-    }
-    if (url === '/practice-api/state' && req.method === 'GET') {
-      if (!this.practice) {
-        this.respondJson(res, 404, { ok: false, reason: 'this server is not a practice field' });
-        return;
-      }
-      this.respondJson(res, 200, { ok: true, state: this.practice.state() });
-      return;
-    }
-    if (req.method === 'POST' && url.startsWith('/practice-api/')) {
-      await this.handlePracticeAction(req, res, url.slice('/practice-api/'.length));
-      return;
-    }
-    // The practice console, on its own path like the referee's. No token:
-    // a practice field is open to whoever has the link, which is Phase 4's
-    // deliberate position. Accounts exist now, but a field that *belongs* to
-    // a team is Phase 8's subject - see PHASES.md.
-    if (url === '/practice' || url.startsWith('/practice/')) {
-      // `/practice` has to become `/practice/` before anything is served from
-      // it: the console's assets are relative, so that a field reached at
-      // `/f/<id>/practice/` through a venue server finds them at the same
-      // place a standalone one does. Without the trailing slash the browser
-      // resolves them a directory too high.
-      if (url === '/practice') {
-        res.writeHead(302, { location: '/practice/' });
-        res.end();
-        return;
-      }
-      const sub = url.slice('/practice'.length);
-      await this.serveStatic(res, this.practiceRoot, sub, 'no practice console built; run: npm run build:practice');
-      return;
-    }
-    // "Does this server already know who I am?" — the one referee route that
-    // reads rather than acts. A league server authenticates the console with
-    // the session the person already has, so the bundle has to be able to ask
-    // whether it needs to show a login at all rather than demanding a token
-    // that no longer exists.
-    if (url === '/referee-api/session' && req.method === 'GET') {
-      if (!this.authority.refereed) {
-        this.respondJson(res, 404, { ok: false, reason: 'referee mode is not enabled on this server' });
-        return;
-      }
-      const allowed = await this.authority.referee(req);
-      this.respondJson(res, allowed ? 200 : 401, { ok: allowed });
-      return;
-    }
-    if (req.method === 'POST' && url.startsWith('/referee-api/')) {
-      await this.handleRefereeAction(req, res, url.slice('/referee-api/'.length));
-      return;
-    }
-    // A separate root and a separate path from the spectator bundle — never
-    // one page with a referee panel bolted on. The static files themselves
-    // need no auth (a login screen has to be fetchable to log in from); only
-    // the actions under /referee-api do.
-    if (req.method === 'POST' && url.startsWith('/workspace-api/')) {
-      await this.handleWorkspaceAction(req, res, url.slice('/workspace-api/'.length));
-      return;
-    }
-    // The team workspace, on its own path like the referee console's. Every
-    // request under /workspace-api/ carries the team's own token; the bundle
-    // itself is served to anyone, because it is a login screen until one is
-    // presented.
-    if (url === '/workspace' || url.startsWith('/workspace/')) {
-      // Same redirect the practice console needs, for the same reason: the
-      // bundle's assets are relative, so without the trailing slash the
-      // browser resolves them a directory too high and the page arrives
-      // unstyled and inert.
-      if (url === '/workspace') {
-        res.writeHead(302, { location: '/workspace/' });
-        res.end();
-        return;
-      }
-      const sub = url.slice('/workspace'.length);
-      await this.serveStatic(
-        res,
-        this.workspaceRoot,
-        sub,
-        'no team workspace built; run: npm run build:workspace',
-      );
-      return;
-    }
-    if (url === '/referee' || url.startsWith('/referee/')) {
-      const sub = url === '/referee' ? '/' : url.slice('/referee'.length);
-      await this.serveStatic(res, this.refereeRoot, sub, 'no referee console built; run: npm run build:referee');
-      return;
-    }
-    await this.serveStatic(res, this.viewerRoot, url, 'no viewer built; run: npm run build:viewer');
-  }
+  // ── HTTP action handlers ─────────────────────────────────────────────────
 
-  private async serveStatic(
-    res: ServerResponse,
-    root: string | null,
-    url: string,
-    missingMessage: string,
-  ): Promise<void> {
-    if (!root) {
-      res.writeHead(404).end(missingMessage);
-      return;
-    }
-    const wanted = url === '/' ? 'index.html' : url.slice(1);
-    // Normalise before joining, so a path cannot climb out of the root.
-    const file = join(root, normalize(wanted));
-    if (!file.startsWith(root)) {
-      res.writeHead(403).end('no');
-      return;
-    }
-    try {
-      const body = await readFile(file);
-      res.writeHead(200, { 'content-type': MIME[extname(file)] ?? 'application/octet-stream' });
-      res.end(body);
-    } catch {
-      res.writeHead(404).end('not found');
-    }
-  }
-
-  /**
-   * One referee action, over `POST /referee-api/<action>`.
-   *
-   * Same shape as `handleSubmit`: a hand-issued bearer token checked before
-   * anything else, a small JSON body validated field-by-field, and a
-   * `{ ok, reason }` response. Absent `refereeToken` (the default) makes this
-   * whole surface 404 regardless of path or body — a server started without
-   * `--referee` exposes nothing new at all.
-   */
   /**
    * One action on the practice field, from whoever has the link.
    *
@@ -815,34 +988,17 @@ export class MatchServer {
    * a practice field: `this.practice` is null on a match server, so every one
    * of these answers 404 there. Nothing a match does grows a new door.
    */
-  private async handlePracticeAction(
-    req: IncomingMessage,
-    res: ServerResponse,
-    action: string,
-  ): Promise<void> {
+  private async handlePracticeAction(req: Request, action: string): Promise<Response> {
     const session = this.practice;
     if (!session) {
-      this.respondJson(res, 404, { ok: false, reason: 'this server is not a practice field' });
-      return;
+      return Response.json({ ok: false, reason: 'this server is not a practice field' }, { status: 404 });
     }
 
-    const body = await this.readBody(req, 4096);
-    if (body === null) {
-      this.respondJson(res, 413, { ok: false, reason: 'request body too large' });
-      return;
-    }
-    let payload: Record<string, unknown> = {};
-    if (body.length > 0) {
-      try {
-        payload = JSON.parse(body.toString('utf8')) as Record<string, unknown>;
-      } catch {
-        this.respondJson(res, 400, { ok: false, reason: 'body is not valid JSON' });
-        return;
-      }
-    }
+    const body = await readJsonBody(req, 4096);
+    if (!body.ok) return Response.json({ ok: false, reason: body.reason }, { status: body.status });
 
     const seatId = (): SeatId | null => {
-      const { seat } = payload;
+      const { seat } = body.payload;
       return SEAT_IDS.includes(seat as SeatId) ? (seat as SeatId) : null;
     };
 
@@ -860,63 +1016,50 @@ export class MatchServer {
         session.keepAsArranged();
         break;
       case 'place': {
-        const { target, x, z, heading, vx, vz } = payload;
-        const valid = target === 'ball' || SEAT_IDS.includes(target as SeatId);
-        if (!valid || typeof x !== 'number' || typeof z !== 'number') {
-          this.respondJson(res, 400, {
-            ok: false,
-            reason: '"target" must be "ball" or a seat id, with numeric "x" and "z"',
-          });
-          return;
-        }
-        session.place(target as 'ball' | SeatId, {
-          x,
-          z,
-          heading: typeof heading === 'number' ? heading : undefined,
-          vx: typeof vx === 'number' ? vx : undefined,
-          vz: typeof vz === 'number' ? vz : undefined,
-        });
+        const validated = validateBody(
+          body.payload,
+          PlaceBodySchema,
+          '"target" must be "ball" or a seat id, with numeric "x" and "z"',
+        );
+        if (!validated.ok) return validated.response;
+        const { target, x, z, heading, vx, vz } = validated.value;
+        session.place(target, { x, z, heading, vx, vz });
         break;
       }
       case 'roster': {
-        const id = seatId();
-        const { onField } = payload;
-        if (!id || typeof onField !== 'boolean') {
-          this.respondJson(res, 400, { ok: false, reason: '"seat" and boolean "onField" are required' });
-          return;
-        }
-        session.setRoster(id, onField);
+        const validated = validateBody(
+          body.payload,
+          RosterBodySchema,
+          '"seat" and boolean "onField" are required',
+        );
+        if (!validated.ok) return validated.response;
+        session.setRoster(validated.value.seat, validated.value.onField);
         break;
       }
       case 'resolve': {
-        const { mode } = payload;
-        if (mode !== 'restage' && mode !== 'play-on' && mode !== 'freeze') {
-          this.respondJson(res, 400, {
-            ok: false,
-            reason: '"mode" must be "restage", "play-on" or "freeze"',
-          });
-          return;
-        }
-        session.setResolve(mode satisfies ResolveMode);
+        const validated = validateBody(
+          body.payload,
+          ResolveBodySchema,
+          '"mode" must be "restage", "play-on" or "freeze"',
+        );
+        if (!validated.ok) return validated.response;
+        session.setResolve(validated.value.mode);
         break;
       }
       case 'seat': {
         const id = seatId();
-        const { fill, team } = payload;
+        const { fill, team } = body.payload;
         if (!id) {
-          this.respondJson(res, 400, { ok: false, reason: '"seat" must be a seat id' });
-          return;
+          return Response.json({ ok: false, reason: '"seat" must be a seat id' }, { status: 400 });
         }
         if (fill !== 'empty' && fill !== 'built-in' && fill !== 'laptop' && fill !== 'submission') {
-          this.respondJson(res, 400, {
+          return Response.json({
             ok: false,
             reason: '"fill" must be "empty", "built-in", "laptop" or "submission"',
-          });
-          return;
+          }, { status: 400 });
         }
         if (fill === 'submission' && (typeof team !== 'string' || team.trim() === '')) {
-          this.respondJson(res, 400, { ok: false, reason: '"team" is required for a submission' });
-          return;
+          return Response.json({ ok: false, reason: '"team" is required for a submission' }, { status: 400 });
         }
         const chosen: SeatFill =
           fill === 'submission' ? { kind: 'submission', team: team as string } : { kind: fill };
@@ -924,69 +1067,53 @@ export class MatchServer {
         break;
       }
       case 'seat-restart': {
-        const id = seatId();
-        if (!id) {
-          this.respondJson(res, 400, { ok: false, reason: '"seat" must be a seat id' });
-          return;
-        }
-        await session.restartSeat(id);
+        const validated = validateBody(body.payload, SeatActionBodySchema, '"seat" must be a seat id');
+        if (!validated.ok) return validated.response;
+        await session.restartSeat(validated.value.seat);
         break;
       }
       case 'seat-stop': {
-        const id = seatId();
-        if (!id) {
-          this.respondJson(res, 400, { ok: false, reason: '"seat" must be a seat id' });
-          return;
-        }
-        session.stopSeat(id);
+        const validated = validateBody(body.payload, SeatActionBodySchema, '"seat" must be a seat id');
+        if (!validated.ok) return validated.response;
+        session.stopSeat(validated.value.seat);
         break;
       }
       default:
-        this.respondJson(res, 404, { ok: false, reason: `unknown practice action "${action}"` });
-        return;
+        return Response.json({ ok: false, reason: `unknown practice action "${action}"` }, { status: 404 });
     }
 
-    this.respondJson(res, 200, { ok: true, state: session.state() });
+    return Response.json({ ok: true, state: session.state() });
   }
 
-  private async handleRefereeAction(req: IncomingMessage, res: ServerResponse, action: string): Promise<void> {
+  /**
+   * One referee action, over `POST /referee-api/<action>`.
+   *
+   * Same shape as `handleSubmit`: a hand-issued bearer token checked before
+   * anything else, a small JSON body validated field-by-field, and a
+   * `{ ok, reason }` response. Absent `refereeToken` (the default) makes this
+   * whole surface 404 regardless of path or body — a server started without
+   * `--referee` exposes nothing new at all.
+   */
+  private async handleRefereeAction(req: Request, action: string): Promise<Response> {
     if (!this.authority.refereed) {
-      this.respondJson(res, 404, { ok: false, reason: 'referee mode is not enabled on this server' });
-      return;
+      return Response.json({ ok: false, reason: 'referee mode is not enabled on this server' }, { status: 404 });
     }
     if (!(await this.authority.referee(req))) {
-      this.respondJson(res, 401, { ok: false, reason: 'invalid or missing referee token' });
-      return;
+      return Response.json({ ok: false, reason: 'invalid or missing referee token' }, { status: 401 });
     }
     const match = this.current;
     if (!match || !match.refereed) {
-      this.respondJson(res, 409, { ok: false, reason: 'no refereed match in progress' });
-      return;
+      return Response.json({ ok: false, reason: 'no refereed match in progress' }, { status: 409 });
     }
 
-    const body = await this.readBody(req, 4096);
-    if (body === null) {
-      this.respondJson(res, 413, { ok: false, reason: 'request body too large' });
-      return;
-    }
-    let payload: Record<string, unknown> = {};
-    if (body.length > 0) {
-      try {
-        payload = JSON.parse(body.toString('utf8')) as Record<string, unknown>;
-      } catch {
-        this.respondJson(res, 400, { ok: false, reason: 'body is not valid JSON' });
-        return;
-      }
-    }
+    const body = await readJsonBody(req, 4096);
+    if (!body.ok) return Response.json({ ok: false, reason: body.reason }, { status: body.status });
 
     switch (action) {
       case 'kickoff': {
-        const { team } = payload;
-        if (team !== 'violet' && team !== 'lime') {
-          this.respondJson(res, 400, { ok: false, reason: '"team" must be "violet" or "lime"' });
-          return;
-        }
-        match.kickOff(team);
+        const validated = validateBody(body.payload, KickoffBodySchema, '"team" must be "violet" or "lime"');
+        if (!validated.ok) return validated.response;
+        match.kickOff(validated.value.team);
         break;
       }
       case 'award-kickoff':
@@ -1008,402 +1135,51 @@ export class MatchServer {
         match.endMatch();
         break;
       case 'abandon': {
-        const { reason } = payload;
-        if (typeof reason !== 'string' || reason.trim() === '') {
-          this.respondJson(res, 400, { ok: false, reason: '"reason" is required' });
-          return;
-        }
-        match.abandon(reason);
+        const validated = validateBody(body.payload, AbandonBodySchema, '"reason" is required');
+        if (!validated.ok) return validated.response;
+        match.abandon(validated.value.reason);
         break;
       }
       case 'remove-robot': {
-        const { robotId, rule, reason } = payload;
-        if (typeof robotId !== 'string' || typeof rule !== 'string' || typeof reason !== 'string') {
-          this.respondJson(res, 400, {
-            ok: false,
-            reason: '"robotId", "rule" and "reason" are required strings',
-          });
-          return;
-        }
-        match.removeRobot(robotId, rule, reason);
+        const validated = validateBody(
+          body.payload,
+          RemoveRobotBodySchema,
+          '"robotId", "rule" and "reason" are required strings',
+        );
+        if (!validated.ok) return validated.response;
+        match.removeRobot(validated.value.robotId, validated.value.rule, validated.value.reason);
         break;
       }
       case 'return-robot': {
-        const { robotId } = payload;
-        if (typeof robotId !== 'string') {
-          this.respondJson(res, 400, { ok: false, reason: '"robotId" is required' });
-          return;
-        }
-        if (!match.returnRobot(robotId)) {
-          this.respondJson(res, 409, { ok: false, reason: 'robot is not ready to return yet' });
-          return;
+        const validated = validateBody(body.payload, ReturnRobotBodySchema, '"robotId" is required');
+        if (!validated.ok) return validated.response;
+        if (!match.returnRobot(validated.value.robotId)) {
+          return Response.json({ ok: false, reason: 'robot is not ready to return yet' }, { status: 409 });
         }
         break;
       }
       case 'correct-score': {
-        const { team, to, reason } = payload;
+        const { team, to, reason } = body.payload;
         if (team !== 'violet' && team !== 'lime') {
-          this.respondJson(res, 400, { ok: false, reason: '"team" must be "violet" or "lime"' });
-          return;
+          return Response.json({ ok: false, reason: '"team" must be "violet" or "lime"' }, { status: 400 });
         }
         if (typeof to !== 'number' || typeof reason !== 'string' || reason.trim() === '') {
-          this.respondJson(res, 400, { ok: false, reason: '"to" (number) and "reason" (string) are required' });
-          return;
+          return Response.json({ ok: false, reason: '"to" (number) and "reason" (string) are required' }, { status: 400 });
         }
         try {
           match.correctScore(team, to, reason);
         } catch (err) {
-          this.respondJson(res, 400, { ok: false, reason: (err as Error).message });
-          return;
+          return Response.json({ ok: false, reason: (err as Error).message }, { status: 400 });
         }
         break;
       }
       default:
-        this.respondJson(res, 404, { ok: false, reason: `unknown referee action "${action}"` });
-        return;
+        return Response.json({ ok: false, reason: `unknown referee action "${action}"` }, { status: 404 });
     }
 
-    this.respondJson(res, 200, { ok: true });
+    return Response.json({ ok: true });
   }
 
-  private respondJson(res: ServerResponse, status: number, body: unknown): void {
-    res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify(body));
-  }
-
-  /**
-   * Read the request body, or `null` if it is over `limit`.
-   *
-   * An oversized body is drained rather than the connection being cut: a
-   * destroyed socket answers a client with a reset rather than the 413 this
-   * is trying to send, which is a worse failure than the one being guarded
-   * against.
-   */
-  private readBody(req: IncomingMessage, limit: number): Promise<Buffer | null> {
-    return new Promise((resolveBody) => {
-      const chunks: Buffer[] = [];
-      let total = 0;
-      let over = false;
-      req.on('data', (chunk: Buffer) => {
-        total += chunk.length;
-        if (total > limit) {
-          over = true;
-          return;
-        }
-        chunks.push(chunk);
-      });
-      req.on('end', () => {
-        resolveBody(over ? null : Buffer.concat(chunks));
-      });
-      req.on('error', () => {
-        resolveBody(null);
-      });
-    });
-  }
-
-  /**
-   * One robot's folder, pushed as `{ files: { path: base64 } }`.
-   *
-   * Written to a scratch directory and validated there first; only a pass
-   * gets moved into the real submissions tree, so a rejected push can never
-   * clobber a team's last-good one for that robot.
-   */
-  /**
-   * One workspace action, over `POST /workspace-api/<action>`.
-   *
-   * Same shape as the referee surface: a hand-issued bearer token checked
-   * before anything else, a small JSON body, and a `{ ok, reason }` response.
-   * With no teams configured the whole surface is 404, so a server that was
-   * not told to host workspaces grows no new door.
-   *
-   * Every action takes the team from the *token*, never from the body. That is
-   * the same rule Phase 1 put on the join — a client that can name its own
-   * team can be any team — and it is why there is no `team` parameter here to
-   * get wrong.
-   */
-  private async handleWorkspaceAction(
-    req: IncomingMessage,
-    res: ServerResponse,
-    action: string,
-  ): Promise<void> {
-    if (!this.authority.workspaces) {
-      this.respondJson(res, 404, {
-        ok: false,
-        reason: 'this server is not hosting team workspaces',
-      });
-      return;
-    }
-
-    const team = await this.authority.team(req);
-    if (!team) {
-      this.respondJson(res, 401, { ok: false, reason: 'invalid or missing team token' });
-      return;
-    }
-
-    const body = await this.readBody(req, MAX_SUBMIT_BYTES);
-    if (body === null) {
-      this.respondJson(res, 413, { ok: false, reason: 'request body too large' });
-      return;
-    }
-    let payload: Record<string, unknown> = {};
-    if (body.length > 0) {
-      try {
-        payload = JSON.parse(body.toString('utf8')) as Record<string, unknown>;
-      } catch {
-        this.respondJson(res, 400, { ok: false, reason: 'body is not valid JSON' });
-        return;
-      }
-    }
-
-    const robot = payload.robot === 2 ? 2 : 1;
-
-    switch (action) {
-      case 'open': {
-        // What the page asks for on login: who am I, and what is in my folder.
-        // Seeding here rather than on first save means a team that has never
-        // touched this has something that runs before they type anything.
-        const files = await this.workspaces.seed(team, robot);
-        this.respondJson(res, 200, { ok: true, team, robot, files });
-        return;
-      }
-
-      case 'save': {
-        const { name, content } = payload as { name?: unknown; content?: unknown };
-        if (typeof name !== 'string' || typeof content !== 'string') {
-          this.respondJson(res, 400, { ok: false, reason: '"name" and "content" must be strings' });
-          return;
-        }
-        const result = await this.workspaces.write(team, robot, name, content);
-        if (!result.ok) {
-          this.respondJson(res, 400, { ok: false, reason: result.reason });
-          return;
-        }
-        this.respondJson(res, 200, { ok: true, name });
-        return;
-      }
-
-      case 'delete': {
-        const { name } = payload as { name?: unknown };
-        if (typeof name !== 'string') {
-          this.respondJson(res, 400, { ok: false, reason: '"name" must be a string' });
-          return;
-        }
-        const result = await this.workspaces.remove(team, robot, name);
-        if (!result.ok) {
-          this.respondJson(res, 400, { ok: false, reason: result.reason });
-          return;
-        }
-        this.respondJson(res, 200, { ok: true, files: await this.workspaces.read(team, robot) });
-        return;
-      }
-
-      case 'submit': {
-        await this.submitWorkspace(res, team, robot);
-        return;
-      }
-
-      default:
-        this.respondJson(res, 404, { ok: false, reason: `unknown workspace action "${action}"` });
-    }
-  }
-
-  /**
-   * Push a team's workspace through the same validator a laptop's push goes
-   * through, and keep it if it passes.
-   *
-   * Deliberately the identical path — `validateSubmission` on a scratch copy,
-   * then a move into the submissions tree and a freshly minted join token.
-   * A workspace that is submitted from a browser and a folder that is pushed
-   * with `python/submit.py` produce the same thing on disk, checked the same
-   * way, because a competition where entry route changed the rules would not
-   * be a competition.
-   */
-  private async submitWorkspace(
-    res: ServerResponse,
-    team: string,
-    robot: RobotNumber,
-  ): Promise<void> {
-    if (!this.pythonLibDir) {
-      this.respondJson(res, 400, {
-        ok: false,
-        reason: 'this server has no python library configured; nothing can be validated',
-      });
-      return;
-    }
-
-    const files = await this.workspaces.read(team, robot);
-    if (files.length === 0) {
-      this.respondJson(res, 400, { ok: false, reason: 'there is nothing in this workspace yet' });
-      return;
-    }
-
-    const scratch = await mkdtemp(join(tmpdir(), 'rcja-workspace-'));
-    try {
-      for (const file of files) {
-        await writeFile(join(scratch, file.name), file.content, 'utf8');
-      }
-
-      const result = await validateSubmission(scratch, { pythonLibDir: this.pythonLibDir });
-      if (!result.ok) {
-        this.respondJson(res, 400, { ok: false, reason: result.reason });
-        return;
-      }
-
-      const manifest = result.value;
-      // The manifest is the student's to edit, so it can name a team that is
-      // not theirs. The token said who they are; believe that instead.
-      if (slugifyTeam(manifest.team) !== slugifyTeam(team)) {
-        this.respondJson(res, 400, {
-          ok: false,
-          reason: `manifest.json says the team is "${manifest.team}", but this workspace belongs to "${team}"`,
-        });
-        return;
-      }
-      if (manifest.robot !== robot) {
-        this.respondJson(res, 400, {
-          ok: false,
-          reason: `manifest.json says this is robot ${manifest.robot}, but it is robot ${robot}'s workspace`,
-        });
-        return;
-      }
-
-      const teamDir = join(this.submissionsDir, slugifyTeam(manifest.team));
-      const target = join(teamDir, String(manifest.robot));
-      await mkdir(teamDir, { recursive: true });
-      await rm(target, { recursive: true, force: true });
-      try {
-        await rename(scratch, target);
-      } catch {
-        await cp(scratch, target, { recursive: true });
-      }
-
-      const token = randomBytes(24).toString('base64url');
-      await writeFile(join(target, TOKEN_FILENAME), token);
-
-      this.respondJson(res, 200, { ok: true, team: manifest.team, robot: manifest.robot });
-    } finally {
-      await rm(scratch, { recursive: true, force: true }).catch(() => {});
-    }
-  }
-
-  private async handleSubmit(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    if (!this.pythonLibDir) {
-      this.respondJson(res, 400, {
-        ok: false,
-        reason: 'this server has no python library configured; nothing can be validated',
-      });
-      return;
-    }
-
-    // Who this push may be written as, asked before a byte of it is read.
-    // On a laptop the answer is "anybody", which is what it has always been
-    // and what a team practising in a classroom needs. On a league server it
-    // is one team, and the manifest is held to it below — the rule Phase 1
-    // wrote down for the join and this door never got.
-    const submitter = await this.authority.submitter(req);
-    if (!submitter) {
-      this.respondJson(res, 401, { ok: false, reason: 'invalid or missing push key' });
-      return;
-    }
-
-    const body = await this.readBody(req, MAX_SUBMIT_BYTES);
-    if (body === null) {
-      this.respondJson(res, 413, { ok: false, reason: 'push too large' });
-      return;
-    }
-
-    let payload: { files?: unknown };
-    try {
-      payload = JSON.parse(body.toString('utf8')) as { files?: unknown };
-    } catch {
-      this.respondJson(res, 400, { ok: false, reason: 'body is not valid JSON' });
-      return;
-    }
-
-    const rawFiles = payload.files;
-    if (!rawFiles || typeof rawFiles !== 'object' || Array.isArray(rawFiles)) {
-      this.respondJson(res, 400, {
-        ok: false,
-        reason: '"files" must be an object of path -> base64 content',
-      });
-      return;
-    }
-
-    const entries = Object.entries(rawFiles as Record<string, unknown>);
-    if (entries.length === 0) {
-      this.respondJson(res, 400, { ok: false, reason: 'no files in the push' });
-      return;
-    }
-    if (entries.length > MAX_SUBMIT_FILES) {
-      this.respondJson(res, 400, {
-        ok: false,
-        reason: `too many files (${entries.length}, limit ${MAX_SUBMIT_FILES})`,
-      });
-      return;
-    }
-
-    const decoded = new Map<string, Buffer>();
-    for (const [path, value] of entries) {
-      if (!SAFE_SUBMIT_PATH.test(path)) {
-        this.respondJson(res, 400, {
-          ok: false,
-          reason: `"${path}" is not a safe filename — no subdirectories, only letters, digits, ".", "_", "-"`,
-        });
-        return;
-      }
-      if (typeof value !== 'string') {
-        this.respondJson(res, 400, { ok: false, reason: `"${path}" must be base64 text` });
-        return;
-      }
-      decoded.set(path, Buffer.from(value, 'base64'));
-    }
-
-    const scratch = await mkdtemp(join(tmpdir(), 'rcja-submit-'));
-    try {
-      for (const [path, buf] of decoded) {
-        await writeFile(join(scratch, path), buf);
-      }
-
-      const result = await validateSubmission(scratch, { pythonLibDir: this.pythonLibDir });
-      if (!result.ok) {
-        this.respondJson(res, 400, { ok: false, reason: result.reason });
-        return;
-      }
-
-      const manifest = result.value;
-      if (!submitter.open && slugifyTeam(manifest.team) !== slugifyTeam(submitter.team)) {
-        this.respondJson(res, 403, {
-          ok: false,
-          reason: `manifest.json says the team is "${manifest.team}", but this key belongs to "${submitter.team}"`,
-        });
-        return;
-      }
-      const teamDir = join(this.submissionsDir, slugifyTeam(manifest.team));
-      const target = join(teamDir, String(manifest.robot));
-      await mkdir(teamDir, { recursive: true });
-      await rm(target, { recursive: true, force: true });
-      try {
-        await rename(scratch, target);
-      } catch {
-        // Scratch and the submissions tree can be on different filesystems
-        // (a tmpfs /tmp is common), which a plain rename cannot cross.
-        await cp(scratch, target, { recursive: true });
-      }
-
-      // Minted after the move, into the real submissions tree rather than
-      // scratch — validation above never sees it, and never needs to: no
-      // token exists yet at the point a push is only being checked, just
-      // stored. A fresh token every successful push, whether or not the code
-      // itself changed — it authenticates this validated copy, not a
-      // standing account.
-      const token = randomBytes(24).toString('base64url');
-      await writeFile(join(target, TOKEN_FILENAME), token);
-
-      this.respondJson(res, 200, { ok: true, team: manifest.team, robot: manifest.robot, token });
-    } finally {
-      await rm(scratch, { recursive: true, force: true }).catch(() => {});
-    }
-  }
 }
 
 function sleep(ms: number): Promise<void> {

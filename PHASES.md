@@ -162,7 +162,7 @@ robot joined another seat live from a laptop through the venue's own port,
 and a second field ran alongside the first without either noticing. Killing
 the venue server outright took every field down with it.
 
-`src/practice.ts` · `src/fields.ts` · `practice/` ·
+`src/practice.ts` · `src/arenas.ts` · `practice/` ·
 [docs/practising.md](docs/practising.md)
 
 - **A situation, not a mode.** `World` takes an `Arrangement` — who is on the
@@ -294,7 +294,7 @@ from an invitation code, minted a push key, pushed with
 `python3 python/submit.py --key …`, watched that push be refused when its
 manifest named somebody else, and opened the browser editor with no secret to
 paste. An organiser made from the terminal refereed the match from `/referee`
-with no hand-issued token anywhere, and `npm run serve` still creates no
+with no hand-issued token anywhere, and `bun run serve` still creates no
 `league.db` and still serves the viewer at `/`.
 
 `src/accounts.ts` · `src/capabilities.ts` · `src/authority.ts` ·
@@ -380,14 +380,29 @@ Caught by playing it rather than by testing it, four times:
 
 ---
 
-## Phase 7 — The league server supervises
+## Phase 7 — The league server supervises ✅
 
 *Gate: two fixtures and a practice field play at once on one server, and the
 admin console says honestly how much of the machine that is using.*
 
+Passed. A four-team draw ran under `league` with two fixtures in flight at
+once — Alpha v Bravo and Charlie v Delta, each in its own child process with
+four sandboxed robots — while an organiser held a practice field open beside
+them. Both were refereed from a browser at `/a/<id>/referee/`, with no token
+anywhere; the front page showed two live cards ticking to a visitor with no
+account; `/admin` reported 3 arenas of 6, against 10 this machine guarantees,
+using 0.05 of 22 cores and 323 MB of 30 GB, and stopping the practice field
+from that page moved the numbers. The hub was killed mid-fixture and restarted:
+it resumed at the fixture that never finished and started two more. `serve` on
+a laptop still creates no `league.db`, still serves the viewer at `/`, and
+still opens practice fields on `/f/<id>/`.
+
+`src/arenas.ts` · `src/arena.ts` · `src/capacity.ts` · `src/usage.ts` ·
+`src/settings.ts` · `src/measure.ts` · `src/team-api.ts`
+
 One `MatchServer` is one world, one viewer broadcast, one gateway over four
 fixed seats. A hall with three live fixtures and four teams rehearsing needs
-seven of all of that. [`src/fields.ts`](src/fields.ts) already answered this
+seven of all of that. [`src/arenas.ts`](src/arenas.ts) already answered this
 once — a child process per field, proxied back through the one port the venue
 configured — and this is that answer taken seriously.
 
@@ -398,36 +413,60 @@ once, whether or not practice has grown owners yet.
 
 - **The hub plays no football.** A league server owns accounts, the draw, the
   schedule and the front page, and spawns a child `MatchServer` per world. The
-  same binary a team runs on a laptop is what runs a final.
+  same binary a team runs on a laptop is what runs a final. Phase 6 knowingly
+  contradicted this by keeping one world in-process; this is the phase that
+  restores it, and what made it possible to finish was noticing that a team's
+  two doors — pushing code and editing it — are not football either. They moved
+  to [`src/team-api.ts`](src/team-api.ts), mounted by the hub and by a match
+  server alike, so the hub holds no world at all rather than one it never plays.
 - **`FieldSupervisor` becomes `ArenaSupervisor`.** An arena has a kind —
   fixture or practice — and a place in the budget. `/f/<id>/` keeps working,
   because it is in the docs and in students' history.
 - **Arenas die with the hub, and that is honest.** Nothing to resume a physics
   loop and four sandboxed children from; a fixture interrupted this way writes
   no result and is replayed, which Phase 3 already guarantees.
-- **A measured budget, and an admin's number.** `maxFields` is 4 because 4 was
+- **Two fixtures at once, with one rule.** The draw runner holds several
+  fixtures in flight and starts the first whose teams are both free: **no team
+  may be in two matches**, because a team has two robots and two robots cannot
+  be on two pitches. Phase 8 restates that as one-robot-one-place; it is forced
+  here already. A fixture that cannot be played is left unwritten and replays,
+  and the others in flight are played out rather than abandoned — but the run
+  still fails loudly unless the caller says otherwise, because a batch
+  `tournament` that swallowed a broken fixture would print a table with a hole
+  in it and say nothing.
+- **A measured budget, and an admin's number.** `maxFields` was 4 because 4 was
   a guess made before anything had been measured. It has been measured now: an
-  arena of four real robots costs **0.17 cores and 176 MB**, against a
+  arena of four real robots costs **0.23 cores and 146 MB**, against a
   **granted 2 cores and 2 GB** — and a robot written to spend its grant gets
-  exactly 50.0% of a core, because the cgroup is real. So the ceiling becomes
-  an admin setting checked against the actual machine, showing three numbers
+  exactly 50.0% of a core, because the cgroup is real. So the ceiling became an
+  admin setting checked against the actual machine, showing three numbers
   rather than one: what you set, what the hardware guarantees, and what is in
-  use right now. Exceeding it is allowed, with a warning that names the
-  consequence rather than grading the risk.
+  use right now. The last of those is read from `/proc` per process
+  ([`src/usage.ts`](src/usage.ts)) rather than multiplied out of grants — a
+  grant is about twelve times what a real robot uses, so a console built on
+  grants reports a machine at capacity while it sits nearly idle. Exceeding the
+  ceiling is allowed, with a warning that names the consequence rather than
+  grading the risk.
 - **Capacity is derived, and policy may only subtract.** `arenas.max` less
   however many fixtures the schedule runs at once is what practice can afford,
   so **a fixture never queues behind a rehearsal** without anyone remembering
   to arrange it. An organiser's `practice.max` sits on top and may only lower
   that, never raise it — a second number able to contradict the first is the
   thing this codebase keeps refusing.
+- **Settings are a file, not a table.** `league.json` sits beside `league.db`,
+  hand-editable at eleven at night like every other piece of state here; the
+  database still holds only *who*. A broken file starts the server anyway and
+  says what it ignored, because an organiser with a stray comma twenty minutes
+  before a match needs a server that comes up.
 - **`capacity`, so the budget can be checked before the day.** Without
   `--measure` it computes from `os.cpus()`, `os.totalmem()` and
-  [`sandboxUnavailableReason()`](src/sandbox.ts) — which already exists, is
-  already phrased for an operator to fix, and today is only ever reached at
-  spawn time, which is to say during a match. With `--measure` it runs one real
-  arena for half a minute against the repo's own example robot and prints what
-  it cost. A fixed calibration robot rather than a pushed team, because nobody
-  has pushed anything the week before an event, which is when this gets asked.
+  [`sandboxUnavailableReason()`](src/sandbox.ts) — which already existed, was
+  already phrased for an operator to fix, and until now was only ever reached
+  at spawn time, which is to say during a match. With `--measure` it runs one
+  real arena for half a minute against the repo's own example robots and prints
+  what it cost. A fixed calibration robot rather than a pushed team, because
+  nobody has pushed anything the week before an event, which is when this gets
+  asked.
 - **One seat grant, for practice and finals alike.** The tempting lever is
   shrinking practice seats to fit more in, and it is not available: a rehearsal
   under different conditions is a rehearsal of a different sport, which is the
@@ -435,7 +474,37 @@ once, whether or not practice has grown owners yet.
   goes into the match record beside the seed and the code hashes, because it is
   a condition of play. See [The arena budget](END-STATE.md#the-arena-budget).
 
----
+**Refereeing, in the interim.** `/referee` is a list of the matches in
+progress, and the console itself opens on the arena playing one. The hub is
+what decides — from a session and a capability — that this person may control
+this match, and it replaces their browser's credential with a token only it
+and the child know on the way through. That check *has* to live in the hub: a
+child can only ever see its own world, so leaving it to the children would mean
+every arena looking correct on its own while anybody holding an arena id could
+kick off a final. Phase 9 replaces the list with real assignments.
+
+Caught by playing it rather than by testing it:
+
+- **The same absolute-path bug, for the third time.** The referee console asked
+  for `/referee-api/…`, opened its socket at the server root, and was built
+  with `base: '/referee/'` — all correct while a server had exactly one world
+  and the console had exactly one address. Served at `/a/<id>/referee/` the
+  first two arrive at the hub's front door, and the third fetches
+  `/referee/assets/…`, which is a *page* route, so the browser gets HTML where
+  it asked for JavaScript and the console never starts. The viewer hit this in
+  Phase 6 and the practice console in Phase 4; relative is the answer every
+  time, because a bundle does not get to know where it is mounted.
+- **A redirect must be relayed, not followed.** `fetch` follows redirects by
+  default, so the child's `/referee` → `/referee/` was consumed by the hub and
+  the browser stayed on the slashless address — where the console's relative
+  assets resolve one directory too high, onto the *viewer's* assets, arriving
+  looking broken rather than missing. The `location` had to become relative
+  too: an absolute `/referee/` relayed through a hub sends the browser to the
+  hub's own front door.
+- **The front page read `live` as one thing.** It had been one thing since
+  Phase 6 and is now a list, and the site crashed on `live.score` rather than
+  showing nothing — the one place where "several at once" was visible to a
+  spectator and the last place it was carried through.
 
 ## Phase 8 — A field belongs to a team
 
@@ -480,7 +549,7 @@ until there is a field that belongs to the person pressing it.
   time, then a warning on the field and the owner's dashboard, then closing —
   warned, never silently killed. A person present or an interaction resets the
   clock; **a connected robot does not**, which is a change from today, where
-  [`hold()`](src/fields.ts) feeds one counter from `/agent` upgrades and viewer
+  [`hold()`](src/arenas.ts) feeds one counter from `/agent` upgrades and viewer
   sockets alike and one forgotten laptop program holds an arena all day.
   Closing keeps the `Arrangement` in the team's workspace folder and restores
   it on reopen, so reclamation costs a process rather than an afternoon's

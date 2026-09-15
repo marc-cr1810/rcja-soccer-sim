@@ -1,34 +1,70 @@
+# ─── Dependencies ─────────────────────────────────────────────────────────────
 node_modules/
-dist/
-*.log
-__pycache__/
 .venv/
-dist-viewer/
-dist-referee/
-dist-practice/
-dist-workspace/
-dist-site/
+env/
+venv/
+ENV/
 
+# ─── Build & Distribution Outputs ─────────────────────────────────────────────
+dist/
+dist-*/
+bin/rcja-soccer-sim
+!bin/rcja-soccer-sim.js
+*.tsbuildinfo
+
+# ─── Logs & Diagnostics ───────────────────────────────────────────────────────
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+bun-report.txt
+
+# ─── Python Caches & Environments ─────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ─── Runtime State & Databases ────────────────────────────────────────────────
 # Runtime state a server accumulates in whatever directory it is run from:
-# pushed submissions, teams' working folders, and the draws and results of
-# tournaments played on it.
+# pushed submissions, teams' working folders, tournaments, and accounts database.
 submissions/
 workspaces/
 tournaments/
-
-# A league server's accounts database, and nothing else: draws, results,
-# submissions and workspaces are the files above. The database holds who; the
-# disk holds what happened.
 league/
 *.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.sock
 
-# Probe output: trace logs and generated sensor frames. The probe SCRIPTS in
-# scratch/ are worth keeping; their several-megabyte output is not.
+# ─── Probe Output & Temporary Scratch Files ───────────────────────────────────
+# Trace logs, recorded sensor frames, and local credentials
 scratch/*.jsonl
 scratch/frames/
 scratch/rotframes/
 scratch/locframes.json
-
-# A local team list for trying the browser workspace out. Real secrets do not
-# belong in a repository.
 teams.local.json
+*.local.json
+.env
+.env.*
+!.env.example
+
+# ─── Editor & OS Metadata ─────────────────────────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo
+*~
+.idea/
+*.sublime-workspace
+*.sublime-project

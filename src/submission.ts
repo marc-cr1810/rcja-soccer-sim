@@ -11,14 +11,11 @@
  * with something a student can act on, not a stack trace out of this file.
  */
 
-import { createHash } from 'node:crypto';
-import { createServer } from 'node:http';
 import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { WebSocketServer } from 'ws';
 
-import { AGENT_PATH, AgentGateway } from './gateway';
+import { AGENT_PATH, AgentGateway, type RemoteTransport } from './gateway';
 import { fail, ok, parseManifest, TOKEN_FILENAME, type Manifest, type Result } from './manifest';
 import { Senses } from './perception';
 import { scanImports, stdlibModules } from './pyimports';
@@ -48,9 +45,9 @@ const ALLOWED_EXTRA = new Set(['rcja_soccer']);
  */
 export async function hashSubmission(dir: string): Promise<string> {
   const names = (await readdir(dir)).filter((name) => name !== TOKEN_FILENAME).sort();
-  const digest = createHash('sha256');
+  const digest = new Bun.CryptoHasher('sha256');
   for (const name of names) {
-    const bytes = await readFile(join(dir, name));
+    const bytes = new Uint8Array(await Bun.file(join(dir, name)).arrayBuffer());
     digest.update(`${name}\0${bytes.length}\0`);
     digest.update(bytes);
   }
@@ -124,7 +121,7 @@ async function checkStatic(
       }
       return fail(
         `${file} imports "${mod}", which is not available at a venue with no internet and ` +
-          'no pip. Only the standard library, rcja_soccer, and files in this same folder are.',
+        'no pip. Only the standard library, rcja_soccer, and files in this same folder are.',
       );
     }
   }
@@ -158,12 +155,29 @@ async function checkSyntheticTick(
   const socketPath = join(controlDir, 'gateway.sock');
 
   const gateway = new AgentGateway();
-  const wss = new WebSocketServer({ noServer: true });
-  const http = createServer();
-  http.on('upgrade', (req, socket, head) => {
-    wss.handleUpgrade(req, socket, head, (socketReady) => gateway.accept(socketReady));
+
+  // A Bun.serve() on a Unix socket replaces the old node:http + WebSocketServer
+  // setup. The validation server only handles WS connections — no HTTP routes.
+  type ValidateWsData = { transport: RemoteTransport | null };
+  const validationServer = Bun.serve<ValidateWsData>({
+    unix: socketPath,
+    fetch(req, srv) {
+      srv.upgrade(req, { data: { transport: null } });
+    },
+    websocket: {
+      message(ws, data) {
+        if (!ws.data.transport) {
+          ws.data.transport = gateway.accept(ws as never, String(data));
+        } else {
+          ws.data.transport.onMessage(String(data));
+        }
+      },
+      close(ws) {
+        ws.data.transport?.onClose();
+      },
+    },
   });
-  await new Promise<void>((resolve) => http.listen(socketPath, resolve));
+
   const url = `unix://${socketPath}?path=${encodeURIComponent(AGENT_PATH)}`;
 
   const seatId = `violet-${manifest.robot}`;
@@ -193,9 +207,19 @@ async function checkSyntheticTick(
   });
 
   let stderr = '';
-  child.stderr?.on('data', (d: Buffer) => {
-    stderr = (stderr + d.toString()).slice(-4000);
-  });
+  (async () => {
+    if (child.stderr && typeof child.stderr !== 'number') {
+      const reader = child.stderr.getReader();
+      const decoder = new TextDecoder();
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          stderr = (stderr + decoder.decode(value)).slice(-4000);
+        }
+      } catch {}
+    }
+  })();
 
   const teardown = async (): Promise<void> => {
     try {
@@ -204,9 +228,8 @@ async function checkSyntheticTick(
       // already gone
     }
     gateway.closeAll();
-    await new Promise<void>((resolve) => wss.close(() => resolve()));
-    await new Promise<void>((resolve) => http.close(() => resolve()));
-    await rm(controlDir, { recursive: true, force: true }).catch(() => {});
+    validationServer.stop();
+    await rm(controlDir, { recursive: true, force: true }).catch(() => { });
   };
 
   const withStderr = (message: string): string => {
@@ -235,7 +258,7 @@ async function checkSyntheticTick(
     return fail(
       withStderr(
         `${manifest.entry} connected but never answered a sensor frame within ` +
-          `${(tickTimeoutMs / 1000).toFixed(0)}s. Check the tick function returns quickly.`,
+        `${(tickTimeoutMs / 1000).toFixed(0)}s. Check the tick function returns quickly.`,
       ),
     );
   }

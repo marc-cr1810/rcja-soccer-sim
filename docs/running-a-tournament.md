@@ -6,15 +6,15 @@ process being killed, because a venue's laptop will be.
 Three commands:
 
 ```bash
-npm run serve -- draw --name state-round-1
-npm run serve -- tournament --name state-round-1
-npm run serve -- table --name state-round-1
+bun run serve -- draw --name state-round-1
+bun run serve -- tournament --name state-round-1
+bun run serve -- table --name state-round-1
 ```
 
 ## Making a draw
 
 ```bash
-npm run serve -- draw --name state-round-1
+bun run serve -- draw --name state-round-1
 ```
 
 Entrants default to every team that has actually pushed a robot that would
@@ -55,7 +55,7 @@ so a table built from single matches is partly a table of luck.
 ## Playing it
 
 ```bash
-npm run serve -- tournament --name state-round-1
+bun run serve -- tournament --name state-round-1
 ```
 
 By default every fixture **waits for a referee** and plays at wall-clock, which
@@ -132,7 +132,7 @@ what a later front page is built on.
 ## The table
 
 ```bash
-npm run serve -- table --name state-round-1
+bun run serve -- table --name state-round-1
 ```
 
 Three points a fixture, one for a draw, ordered on points, then goal

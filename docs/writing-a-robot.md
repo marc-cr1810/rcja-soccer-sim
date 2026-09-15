@@ -88,11 +88,11 @@ Nothing about pushing changes how you develop. Run your script straight
 against a local server the same way you always have:
 
 ```bash
-npm run serve -- --agents            # in one terminal
+bun run serve -- --agents            # in one terminal
 cd python && PYTHONPATH=. python3 myrobot/robot.py --team violet   # in another
 ```
 
-or use `examples/play.py` / `npm run bench` to run it against the reference
+or use `examples/play.py` / `bun run bench` to run it against the reference
 team — see [python/README.md](../python/README.md#try-it) and
 [python/README.md](../python/README.md#measuring-it). None of that involves a
 push, a manifest, or a token; those only come into it once you're ready to

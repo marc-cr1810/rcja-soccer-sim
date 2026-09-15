@@ -29,7 +29,7 @@
  * arrive without this file changing at all.
  */
 
-import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { fail, ok, slugifyTeam, type Result } from './manifest';
@@ -99,7 +99,7 @@ export class WorkspaceStore {
       try {
         const info = await stat(path);
         if (!info.isFile() || info.size > MAX_FILE_BYTES) continue;
-        files.push({ name, content: await readFile(path, 'utf8') });
+        files.push({ name, content: await Bun.file(path).text() });
       } catch {
         // Vanished between the listing and the read. Not this request's problem.
       }
@@ -129,7 +129,7 @@ export class WorkspaceStore {
     }
 
     await mkdir(dir, { recursive: true });
-    await writeFile(join(dir, name), content, 'utf8');
+    await Bun.write(join(dir, name), content);
     return ok({ name, content });
   }
 

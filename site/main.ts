@@ -96,6 +96,7 @@ const ROUTES: [RegExp, Route][] = [
   [/^\/team$/, dashboard],
   [/^\/team\/settings$/, settings],
   [/^\/admin$/, admin],
+  [/^\/referee\/?$/, refereeList],
 ];
 
 /** Refreshed while something is live, cleared on every navigation. */
@@ -147,7 +148,7 @@ function chrome(): void {
   // has no robots, so offering everybody every area is offering most people a
   // door into somewhere that has nothing for them.
   if (me.can.admin) links.push(['/admin', 'Admin']);
-  else if (me.can.referee) links.push(['/referee/', 'Referee']);
+  else if (me.can.referee) links.push(['/referee', 'Referee']);
   else if (me.account) links.push(['/team', 'My team']);
 
   nav.innerHTML = links
@@ -187,6 +188,10 @@ interface Card {
 
 interface Live {
   fixtureId: string;
+  /** The child process playing it — there is one per match now. */
+  arenaId: string;
+  /** Where to watch it. The hub has no single viewer any more. */
+  url: string;
   home: string;
   away: string;
   score: { violet: number; lime: number };
@@ -285,7 +290,7 @@ function fixtureRow(card: Card): string {
 async function front(): Promise<void> {
   interface Front {
     tournament: { name: string; fixtures: number } | null;
-    live: Live | null;
+    live: Live[];
     next: Card | null;
     upcoming: Card[];
     recent: Card[];
@@ -311,9 +316,15 @@ async function front(): Promise<void> {
 
     <h2>On now</h2>
     ${
-      data.live
-        ? `${liveScoreline(data.live)}
-           <p style="margin-top:1rem"><a href="/live/" data-full>Watch the match</a></p>`
+      data.live.length
+        ? data.live
+            .map(
+              (live) => `${liveScoreline(live)}
+           <p style="margin-top:.6rem;margin-bottom:1.4rem"><a href="${esc(live.url)}" data-full>Watch ${esc(
+             live.home,
+           )} v ${esc(live.away)}</a></p>`,
+            )
+            .join('')
         : data.next
           ? `<div class="empty">Nothing is on. Next up is ${esc(data.next.home)} against ${esc(data.next.away)}.</div>`
           : `<div class="empty">Nothing is on, and every fixture has been played.</div>`
@@ -338,7 +349,7 @@ async function front(): Promise<void> {
   `);
 
   // A live score that does not move is worse than no live score at all.
-  if (data.live) ticking = setInterval(() => void front(), 3000);
+  if (data.live.length) ticking = setInterval(() => void front(), 3000);
 }
 
 function table(rows: Standing[]): string {
@@ -432,7 +443,7 @@ async function matchPage(fixtureId: string): Promise<void> {
     reason?: string;
     fixture: { home: string; away: string };
     state: string;
-    live: Live | null;
+    live: Live[];
     record: {
       completedAt: string;
       submissions: Record<string, string>;
@@ -458,7 +469,7 @@ async function matchPage(fixtureId: string): Promise<void> {
   if (data.state === 'playing' && data.live) {
     view.innerHTML = head + h(`
       ${liveScoreline(data.live)}
-      <p style="margin-top:1rem"><a href="/live/" data-full>Watch the match</a></p>
+      <p style="margin-top:1rem"><a href="${esc(data.live.url)}" data-full>Watch the match</a></p>
     `);
     ticking = setInterval(() => void matchPage(fixtureId), 3000);
     return;
@@ -724,6 +735,37 @@ async function settings(): Promise<void> {
 }
 
 /**
+ * The matches a referee may take right now.
+ *
+ * The console itself is not here and cannot be: it lives on the arena playing
+ * the match, because there is no single world any more. Phase 9 replaces this
+ * list with a referee's actual assignments — the next game and the ones after
+ * it, with times — which is the screen somebody standing in a hall needs.
+ */
+async function refereeList(): Promise<void> {
+  if (!me.can.referee) return void go('/login?next=%2Freferee');
+  const { fixtures } = await api<{
+    fixtures: { fixtureId: string; home: string; away: string; console: string; running: boolean }[];
+  }>('/api/referee/fixtures');
+
+  view.innerHTML = h(`
+    <h1>Refereeing</h1>
+    ${
+      fixtures.length
+        ? `<div class="rows">${fixtures
+            .map(
+              (fixture) => `<a class="row" href="${esc(fixture.console)}">
+                <span class="grow">${esc(fixture.home)} v ${esc(fixture.away)}</span>
+                <span class="state">${fixture.running ? 'playing' : 'waiting to kick off'}</span>
+              </a>`,
+            )
+            .join('')}</div>`
+        : `<div class="empty">No match is open yet. One appears here the moment the schedule reaches it.</div>`
+    }
+  `);
+}
+
+/**
  * Enough administration to run a venue without an ssh session.
  *
  * Phase 10 is the real admin area. What is here is what Phase 6 itself creates
@@ -740,8 +782,13 @@ async function admin(): Promise<void> {
     ),
   ]);
 
+  const load = await api<AdminArenas>('/api/admin/arenas');
+
   view.innerHTML = h(`
     <h1>Administration</h1>
+
+    ${budgetPanel(load)}
+    ${arenaRows(load)}
 
     <h2>Invite somebody</h2>
     <form class="panel" id="form">
@@ -800,6 +847,105 @@ async function admin(): Promise<void> {
     await admin();
     return null;
   });
+
+  for (const button of view.querySelectorAll<HTMLButtonElement>('button.stop')) {
+    button.addEventListener('click', async () => {
+      const id = button.dataset.arena;
+      if (!id) return;
+      button.disabled = true;
+      await api(`/api/admin/arenas/${encodeURIComponent(id)}/stop`, { method: 'POST' });
+      await admin();
+    });
+  }
+}
+
+interface AdminArenas {
+  machine: { cores: number; memoryMb: number; sandboxUnavailable: string | null };
+  budget: {
+    max: number;
+    set: boolean;
+    guaranteed: number;
+    limitedBy: string;
+    fixtures: number;
+    practice: number;
+    enforced: boolean;
+    warnings: string[];
+    seatCpuPercent: number;
+    seatMemoryMb: number;
+  };
+  inUse: { cores: number; memoryMb: number; processes: number };
+  running: number;
+  arenas: {
+    id: string;
+    kind: string;
+    owner: string | null;
+    url: string;
+    createdAt: string;
+    usage: { cores: number; memoryMb: number } | null;
+    fidelity: number | null;
+  }[];
+}
+
+/**
+ * Three numbers, never one.
+ *
+ * What you set, what the hardware guarantees, and what is actually in use —
+ * because a console showing only the first turns teams away for nothing, and
+ * one showing only the last budgets on teams staying bad at this.
+ */
+function budgetPanel(load: AdminArenas): string {
+  const { budget, machine, inUse } = load;
+  return h(`
+    <h2>Load</h2>
+    <div class="panel">
+      <div class="rows">
+        <div class="row"><span class="grow">Arenas running</span>
+          <span class="state">${load.running} of ${budget.max}${budget.set ? '' : ' (computed)'}</span></div>
+        <div class="row"><span class="grow">This machine guarantees</span>
+          <span class="state">${budget.guaranteed} arenas · ${budget.limitedBy} runs out first</span></div>
+        <div class="row"><span class="grow">In use right now</span>
+          <span class="state">${inUse.cores.toFixed(2)} of ${machine.cores} cores ·
+            ${Math.round(inUse.memoryMb)} MB of ${Math.round(machine.memoryMb / 1024)} GB</span></div>
+        <div class="row"><span class="grow">Per-seat grant</span>
+          <span class="state">${budget.seatCpuPercent}% of a core · ${budget.seatMemoryMb} MB${
+            budget.enforced ? '' : ' — unenforced'
+          }</span></div>
+        <div class="row"><span class="grow">Held for fixtures / open to practice</span>
+          <span class="state">${budget.fixtures} / ${budget.practice}</span></div>
+      </div>
+      ${budget.warnings.map((warning) => `<div class="note">${esc(warning)}</div>`).join('')}
+    </div>
+  `);
+}
+
+/**
+ * Every child process, and the button to stop it.
+ *
+ * A venue's real failure mode is not a subtle bug, it is four things running
+ * that should not be and nobody knowing which machine they are on.
+ */
+function arenaRows(load: AdminArenas): string {
+  if (load.arenas.length === 0) {
+    return h(`<h2>Arenas</h2><div class="empty">Nothing is running.</div>`);
+  }
+  const now = Date.now();
+  return h(`
+    <h2>Arenas</h2>
+    <div class="rows">
+      ${load.arenas
+        .map((arena) => {
+          const age = Math.max(0, Math.round((now - Date.parse(arena.createdAt)) / 60000));
+          return `<div class="row">
+            <a class="grow" href="${esc(arena.url)}">${esc(arena.kind)} ${esc(arena.id)}</a>
+            <span class="state">${age}m</span>
+            <span class="state">${arena.usage ? `${arena.usage.cores.toFixed(2)} cores · ${Math.round(arena.usage.memoryMb)} MB` : 'measuring…'}</span>
+            <span class="state">${arena.fidelity === null ? '' : `realtime ${(arena.fidelity * 100).toFixed(0)}%`}</span>
+            <button class="stop" data-arena="${esc(arena.id)}">Stop</button>
+          </div>`;
+        })
+        .join('')}
+    </div>
+  `);
 }
 
 // ----------------------------------------------------------------- plumbing

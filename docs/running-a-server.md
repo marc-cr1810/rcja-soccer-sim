@@ -3,9 +3,9 @@
 ## Quick start
 
 ```bash
-npm install
-npm run build:viewer
-npm run serve            # then open http://localhost:8080
+bun install
+bun run build:viewer
+bun run serve            # then open http://localhost:8080
 ```
 
 With nothing else specified, both sides are the built-in reference agent —
@@ -23,19 +23,19 @@ itself off the field within seconds.
 **`--agents`, for laptops in the room.**
 
 ```bash
-npm run serve -- --agents
+bun run serve -- --agents
 ```
 
 Waits for four programs to connect to `ws://<host>:<port>/agent` before
 kicking off — the mode for "four laptops in a room right now," development,
-and `npm run bench`. Nothing here is pushed or validated; whoever connects
+and `bun run bench`. Nothing here is pushed or validated; whoever connects
 and claims a seat gets it (see [writing a robot](writing-a-robot.md) for the
 program side of this).
 
 **`--home`/`--away`, for pushed submissions.**
 
 ```bash
-npm run serve -- --home "ACT" --away "QLD"
+bun run serve -- --home "ACT" --away "QLD"
 ```
 
 These names double as a lookup against whatever's been pushed and validated
@@ -134,7 +134,7 @@ table       print a tournament's table as it stands  [--name]
 The three tournament commands have their own page — see
 [running a tournament](running-a-tournament.md).
 
-`npm run serve -- --help` (or any command with no recognised flags) prints
+`bun run serve -- --help` (or any command with no recognised flags) prints
 this same summary with the current flag defaults.
 
 **Seeds and replays.** Every match is fixed by a seed: `--seed 5` is fine,
@@ -184,8 +184,8 @@ controlling a match is not.)
 ## Refereeing a match
 
 ```bash
-npm run build:referee
-npm run serve -- --referee --half 300
+bun run build:referee
+bun run serve -- --referee --half 300
 ```
 
 `--referee` doesn't change how a match plays itself — a goal still kicks
@@ -208,7 +208,7 @@ referee token:    <a long random string>
 ```
 
 This is a **separate page from the spectator viewer** — a different build
-(`npm run build:referee`, landing in `dist-referee/` next to `dist-viewer/`),
+(`bun run build:referee`, landing in `dist-referee/` next to `dist-viewer/`),
 served at `/referee` rather than `/`, and sharing no code with it. Opening
 `/` needs nothing at all, the same as always; opening `/referee` shows a
 login prompt for the token, and every action from there — kick off, pause,
@@ -235,7 +235,7 @@ field** on it: a match nobody is scoring, with the robots and the ball placed
 by hand.
 
 ```bash
-npm run serve -- --practice-fields
+bun run serve -- --practice-fields
 ```
 
 `/practice` then answers with a page with one button on it. Each field is its

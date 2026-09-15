@@ -24,7 +24,7 @@
  * to `bwrap` itself; `sandboxAvailable()` checks both.
  */
 
-import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import type { Subprocess } from 'bun';
 import { existsSync } from 'node:fs';
 
 /** Host directories a Python interpreter needs to exist at all. */
@@ -39,8 +39,8 @@ let bwrapPresent: boolean | null = null;
 /** Whether `bwrap` is on `PATH`. Checked once and cached. */
 export function bwrapAvailable(): boolean {
   if (bwrapPresent === null) {
-    const probe = spawnSync('bwrap', ['--version'], { stdio: 'ignore' });
-    bwrapPresent = !probe.error && probe.status === 0;
+    const probe = Bun.spawnSync(['bwrap', '--version'], { stdio: ['ignore', 'ignore', 'ignore'] });
+    bwrapPresent = probe.exitCode === 0;
   }
   return bwrapPresent;
 }
@@ -50,10 +50,10 @@ let cgroupPresent: boolean | null = null;
 /** Whether an unprivileged `systemd-run --user --scope` actually works here. Checked once and cached. */
 export function cgroupAvailable(): boolean {
   if (cgroupPresent === null) {
-    const probe = spawnSync('systemd-run', ['--user', '--scope', '--collect', '--', '/bin/true'], {
-      stdio: 'ignore',
+    const probe = Bun.spawnSync(['systemd-run', '--user', '--scope', '--collect', '--', '/bin/true'], {
+      stdio: ['ignore', 'ignore', 'ignore'],
     });
-    cgroupPresent = !probe.error && probe.status === 0;
+    cgroupPresent = probe.exitCode === 0;
   }
   return cgroupPresent;
 }
@@ -104,7 +104,7 @@ export interface SandboxOptions {
  * Caller must check `sandboxAvailable()` first; this does not fall back to
  * running unsandboxed or ungoverned if either prerequisite is missing.
  */
-export function spawnSandboxed(opts: SandboxOptions): ChildProcess {
+export function spawnSandboxed(opts: SandboxOptions): Subprocess {
   const binds: string[] = [];
   for (const root of HOST_LIB_ROOTS) {
     if (existsSync(root)) binds.push('--ro-bind', root, root);
@@ -172,5 +172,9 @@ export function spawnSandboxed(opts: SandboxOptions): ChildProcess {
     ...bwrapArgs,
   ];
 
-  return spawn('systemd-run', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  return Bun.spawn(['systemd-run', ...args], {
+    stdin: 'ignore',
+    stdout: 'pipe',
+    stderr: 'pipe',
+  });
 }

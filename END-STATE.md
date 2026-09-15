@@ -7,8 +7,16 @@ where it arrives. It is a description of an interaction, not a schedule — read
 it as the thing the phases are trying to become, and argue with it before the
 code exists rather than after.
 
-> Written 14 September 2026, after Phase 5. Everything described as *today* is
-> in the repository now; everything else is a proposal.
+> Written 14 September 2026, after Phase 5. Everything described as *today* was
+> in the repository then; everything else was a proposal.
+>
+> Since then Phases 6 and 7 have landed, so parts of this are now simply a
+> description: accounts and the front page, the hub that supervises rather than
+> plays, the arena as a child process under `/a/<id>/`, the measured budget and
+> its three numbers, and `capacity`. What is still a proposal is everything an
+> arena *belongs* to somebody — ownership, the Run button, the queue,
+> reclamation — the referee's pre-game and lineup lock, and the administration
+> screen. [PHASES.md](PHASES.md) is the authority on which is which.
 
 ---
 
@@ -22,7 +30,7 @@ A team runs it on a laptop, pushes robots at it, and watches. No accounts, no
 front page, no database, no network beyond the one they are sitting on.
 
 ```bash
-npm run serve                                  # a server, playing matches
+bun run serve                                  # a server, playing matches
 python3 python/submit.py --url http://localhost:8080 --dir my-team/robot1
 ```
 
@@ -39,14 +47,14 @@ is a front door and a supervisor; the football happens in children that do not
 know there is a league.*
 
 ```bash
-npm run serve -- league --port 80 --data ./league
+bun run serve -- league --port 80 --data ./league
 ```
 
 Why this way: `MatchServer` is one world, one viewer broadcast, one gateway
 over four fixed seat ids. A hall with three live fixtures and four teams
 rehearsing needs seven of all of that. Teaching the most load-bearing file in
 the repository to hold N of everything is the alternative, and it means one
-team's runaway robot shares a process with the final. [`src/fields.ts`](src/fields.ts)
+team's runaway robot shares a process with the final. [`src/arenas.ts`](src/arenas.ts)
 already proved the other way works — child per field, reached back through the
 one port the venue configured, so a robot on a student's laptop still has
 somewhere to connect and the venue still opens one hole in one firewall.
@@ -97,10 +105,9 @@ not a season, not a table, not a team's code. An admin can still open a team's
 robot in a text editor at eleven at night, which is the property
 [`src/workspace.ts`](src/workspace.ts) was designed around.
 
-SQLite costs no dependency: `node:sqlite` is built into Node (verified working
-on this machine's 22.22, stable from 24), so the league server needs the same
-`npm install` the match server does. It emits an experimental warning on 22;
-pin `>=22.5` and suppress it, or move to 24.
+SQLite costs no dependency: `bun:sqlite` is built into Bun, with no
+experimental warning to quieten, so the league server needs the same
+`bun install` the match server does.
 
 A sketch, not a schema:
 
@@ -420,7 +427,7 @@ configured grant should refuse to start rather than discover it at kick-off.
 ### Restricting practice fields
 
 "How many practice fields" is four limits with four different reasons, and
-[`create()`](src/fields.ts) has exactly one of them today — a global count, on
+[`create()`](src/arenas.ts) has exactly one of them today — a global count, on
 fields that belong to nobody. Accounts make the other three possible.
 
 ```
@@ -517,7 +524,7 @@ Two more behaviours follow from ownership:
 ### Giving a field back
 
 A field held by a team who went home is the most common way a venue runs out of
-capacity, and today's signal for it is weak: [`hold()`](src/fields.ts) feeds one
+capacity, and today's signal for it is weak: [`hold()`](src/arenas.ts) feeds one
 counter from every HTTP request and every WebSocket upgrade, `/agent` included.
 So a single laptop robot left connected keeps an arena alive indefinitely, while
 a team thinking hard with the tab closed can lose theirs.

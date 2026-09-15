@@ -126,19 +126,24 @@ function agentsFor(opponent: string | undefined): MatchAgents {
   return { ...violet, 'lime-1': y1!, 'lime-2': y2! } as unknown as MatchAgents;
 }
 
+function findDistDir(name: string): string | undefined {
+  for (const candidate of [`dist/${name}`, `dist-${name}`]) {
+    const built = resolve(candidate);
+    if (existsSync(built)) return built;
+  }
+  return undefined;
+}
+
 function viewerRoot(): string | undefined {
-  const built = resolve('dist-viewer');
-  return existsSync(built) ? built : undefined;
+  return findDistDir('viewer');
 }
 
 function refereeRoot(): string | undefined {
-  const built = resolve('dist-referee');
-  return existsSync(built) ? built : undefined;
+  return findDistDir('referee');
 }
 
 function workspaceRoot(): string | undefined {
-  const built = resolve('dist-workspace');
-  return existsSync(built) ? built : undefined;
+  return findDistDir('workspace');
 }
 
 /**
@@ -207,13 +212,11 @@ function leagueFrom(flags: Map<string, string>): LeagueId | undefined {
 }
 
 function siteRoot(): string | undefined {
-  const built = resolve('dist-site');
-  return existsSync(built) ? built : undefined;
+  return findDistDir('site');
 }
 
 function practiceRoot(): string | undefined {
-  const built = resolve('dist-practice');
-  return existsSync(built) ? built : undefined;
+  return findDistDir('practice');
 }
 
 function pythonLibDir(): string | undefined {
@@ -244,7 +247,7 @@ async function serve(flags: Map<string, string>): Promise<void> {
     viewerRoot: root,
     refereeRoot: refRoot,
     refereeToken,
-    practiceFields: practiceFields ? { maxFields: num(flags, 'max-fields', 4) } : false,
+    practiceFields: practiceFields ? { maxArenas: num(flags, 'max-fields', 4) } : false,
     realtime: flags.get('fast') !== 'true',
     viewHz: num(flags, 'view-hz', 60),
     idealSensors,
@@ -264,7 +267,7 @@ async function serve(flags: Map<string, string>): Promise<void> {
   console.log(`  sensors:   ${idealSensors ? 'ideal — noise-free, and not a mode to read a result from' : 'realistic (noise, drift, camera latency)'}`);
   console.log(`  watch at  http://localhost:${port}`);
   if (!root) {
-    console.log(`  (no viewer built yet — run: npm run build:viewer)`);
+    console.log(`  (no viewer built yet — run: bun run build:viewer)`);
   }
   if (practiceFields) {
     console.log(`  practice fields:  POST http://localhost:${port}/practice  opens one`);
@@ -274,13 +277,13 @@ async function serve(flags: Map<string, string>): Promise<void> {
     const teams = [...new Set(workspaceTokens.values())].sort();
     console.log(`  team workspaces:  http://localhost:${port}/workspace`);
     console.log(`  teams:            ${teams.join(', ')}`);
-    if (!wsRoot) console.log(`  (no workspace built yet — run: npm run build:workspace)`);
+    if (!wsRoot) console.log(`  (no workspace built yet — run: bun run build:workspace)`);
   }
   if (refereed) {
     console.log(`  referee console:  http://localhost:${port}/referee`);
     console.log(`  referee token:    ${refereeToken}`);
     console.log(`  (hand this to the referee — it is not shown again)`);
-    if (!refRoot) console.log(`  (no referee console built yet — run: npm run build:referee)`);
+    if (!refRoot) console.log(`  (no referee console built yet — run: bun run build:referee)`);
   }
   console.log(`  ctrl-c to stop\n`);
 
@@ -388,13 +391,73 @@ async function serve(flags: Map<string, string>): Promise<void> {
  * Open a practice field and leave it open.
  *
  * One field, one port, in the foreground - which is all a team on their own
- * machine needs, and is also exactly what the venue server spawns per field.
+ * machine needs, and is also exactly what a venue server spawns per field.
  * Nothing here is scored and nothing is written: there is no result to print
  * at the end because there is no end.
  */
 async function practice(flags: Map<string, string>): Promise<void> {
+  await practiceArena(flags, false);
+}
+
+/**
+ * One world, held for somebody else: what a hub spawns, of either kind.
+ *
+ * A **practice** arena is the field above, byte for byte — the hub starting
+ * one and a team starting one by hand must be the same thing running, or a
+ * rehearsal is a rehearsal of a different sport. A **fixture** arena is the
+ * same `MatchServer` with a referee console, bound to loopback, waiting to be
+ * told what to play (see `arena.ts`).
+ *
+ * Always in the foreground, always watching its stdin: the pipe its parent
+ * holds is what makes `--die-with-parent` true even when the hub is killed
+ * outright and never runs its own cleanup.
+ */
+async function arena(flags: Map<string, string>): Promise<void> {
+  const kind = flags.get('kind') === 'fixture' ? 'fixture' : 'practice';
+  if (kind === 'practice') {
+    await practiceArena(flags, true);
+    return;
+  }
+
+  const { FixtureArena } = await import('./arena');
+  let fixture: InstanceType<typeof FixtureArena> | null = null;
+
   const server = new MatchServer({
     port: num(flags, 'port', 8080),
+    host: flags.get('host'),
+    viewerRoot: viewerRoot(),
+    refereeRoot: refereeRoot(),
+    refereeToken: flags.get('referee-token'),
+    realtime: true,
+    viewHz: num(flags, 'view-hz', 60),
+    pythonLibDir: pythonLibDir(),
+    submissionsDir: flags.get('submissions'),
+    control: (req, url) => fixture?.handle(req, url) ?? null,
+  });
+
+  fixture = new FixtureArena(server, {
+    pythonLibDir: pythonLibDir() ?? null,
+    seatCpuPercent: flags.has('seat-cpu') ? num(flags, 'seat-cpu', 50) : undefined,
+    seatMemoryMb: flags.has('seat-mem') ? num(flags, 'seat-mem', 512) : undefined,
+    log: (line) => console.log(`  ${line}`),
+  });
+
+  const port = await server.listen();
+  console.log(`  fixture arena listening on ${port}`);
+
+  const close = (): void => {
+    fixture?.stop();
+    process.exit(0);
+  };
+  process.on('SIGINT', close);
+  dieWithParent(flags, close);
+}
+
+/** The practice field, started by hand or by a hub. */
+async function practiceArena(flags: Map<string, string>, spawned: boolean): Promise<void> {
+  const server = new MatchServer({
+    port: num(flags, 'port', 8080),
+    host: flags.get('host'),
     viewerRoot: viewerRoot(),
     practiceRoot: practiceRoot(),
     realtime: true,
@@ -411,36 +474,41 @@ async function practice(flags: Map<string, string>): Promise<void> {
     league: leagueFrom(flags),
     idealSensors: flags.get('ideal-sensors') === 'true',
     seed: seedOption(flags, 1),
+    seatCpuPercent: flags.has('seat-cpu') ? num(flags, 'seat-cpu', 50) : undefined,
+    seatMemoryMb: flags.has('seat-mem') ? num(flags, 'seat-mem', 512) : undefined,
     log: (line) => console.log(`  ${line}`),
   });
 
-  console.log(`\n  RCJA Soccer Simulation — practice field`);
-  console.log(`  watch at   http://localhost:${port}`);
-  console.log(`  arrange at http://localhost:${port}/practice`);
-  if (!practiceRoot()) console.log(`  (no practice console built yet — run: npm run build:practice)`);
-  console.log(`  robots can also connect to  ws://localhost:${port}/agent`);
-  console.log(`  open to anyone who has the link — nothing here is scored or recorded`);
-  console.log(`  ctrl-c to stop\n`);
-
-  process.on('SIGINT', () => {
-    session.close();
-    process.exit(0);
-  });
-
-  // Spawned by a venue server's field supervisor rather than started by hand:
-  // its stdin is a pipe held open by the parent, so end-of-file on it means
-  // the parent is gone and this field has nobody left to belong to.
-  if (flags.get('die-with-parent') === 'true') {
-    process.stdin.resume();
-    const orphaned = (): void => {
-      session.close();
-      process.exit(0);
-    };
-    process.stdin.on('end', orphaned);
-    process.stdin.on('close', orphaned);
+  if (!spawned) {
+    console.log(`\n  RCJA Soccer Simulation — practice field`);
+    console.log(`  watch at   http://localhost:${port}`);
+    console.log(`  arrange at http://localhost:${port}/practice`);
+    if (!practiceRoot()) console.log(`  (no practice console built yet — run: bun run build:practice)`);
+    console.log(`  robots can also connect to  ws://localhost:${port}/agent`);
+    console.log(`  open to anyone who has the link — nothing here is scored or recorded`);
+    console.log(`  ctrl-c to stop\n`);
   }
 
+  const close = (): void => {
+    session.close();
+    process.exit(0);
+  };
+  process.on('SIGINT', close);
+  dieWithParent(flags, close);
+
   await server.practise(session);
+}
+
+/**
+ * Spawned by a hub rather than started by hand: its stdin is a pipe held open
+ * by the parent, so end-of-file on it means the parent is gone and this arena
+ * has nobody left to belong to.
+ */
+function dieWithParent(flags: Map<string, string>, close: () => void): void {
+  if (flags.get('die-with-parent') !== 'true') return;
+  process.stdin.resume();
+  process.stdin.on('end', close);
+  process.stdin.on('close', close);
 }
 
 function once(flags: Map<string, string>): void {
@@ -641,7 +709,7 @@ async function draw(flags: Map<string, string>): Promise<void> {
   for (const fixture of made.fixtures) {
     console.log(`    ${fixture.home} v ${fixture.away}   seeds ${fixture.seeds.map(formatSeedValue).join(', ')}`);
   }
-  console.log(`\n  play it:  npm run serve -- tournament --name ${made.id}\n`);
+  console.log(`\n  play it:  bun run serve -- tournament --name ${made.id}\n`);
 }
 
 /**
@@ -663,7 +731,7 @@ async function tournament(flags: Map<string, string>): Promise<void> {
   try {
     made = await loadDraw(root, id);
   } catch {
-    console.error(`\n  no draw called "${id}" under ${root}` + `\n  make one:  npm run serve -- draw --name "${id}"\n`);
+    console.error(`\n  no draw called "${id}" under ${root}` + `\n  make one:  bun run serve -- draw --name "${id}"\n`);
     process.exit(1);
   }
 
@@ -691,7 +759,7 @@ async function tournament(flags: Map<string, string>): Promise<void> {
     console.log(`  referee console:  http://localhost:${port}/referee`);
     console.log(`  referee token:    ${refereeToken}`);
     console.log(`  (hand this to the referee — it is not shown again, and it lasts the whole tournament)`);
-    if (!refRoot) console.log(`  (no referee console built yet — run: npm run build:referee)`);
+    if (!refRoot) console.log(`  (no referee console built yet — run: bun run build:referee)`);
   } else {
     console.log(`  headless — nothing waits for a referee`);
   }
@@ -759,28 +827,6 @@ async function tournament(flags: Map<string, string>): Promise<void> {
 }
 
 
-/**
- * Quieten exactly one warning, and nothing else.
- *
- * `node:sqlite` is experimental before Node 24 and says so on first use. A
- * state coordinator reading the word "experimental" while a hall fills up is a
- * support call, and the alternative — telling venues to pass `--no-warnings` —
- * would hide every other warning too. So the default listener is replaced with
- * one that drops this single message and prints the rest as Node would.
- *
- * It has to run *before* `node:sqlite` is imported, which is why the three
- * commands that use it import `./accounts` and `./league` dynamically rather
- * than at the top of this file. That is not only about the warning: a plain
- * `serve`, `match` or `bench` should not load a database driver it will never
- * open, and before this was lazy every command in the CLI printed the warning.
- */
-function quietenSqliteWarning(): void {
-  process.removeAllListeners('warning');
-  process.on('warning', (warning) => {
-    if (warning.name === 'ExperimentalWarning' && /SQLite/i.test(warning.message)) return;
-    console.warn(`${warning.name}: ${warning.message}`);
-  });
-}
 
 function leagueData(flags: Map<string, string>): string {
   return resolve(flags.get('data') ?? 'league');
@@ -846,7 +892,6 @@ function roleFrom(flags: Map<string, string>): Role {
  * twenty minutes before their match.
  */
 async function account(flags: Map<string, string>): Promise<void> {
-  quietenSqliteWarning();
   const { Accounts, MIN_PASSWORD } = await import('./accounts');
   const accounts = new Accounts({ file: join(leagueData(flags), 'league.db') });
 
@@ -854,7 +899,7 @@ async function account(flags: Map<string, string>): Promise<void> {
     if (flags.get('list') === 'true') {
       const all = accounts.list();
       if (all.length === 0) {
-        console.log('\n  no accounts yet — make one:  npm run serve -- account --create --role admin --name "Your Name"\n');
+        console.log('\n  no accounts yet — make one:  bun run serve -- account --create --role admin --name "Your Name"\n');
         return;
       }
       console.log('');
@@ -923,7 +968,6 @@ async function account(flags: Map<string, string>): Promise<void> {
  * stops working the moment it is used.
  */
 async function invite(flags: Map<string, string>): Promise<void> {
-  quietenSqliteWarning();
   const { Accounts } = await import('./accounts');
   const accounts = new Accounts({ file: join(leagueData(flags), 'league.db') });
   try {
@@ -971,7 +1015,6 @@ async function invite(flags: Map<string, string>): Promise<void> {
  * schedule while nothing is on.
  */
 async function league(flags: Map<string, string>): Promise<void> {
-  quietenSqliteWarning();
   const { LeagueServer } = await import('./league');
   const root = tournamentsRoot();
   const name = flags.get('name');
@@ -982,13 +1025,27 @@ async function league(flags: Map<string, string>): Promise<void> {
     try {
       made = await loadDraw(root, id);
     } catch {
-      console.error(`\n  no draw called "${id}" under ${root}` + `\n  make one:  npm run serve -- draw --name "${id}"\n`);
+      console.error(`\n  no draw called "${id}" under ${root}` + `\n  make one:  bun run serve -- draw --name "${id}"\n`);
       process.exit(1);
     }
   }
 
   const refereed = (made?.refereed ?? true) && flags.get('headless') !== 'true';
   const site = siteRoot();
+
+  // The budget, before anything is spawned. A venue that cannot honour one
+  // arena at its configured grant should find out here rather than at kick-off.
+  const { loadSettings } = await import('./settings');
+  const { readMachine, refuseToStart, resolveBudget } = await import('./capacity');
+  const { settings, sources, complaints } = loadSettings(leagueData(flags), budgetFlags(flags));
+  for (const complaint of complaints) console.log(`  ${complaint}`);
+  const budget = resolveBudget(settings, readMachine());
+  const refusal = refuseToStart(budget);
+  if (refusal) {
+    console.error(`\n  ${refusal}\n  check it with:  bun run serve -- capacity\n`);
+    process.exit(1);
+  }
+
   const server = new LeagueServer({
     port: num(flags, 'port', 8080),
     dataDir: leagueData(flags),
@@ -996,11 +1053,14 @@ async function league(flags: Map<string, string>): Promise<void> {
     tournamentId: id,
     siteRoot: site,
     log: (line) => console.log(`  ${line}`),
+    settings,
+    settingSources: sources,
     world: {
       viewerRoot: viewerRoot(),
       refereeRoot: refereeRoot(),
       workspaceRoot: workspaceRoot(),
       workspacesDir: flags.get('workspaces-dir'),
+      submissionsDir: flags.get('submissions'),
       pythonLibDir: pythonLibDir(),
       realtime: refereed,
       viewHz: num(flags, 'view-hz', 60),
@@ -1013,82 +1073,79 @@ async function league(flags: Map<string, string>): Promise<void> {
   const port = await server.listen();
   console.log(`\n  RCJA Soccer Simulation — league server`);
   console.log(`  front page:  http://localhost:${port}`);
-  console.log(`  watch:       http://localhost:${port}/live/`);
-  if (!site) console.log(`  (no site built yet — run: npm run build:site)`);
+  console.log(`  watch:       http://localhost:${port}/live`);
+  if (!site) console.log(`  (no site built yet — run: bun run build:site)`);
+  console.log(
+    `  arenas:      up to ${budget.max}` +
+      (budget.set ? '' : ` (computed; this machine guarantees ${budget.guaranteed})`) +
+      ` · ${budget.fixtures} for fixtures · ${budget.practice} for practice`,
+  );
+  for (const warning of budget.warnings) console.log(`\n  ${warning}`);
   if (made) console.log(`  playing:     ${made.name} — ${made.fixtures.length} fixtures`);
   else console.log(`  playing:     nothing — pass --name <draw> to run one`);
   if (server.accounts.empty) {
     console.log(`\n  there are no accounts yet. Make the first admin:`);
-    console.log(`    npm run serve -- account --create --role admin --name "Your Name"`);
+    console.log(`    bun run serve -- account --create --role admin --name "Your Name"`);
   }
   console.log(`\n  ctrl-c to stop; re-run to carry on where it stopped\n`);
 
-  if (!made) return;
-
-  const libDir = pythonLibDir();
-  let running: SpawnedLineup | null = null;
   process.on('SIGINT', () => {
-    running?.stop();
+    void server.close();
     process.exit(0);
   });
 
+  if (!made) return;
+
   const results = await runDraw(root, made, {
+    // Several at once, from the budget. A fixture never queues behind a
+    // rehearsal because those slots were never shared with practice.
+    slots: budget.fixtures,
+    // A venue's front door does not fall over because one match did.
+    continueOnFailure: true,
+    conditions: {
+      seatCpuPercent: settings.arenas.seatCpuPercent,
+      seatMemoryMb: settings.arenas.seatMemoryMb,
+    },
     onFixtureStart: (fixture, played, total) => {
-      // The front page's "now playing" band is this, and only this: the league
-      // server never guesses what is on from the draw, because a fixture that
-      // is next and a fixture that is being played are different things to a
-      // person standing in the hall.
-      server.setLive(fixture);
       console.log(`  fixture ${played + 1} of ${total}:  ${fixture.home} v ${fixture.away}`);
     },
     onFixtureDone: (fixture, result) => {
-      server.setLive(null);
+      server.closeFixture(fixture.id);
       const score = result.legs
         .map((leg) => `${leg.result.score.violet}-${leg.result.score.lime}`)
         .join(', ');
       console.log(`  played:  ${fixture.home} v ${fixture.away}  ${score}\n`);
     },
+    onFixtureFailed: (fixture, error) => {
+      // Left unwritten on purpose: an unfinished fixture is exactly what an
+      // abandoned one looks like, and it replays as itself on the next run.
+      server.closeFixture(fixture.id);
+      console.log(`  could not play ${fixture.home} v ${fixture.away}: ${error.message}`);
+      console.log(`  nothing was recorded; it will be played again on the next run\n`);
+    },
     playLeg: async (fixture, seed, leg) => {
-      const teams = { violet: fixture.home, lime: fixture.away };
-      const submissions: Record<string, string> = {};
-      let lineup: SpawnedLineup | null = null;
-
-      if (libDir) {
-        const resolved = await resolveLineup(server.matches.submissionsDirectory, teams);
-        const ids = Object.keys(resolved);
-        if (ids.length > 0) {
-          lineup = await spawnLineup(server.matches, resolved, { pythonLibDir: libDir }, (line) =>
-            console.log(`  ${line}`),
-          );
-          running = lineup;
-          for (const [id, entry] of Object.entries(resolved)) {
-            if (entry) submissions[id] = await hashSubmission(entry.dir);
-          }
-        }
+      // The hub plays no football. It opens an arena — a child process running
+      // the same binary a team runs on a laptop — and tells it what to play;
+      // the arena resolves its own lineup and spawns its own sandboxed robots.
+      const arenaId = server.liveFor(fixture.id)?.arenaId ?? (await server.openFixture(fixture));
+      if (made!.legs > 1) {
+        console.log(`    leg ${leg + 1} of ${made!.legs}  (seed ${formatSeedValue(seed)})`);
+      }
+      if (refereed) {
+        console.log(`    referee it at  http://localhost:${port}/a/${arenaId}/referee/`);
       }
 
-      if (made!.legs > 1) console.log(`    leg ${leg + 1} of ${made!.legs}  (seed ${formatSeedValue(seed)})`);
-
-      try {
-        const result = await server.matches.play({
-          agents: agentsFor(undefined),
-          transports: lineup?.transports,
-          teams,
-          league: made!.league,
-          halfSeconds: made!.halfSeconds,
-          seed,
-          refereed,
-        });
-        return { result, submissions };
-      } finally {
-        lineup?.stop();
-        running = null;
-        server.matches.agents.closeAll();
-      }
+      return server.playLeg(fixture.id, {
+        teams: { violet: fixture.home, lime: fixture.away },
+        seed,
+        league: made!.league,
+        halfSeconds: made!.halfSeconds,
+        refereed,
+        label: `${fixture.id} leg ${leg + 1}`,
+      });
     },
   });
 
-  server.setLive(null);
   console.log(`\n${formatTable(made, results)}`);
   // And then it keeps serving. A tournament is a batch job and stops when the
   // last fixture is played; a league server is a venue's front door, and the
@@ -1099,6 +1156,50 @@ async function league(flags: Map<string, string>): Promise<void> {
 }
 
 /** The table as it stands, without playing anything. */
+/**
+ * What this machine can run, and what an arena really costs on it.
+ *
+ * Asked the week before an event, by somebody deciding how many fields to
+ * promise teams — which is why the bare form is instant and needs nothing
+ * running. `--measure` is the same question answered by playing rather than by
+ * arithmetic, which is how every other claim in this repository is settled.
+ */
+async function capacity(flags: Map<string, string>): Promise<void> {
+  const { loadSettings } = await import('./settings');
+  const { formatCapacity, readMachine, resolveBudget } = await import('./capacity');
+
+  const { settings, sources, complaints } = loadSettings(leagueData(flags), budgetFlags(flags));
+  for (const complaint of complaints) console.log(`  ${complaint}`);
+
+  const machine = readMachine();
+  const budget = resolveBudget(settings, machine);
+
+  let measured;
+  if (flags.get('measure') === 'true' || flags.has('measure')) {
+    const { measureArena } = await import('./measure');
+    const seconds = num(flags, 'measure', 30);
+    measured = await measureArena({
+      seconds: Number.isFinite(seconds) && seconds > 1 ? seconds : 30,
+      seatCpuPercent: settings.arenas.seatCpuPercent,
+      seatMemoryMb: settings.arenas.seatMemoryMb,
+      log: (line) => console.log(`  ${line}`),
+    });
+  }
+
+  console.log(formatCapacity(machine, settings, budget, sources, measured));
+}
+
+/** Budget settings given on the command line, for this run only. */
+function budgetFlags(flags: Map<string, string>): Record<string, number> {
+  const out: Record<string, number> = {};
+  if (flags.has('arenas-max')) out.arenasMax = num(flags, 'arenas-max', 0);
+  if (flags.has('concurrent-fixtures')) out.concurrentFixtures = num(flags, 'concurrent-fixtures', 0);
+  if (flags.has('seat-cpu')) out.seatCpuPercent = num(flags, 'seat-cpu', 0);
+  if (flags.has('seat-mem')) out.seatMemoryMb = num(flags, 'seat-mem', 0);
+  if (flags.has('practice-max')) out.practiceMax = num(flags, 'practice-max', 0);
+  return out;
+}
+
 async function table(flags: Map<string, string>): Promise<void> {
   const root = tournamentsRoot();
   const id = slugifyTeam(requireName(flags));
@@ -1149,6 +1250,7 @@ function usage(): void {
     table       print a tournament's table as it stands        [--name]
 
     league    run the venue: a front page, accounts, and a draw  [--name --port --data --headless]
+    capacity  what this machine can run, and what an arena costs  [--measure --data]
     account   make or repair an account                          [--create --passwd --list --role --name --data]
     invite    issue a single-use registration code               [--role --team --list --data]
 
@@ -1160,8 +1262,8 @@ function usage(): void {
   /workspace, pastes their secret, and edits their robot on the server — for a
   student on a school machine who cannot install Python. --team-token
   TEAM=SECRET does one team inline, for trying it out. --workspaces-dir moves
-  where the folders are kept (default ./workspaces). Needs npm run
-  build:workspace. See docs/writing-in-a-browser.md.
+where the folders are kept (default ./workspaces). Needs bun run
+   build:workspace. See docs/writing-in-a-browser.md.
 
   league is the tournament deployment, and serve is unchanged by it: no
   login, no front page, no database file. A league server owns accounts (in
@@ -1198,7 +1300,7 @@ function usage(): void {
   without the flag, but that human can pause/resume, abandon, award a
   kick-off, remove/return a robot or correct the score at any time. Prints a
   one-time token; --referee-token sets it yourself instead of a random one.
-  Needs npm run build:referee. See docs/running-a-server.md.
+  Needs bun run build:referee. See docs/running-a-server.md.
 
   --kickoff-countdown N  pause each kick-off for N seconds of placed-but-not-
                          live wait (default 3 for spectated matches, 0 for
@@ -1235,16 +1337,16 @@ function usage(): void {
   fixture that did not finish, and never counts one twice.
 
   Run a tournament:
-    npm run serve -- draw --name state-round-1 --legs 3
-    npm run serve -- tournament --name state-round-1
-    npm run serve -- table --name state-round-1
+    bun run serve -- draw --name state-round-1 --legs 3
+    bun run serve -- tournament --name state-round-1
+    bun run serve -- table --name state-round-1
 
   Measure a change:
-    npm run bench -- --spawn "python3 python/examples/play.py --url {url}" --json before.json
+    bun run bench -- --spawn "python3 python/examples/play.py --url {url}" --json before.json
     ...edit the robot...
-    npm run bench -- --spawn "python3 python/examples/play.py --url {url}" --baseline before.json
+    bun run bench -- --spawn "python3 python/examples/play.py --url {url}" --baseline before.json
 
-  Watch a match:   npm run build:viewer && npm run serve
+  Watch a match:   bun run build:viewer && bun run serve
 `);
 }
 
@@ -1255,6 +1357,9 @@ switch (command) {
     break;
   case 'practice':
     await practice(flags);
+    break;
+  case 'arena':
+    await arena(flags);
     break;
   case 'match':
     once(flags);
@@ -1273,6 +1378,9 @@ switch (command) {
     break;
   case 'table':
     await table(flags);
+    break;
+  case 'capacity':
+    await capacity(flags);
     break;
   case 'league':
     await league(flags);

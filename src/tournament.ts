@@ -88,6 +88,21 @@ export interface FixtureResult {
   submissions: Record<string, string>;
   legs: LegRecord[];
   completedAt: string;
+  /**
+   * The conditions this was played under, when they were not the defaults.
+   *
+   * A seat's CPU and memory grant is part of what a result means: a venue
+   * playing at 25% is playing a different game from one at 50%, and a match
+   * replayed under a different grant is not the same match. It sits here beside
+   * the seed and the code hashes for the same reason they do.
+   *
+   * Optional, because every record written before Phase 7 predates the idea and
+   * they all still load.
+   */
+  conditions?: {
+    seatCpuPercent: number;
+    seatMemoryMb: number;
+  };
 }
 
 export interface DrawOptions {

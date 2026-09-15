@@ -82,6 +82,17 @@ export interface PracticeOptions {
   league?: LeagueId;
   idealSensors?: boolean;
   seed?: SeedInput;
+  /**
+   * Per-seat grants, and deliberately the same ones a fixture plays under.
+   *
+   * The tempting lever at a venue is to shrink practice seats to fit more
+   * fields in, and it is not available: a rehearsal under different conditions
+   * is a rehearsal of a different sport — the argument that rejected running
+   * the simulator in the browser. A venue may turn how many arenas run at
+   * once, and not what a robot is given inside one.
+   */
+  seatCpuPercent?: number;
+  seatMemoryMb?: number;
   log?: (line: string) => void;
 }
 
@@ -333,7 +344,20 @@ export class PracticeSession {
     }
     this.match.clearSeat(id);
     this.seats.set(id, { fill, detail: 'starting' });
-    this.processes.set(id, spawnSeat(this.server, id, entry, { pythonLibDir: libDir }, this.opts.log));
+    this.processes.set(
+      id,
+      spawnSeat(
+        this.server,
+        id,
+        entry,
+        {
+          pythonLibDir: libDir,
+          cpuQuotaPercent: this.opts.seatCpuPercent,
+          memoryLimitMb: this.opts.seatMemoryMb,
+        },
+        this.opts.log,
+      ),
+    );
   }
 
   /** Restart whatever is in this seat. The situation is left alone. */

@@ -20,7 +20,6 @@
  * request body.** A client that can name its own team can be any team.
  */
 
-import type { IncomingMessage } from 'node:http';
 
 /**
  * What a push is allowed to be written as.
@@ -48,19 +47,32 @@ export interface Authority {
   readonly workspaces: boolean;
 
   /** May this request control the match? */
-  referee(req: IncomingMessage): Promise<boolean>;
+  referee(req: AuthRequest): Promise<boolean>;
 
   /** Whose workspace is this request allowed to touch, or null. */
-  team(req: IncomingMessage): Promise<string | null>;
+  team(req: AuthRequest): Promise<string | null>;
 
   /** What this push may be written as. */
-  submitter(req: IncomingMessage): Promise<Submitter>;
+  submitter(req: AuthRequest): Promise<Submitter>;
+}
+
+/**
+ * A minimal request shape accepted by both node:http IncomingMessage and the
+ * web-standard Request — the only thing authority checks is the Authorization
+ * header, so neither concrete type needs to be imported here.
+ */
+export interface AuthRequest {
+  headers:
+    | { get(name: string): string | null }
+    | { authorization?: string | string[]; cookie?: string };
 }
 
 /** `Authorization: Bearer <secret>`, or the empty string. */
-export function bearer(req: IncomingMessage): string {
-  const header = req.headers.authorization ?? '';
-  return header.startsWith('Bearer ') ? header.slice('Bearer '.length) : '';
+export function bearer(req: AuthRequest): string {
+  const h = req.headers as { get?: (name: string) => string | null; authorization?: string | string[] };
+  const raw = typeof h.get === 'function' ? h.get('authorization') : h.authorization;
+  const auth = (Array.isArray(raw) ? raw[0] : raw) ?? '';
+  return auth.startsWith('Bearer ') ? auth.slice('Bearer '.length) : '';
 }
 
 export interface HandIssuedOptions {

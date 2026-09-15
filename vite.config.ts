@@ -1,7 +1,6 @@
 import { defineConfig } from 'vite';
 
-// The viewer only. Tests are configured separately in vitest.config.ts, because
-// this root points at the browser client and the suite lives in src/.
+// The viewer only. Tests live in tests/ and are run with `bun test`.
 export default defineConfig({
   root: 'viewer',
   // Relative, so the bundle is right wherever it is mounted — the same reason

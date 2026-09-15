@@ -266,6 +266,10 @@ button.primary:hover { filter: brightness(1.08); }
 button.primary:disabled { opacity: 0.55; cursor: default; filter: none; }
 button.quiet { background: none; border-color: transparent; color: var(--muted); padding: 0.3rem 0; }
 button.quiet:hover { color: var(--ink); border-color: transparent; text-decoration: underline; }
+/* Stopping an arena kills a process somebody may be watching, so it reads as
+   an action rather than as a link — but it is not the page's main verb. */
+button.stop { font-size: 0.8rem; padding: 0.25rem 0.5rem; margin-left: 0.6rem; }
+button.stop:disabled { opacity: 0.5; cursor: default; }
 
 /* --- messages ------------------------------------------------------------ */
 .error, .note {

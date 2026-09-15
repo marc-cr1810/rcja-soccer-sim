@@ -4,7 +4,7 @@ The standing benchmark. Run it with no arguments beyond the url and it plays the
 working tree against the **champion** - the best version measured so far, pinned
 by commit in `scratch/champion`:
 
-    npm run bench -- --team both --seeds 1-25 \\
+    bun run bench -- --team both --seeds 1-25 \\
       --spawn "python3 scratch/duel.py --url {url}"
 
 The scoreline the bench prints is then working tree (left) against champion

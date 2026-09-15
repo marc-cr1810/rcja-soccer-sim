@@ -12,7 +12,7 @@
  * agent through the same path a real match uses.
  */
 
-import type { ChildProcess } from 'node:child_process';
+import type { Subprocess } from 'bun';
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
@@ -81,18 +81,8 @@ export interface LineupOptions {
   pythonLibDir: string;
   /** How long to wait for every spawned seat to connect. */
   connectTimeoutSeconds?: number;
-  /** cgroup memory ceiling, MB. Bigger than validation's — a match runs for minutes. */
   memoryLimitMb?: number;
-  /**
-   * cgroup CPU quota per robot, as a percentage of one core. A generous
-   * default (four robots can, worst case, total 200% — bounded but not
-   * stingy for a 50 Hz control loop) rather than a cutoff: a busy-loop is
-   * throttled, not killed, so it stops crowding out the other three robots
-   * and the physics loop without ending the match for whichever team wrote
-   * it.
-   */
   cpuQuotaPercent?: number;
-  /** How many times a crashed slot is respawned before it is left off for good. */
   maxRespawns?: number;
 }
 
@@ -104,16 +94,12 @@ export interface SpawnedLineup {
 }
 
 const DEFAULT_CONNECT_TIMEOUT_SECONDS = 10;
-const DEFAULT_MAX_RESPAWNS = 5;
-/** A match runs for minutes, not the few seconds a validation tick does. */
 const MATCH_MEMORY_LIMIT_MB = 512;
-/** Half a core each; four robots worst-case total 200%, not the whole machine. */
-const MATCH_CPU_QUOTA_PERCENT = 50;
+const MATCH_CPU_QUOTA_PERCENT = 100;
+const DEFAULT_MAX_RESPAWNS = 5;
 
-/** One spawned seat, with its own life to end. */
 export interface SeatProcess {
-  /** Stop this seat's program and do not respawn it. */
-  stop: () => void;
+  stop(): void;
 }
 
 /**
@@ -133,7 +119,7 @@ export function spawnSeat(
   log: (line: string) => void = () => {},
 ): SeatProcess {
   const maxRespawns = opts.maxRespawns ?? DEFAULT_MAX_RESPAWNS;
-  let child: ChildProcess | null = null;
+  let child: Subprocess | null = null;
   let stopped = false;
 
   const spawnOne = (attempt: number): void => {
@@ -172,10 +158,34 @@ export function spawnSeat(
     });
     child = spawned;
 
-    spawned.stdout?.on('data', (d: Buffer) => log(`[${id}] ${d.toString().trimEnd()}`));
-    spawned.stderr?.on('data', (d: Buffer) => log(`[${id}] ${d.toString().trimEnd()}`));
+    (async () => {
+      if (spawned.stdout && typeof spawned.stdout !== 'number') {
+        const reader = spawned.stdout.getReader();
+        const decoder = new TextDecoder();
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            log(`[${id}] ${decoder.decode(value).trimEnd()}`);
+          }
+        } catch {}
+      }
+    })();
+    (async () => {
+      if (spawned.stderr && typeof spawned.stderr !== 'number') {
+        const reader = spawned.stderr.getReader();
+        const decoder = new TextDecoder();
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            log(`[${id}] ${decoder.decode(value).trimEnd()}`);
+          }
+        } catch {}
+      }
+    })();
 
-    spawned.on('exit', (code) => {
+    spawned.exited.then((code) => {
       if (child === spawned) child = null;
       if (stopped) return;
       if (attempt >= maxRespawns) {
