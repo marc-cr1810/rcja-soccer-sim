@@ -164,8 +164,30 @@ describe('a 64-bit seed reaches a whole match', () => {
     ...referenceTeam('lime'),
   } as unknown as MatchAgents;
 
+  /**
+   * Play a match, and describe how it actually went.
+   *
+   * Two things, because either alone can be fooled. The referee log is the
+   * whole match as a trace — every call and the second it happened on — and
+   * the final poses are where four robots and a ball physically ended up,
+   * which are floats and will not coincide. The log covers the case where a
+   * goal in the last moments resets everyone to their kick-off spots; the
+   * poses cover the case where a short match produces too few calls to tell
+   * two traces apart. Same shape `bench.test.ts` uses to tell two runs apart.
+   */
   function play(seed: SeedInput) {
-    return new Match({ agents, halfSeconds: 60, seed }).run();
+    const match = new Match({ agents, halfSeconds: 60, seed });
+    const result = match.run();
+    return {
+      score: result.score,
+      goals: result.goals,
+      // How the match went, rather than only how it finished.
+      course: {
+        calls: result.events.map((e) => [e.kind, e.at, e.robotId] as const),
+        ball: [match.world.ball.x, match.world.ball.z],
+        robots: match.world.robots.map((r) => [r.x, r.z, r.heading, r.removed] as const),
+      },
+    };
   }
 
   it('replays exactly for the same 64-bit seed', () => {
@@ -173,6 +195,9 @@ describe('a 64-bit seed reaches a whole match', () => {
     const b = play({ hi: 0xdeadbeef, lo: 0x00112233 });
     expect(a.score).toEqual(b.score);
     expect(a.goals).toEqual(b.goals);
+    // The strong half: identical seeds must reproduce the whole match, not
+    // merely agree on a scoreline they both reached differently.
+    expect(a.course).toEqual(b.course);
   });
 
   it('plays a different match when only the high word changes', () => {
@@ -180,9 +205,14 @@ describe('a 64-bit seed reaches a whole match', () => {
     const b = play({ hi: 0x55555555, lo: 0x12345678 });
     // Not "different score": the same two reference teams often draw nil all,
     // and a test forbidding that would be testing the wrong thing — the noise
-    // STREAMS must differ, and a goal detail (or lack) rarely proves it. Two
-    // matches sharing a low word but not a high one are the exact seeding the
-    // serve loop now hands them, and they must not be identical matches.
-    expect(a.goals).not.toEqual(b.goals);
+    // STREAMS must differ. This used to assert on the goal list for that, and
+    // the goal list cannot carry it: two goalless matches produce two empty
+    // arrays, which compare equal however differently they were played, so any
+    // change to the physics that moved these two seeds to 0-0 failed a test
+    // about seeding. Compare the course instead, which is what "a different
+    // match" has meant all along. Two matches sharing a low word but not a
+    // high one are the exact seeding the serve loop hands them, and they must
+    // not be identical matches.
+    expect(a.course).not.toEqual(b.course);
   });
 });
