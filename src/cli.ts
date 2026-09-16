@@ -9,9 +9,9 @@
 
 import { MatchServer } from './server';
 import { isRole, type Role } from './capabilities';
-import { Match, KICKOFF_COUNTDOWN_SECONDS, type MatchAgents } from './match';
+import { Match, KICKOFF_COUNTDOWN_SECONDS } from './match';
 import { PracticeSession } from './practice';
-import { referenceTeam } from './reference';
+import { agentsFor } from './reference';
 import { runLadder, formatLadder, type Entry } from './ladder';
 import { ReferenceAgent } from './reference';
 import { botRoster } from './bots';
@@ -33,6 +33,7 @@ import { getVersion } from './version';
 import {
   bumpSeedValue,
   formatSeedValue,
+  matchSeed,
   parseSeed,
   type SeedInput,
 } from './rand';
@@ -106,38 +107,6 @@ function parseSeedLike(raw: string): SeedInput {
     if (Number.isFinite(n) && n >= 0 && n < 2 ** 53) return n;
   }
   return parseSeed(trimmed);
-}
-
-/** 64 fresh bits for one competition match, from the OS entropy pool. */
-function matchSeed(): SeedInput {
-  const b = randomBytes(8);
-  return { hi: b.readUInt32BE(0), lo: b.readUInt32BE(4) };
-}
-
-/**
- * Who is playing.
- *
- * Until submitted programs can be loaded both sides are the reference agent,
- * which is what an organiser wants on the screen while the hall fills up.
- *
- * `--opponent` swaps the lime side for one of the deliberately poor robots.
- * Not only for demonstrations: a waller drives itself off the field within
- * seconds, and that is the only quick way to watch a rule 5.7 stand-down
- * actually happen rather than waiting most of a match for one.
- */
-function agentsFor(opponent: string | undefined): MatchAgents {
-  const violet = referenceTeam('violet');
-  if (!opponent || opponent === 'reference') {
-    return { ...violet, ...referenceTeam('lime') } as unknown as MatchAgents;
-  }
-  const bot = botRoster().find((b) => b.name === opponent);
-  if (!bot) {
-    const names = ['reference', ...botRoster().map((b) => b.name)].join(', ');
-    console.error(`  unknown opponent "${opponent}". try: ${names}`);
-    process.exit(1);
-  }
-  const [y1, y2] = bot.make('lime');
-  return { ...violet, 'lime-1': y1!, 'lime-2': y2! } as unknown as MatchAgents;
 }
 
 function findDistDir(name: string): string | undefined {
@@ -215,8 +184,8 @@ function teamTokens(flags: Map<string, string>): ReadonlyMap<string, string> {
 }
 
 /** `--league`, checked rather than cast: a typo should not silently mean "open". */
-function leagueFrom(flags: Map<string, string>): LeagueId | undefined {
-  const raw = flags.get('league');
+function leagueFrom(flags: Map<string, string>, flag = 'league'): LeagueId | undefined {
+  const raw = flags.get(flag);
   if (raw === undefined) return undefined;
   if (!isLeagueId(raw)) {
     console.error(`\n  no league called "${raw}" — try "open" or "lightweight"\n`);
@@ -368,6 +337,15 @@ async function serve(flags: Map<string, string>): Promise<void> {
   // per match as it always has.
   const explicitSeed = flags.get('seed') !== undefined;
   let seed: SeedInput = seedOption(flags, matchSeed());
+  // `agentsFor` throws rather than exits so a library is never the thing that
+  // kills its host — but this is the CLI, and a typo'd `--opponent` should be a
+  // clean exit with the roster on the screen, not a stack trace.
+  try {
+    agentsFor(flags.get('opponent'));
+  } catch (err) {
+    console.error(`  ${(err as Error).message}`);
+    process.exit(1);
+  }
   for (;;) {
     if (waitForAgents) {
       // Not `whenReady()` on its own any more. That returned the same answer
@@ -447,9 +425,13 @@ async function practice(flags: Map<string, string>): Promise<void> {
  * outright and never runs its own cleanup.
  */
 async function arena(flags: Map<string, string>): Promise<void> {
-  const kind = flags.get('kind') === 'fixture' ? 'fixture' : 'practice';
+  const kind = flags.get('kind');
   if (kind === 'practice') {
     await practiceArena(flags, true);
+    return;
+  }
+  if (kind === 'demo') {
+    await demoArena(flags);
     return;
   }
 
@@ -482,6 +464,61 @@ async function arena(flags: Map<string, string>): Promise<void> {
 
   const close = (): void => {
     fixture?.stop();
+    process.exit(0);
+  };
+  process.on('SIGINT', close);
+  dieWithParent(flags, close);
+}
+
+/** The demo arena: football for a hall screen, started by hand or by a hub. */
+async function demoArena(flags: Map<string, string>): Promise<void> {
+  const bots = flags.get('demo-bots') ?? 'reference';
+  if (bots !== 'reference' && bots !== 'examples') {
+    // `agentsFor` throws rather than exits so a library is never the thing that
+    // kills its host — but this is the CLI, and a typo'd bot name should be a
+    // clean exit with the roster on the screen, not a stack trace.
+    try {
+      agentsFor(bots);
+    } catch (err) {
+      console.error(`  ${(err as Error).message}`);
+      process.exit(1);
+    }
+  }
+
+  const teams = {
+    violet: flags.get('demo-home') ?? 'Violet',
+    lime: flags.get('demo-away') ?? 'Lime',
+  };
+
+  const { DemoArena } = await import('./arena');
+  let demo: InstanceType<typeof DemoArena> | null = null;
+  const server = new MatchServer({
+    port: num(flags, 'port', 8080),
+    host: flags.get('host'),
+    viewerRoot: viewerRoot(),
+    realtime: true,
+    viewHz: num(flags, 'view-hz', 60),
+    pythonLibDir: pythonLibDir(),
+    control: (req, url) => demo?.handle(req, url) ?? null,
+  });
+
+  demo = new DemoArena(server, {
+    teams,
+    bots,
+    halfSeconds: num(flags, 'demo-half', 300),
+    league: leagueFrom(flags, 'demo-league'),
+    gapSeconds: num(flags, 'demo-gap', 3),
+    log: (line) => console.log(`  ${line}`),
+  });
+
+  const port = await server.listen();
+  console.log(`\n  demo arena playing ${teams.violet} v ${teams.lime} forever`);
+  console.log(`  watch at   http://localhost:${port}`);
+  console.log(`  ctrl-c to stop\n`);
+  demo.start(port);
+
+  const close = (): void => {
+    demo?.stop();
     process.exit(0);
   };
   process.on('SIGINT', close);
@@ -850,6 +887,7 @@ async function tournament(flags: Map<string, string>): Promise<void> {
           halfSeconds: made.halfSeconds,
           seed,
           refereed,
+          ballFriction: fixture.ballFriction,
         });
         return { result, submissions };
       } finally {
@@ -1607,6 +1645,17 @@ async function league(flags: Map<string, string>): Promise<void> {
     });
   }
 
+  // A hall screen, whether or not a draw is running. The child plays itself —
+  // the hub plays no football, even for an exhibition.
+  if (settings.demo.on) {
+    const demoUrl = await server.openDemo();
+    if (demoUrl) {
+      console.log(
+        `  demo arena:  playing ${settings.demo.home} v ${settings.demo.away} — watch at http://localhost:${port}${demoUrl}`,
+      );
+    }
+  }
+
   if (!made) return;
 
   const results = await runDraw(root, made, {
@@ -1768,14 +1817,29 @@ async function arenasCommand(flags: Map<string, string>, args: string[]): Promis
   console.log(`\n  ${arenas.length} running, of ${answer.budget?.max ?? '?'}\n`);
 }
 
-/** Budget settings given on the command line, for this run only. */
-function budgetFlags(flags: Map<string, string>): Record<string, number> {
-  const out: Record<string, number> = {};
+/** Budget and demo settings given on the command line, for this run only. */
+function budgetFlags(flags: Map<string, string>): Record<string, number | string | boolean> {
+  const out: Record<string, number | string | boolean> = {};
   if (flags.has('arenas-max')) out.arenasMax = num(flags, 'arenas-max', 0);
   if (flags.has('concurrent-fixtures')) out.concurrentFixtures = num(flags, 'concurrent-fixtures', 0);
   if (flags.has('seat-cpu')) out.seatCpuPercent = num(flags, 'seat-cpu', 0);
   if (flags.has('seat-mem')) out.seatMemoryMb = num(flags, 'seat-mem', 0);
   if (flags.has('practice-max')) out.practiceMax = num(flags, 'practice-max', 0);
+  if (flags.has('demo')) out.demoOn = flags.get('demo') !== 'false';
+  if (flags.has('demo-bots')) out.demoBots = flags.get('demo-bots')!;
+  if (flags.has('demo-home')) out.demoHome = flags.get('demo-home')!;
+  if (flags.has('demo-away')) out.demoAway = flags.get('demo-away')!;
+  if (flags.has('demo-half')) out.demoHalf = num(flags, 'demo-half', 0);
+  if (flags.has('demo-league')) {
+    const raw = flags.get('demo-league')!;
+    if (isLeagueId(raw)) {
+      out.demoLeague = raw;
+    } else {
+      console.error(`\n  no league called "${raw}" — try "open" or "lightweight"\n`);
+      process.exit(1);
+    }
+  }
+  if (flags.has('demo-gap')) out.demoGap = num(flags, 'demo-gap', 0);
   return out;
 }
 

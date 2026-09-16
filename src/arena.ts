@@ -1,11 +1,16 @@
 /**
- * A fixture arena, from the inside.
+ * A fixture or demo arena, from the inside.
  *
  * The hub plays no football. It owns accounts, the draw, the schedule and the
  * front page, and when a fixture is due it starts one of these — a child
  * process running the same `MatchServer` a team runs on a laptop — tells it
  * what to play, and asks how it is going. This file is the surface it tells
  * and asks through.
+ *
+ * A **demo arena** is a third kind of child: it plays back-to-back matches at
+ * wall-clock speed, never records a result, and fills a hall screen while the
+ * draw is running or when nothing is on. The hub opens one if `demo.on` is
+ * set, and the child plays itself — the hub never tells it what to play.
  *
  * **The child resolves and spawns its own lineup.** That is what "the hub
  * plays no football" has to mean in practice: if the hub still reached into
@@ -30,10 +35,14 @@
 import type { MatchResult } from './match';
 import type { LeagueId } from './leagues';
 import type { SeedInput } from './rand';
-import { referenceTeam } from './reference';
+import { agentsFor, referenceTeam } from './reference';
+import { matchSeed } from './rand';
 import { resolveLineup, spawnLineup, type SpawnedLineup } from './lineup';
 import { hashSubmission } from './submission';
 import type { MatchServer } from './server';
+import type { Transport } from './agent';
+import type { Subprocess } from 'bun';
+import { join, resolve } from 'node:path';
 
 export interface FixtureArenaOptions {
   pythonLibDir: string | null;
@@ -209,4 +218,222 @@ export class FixtureArena {
   private json(status: number, body: unknown): Response {
     return Response.json(body, { status });
   }
+}
+
+/**
+ * A demo arena, from the inside: football for a hall screen, forever.
+ *
+ * The hub plays no football, and so does the demo arena's own hub — this
+ * child runs a real `MatchServer` and plays itself, one match after another,
+ * so the screen never sits still. Nothing it plays is ever scored or written;
+ * a demo is an attraction, not a record.
+ *
+ * Who fills the seats is the `bots` switch:
+ *
+ * - `reference` (the default) plays the built-in reference agent against
+ *   itself — nothing to spawn;
+ * - a bot-roster name plays reference against that deliberately poor bot;
+ * - `examples` spawns the repo's own `python/examples/play.py` (both sides,
+ *   striker and keeper) pointing at this arena's own `/agent`, and they join
+ *   as remote seats exactly the way four laptops do.
+ *
+ * "The screen never sits still" is the rule that shapes everything here. The
+ * demo kicks off itself (`refereed: false` always), and if the Python example
+ * robots cannot join — python3 missing, a script crashing — the match plays
+ * with the built-in reference agent instead of not playing at all, and the
+ * spawn is tried again on the next gap. A miss is a fallback, never a pause.
+ */
+export interface DemoOptions {
+  teams: { violet: string; lime: string };
+  /** `reference`, `examples`, or a bot-roster name. Default `reference`. */
+  bots?: string;
+  halfSeconds?: number;
+  league?: LeagueId;
+  /** Wall-clock pause between matches, so the hall can read the table. */
+  gapSeconds?: number;
+  log?: (line: string) => void;
+}
+
+const PYTHON_SEAT_TIMEOUT_MS = 15_000;
+
+export class DemoArena {
+  private stopping = false;
+  private producer: Subprocess | null = null;
+  private readonly log: (line: string) => void;
+  private port = 0;
+
+  constructor(
+    private readonly server: MatchServer,
+    private readonly opts: DemoOptions,
+  ) {
+    this.log = opts.log ?? (() => {});
+  }
+
+  /** The control surface, mounted on `MatchServer` like `FixtureArena`'s. */
+  handle = async (req: Request, url: string): Promise<Response | null> => {
+    if (!url.startsWith('/arena-api/')) return null;
+    const action = url.slice('/arena-api/'.length);
+    if (action === 'state' && req.method === 'GET') {
+      return this.json(200, { ok: true, state: this.state() });
+    }
+    return this.json(404, { ok: false, reason: 'no such arena action' });
+  };
+
+  /** The front page's view: the current match, and it is always a match. */
+  state(): ArenaState {
+    const match = this.server.currentMatch;
+    const frame = match ? match.snapshot() : null;
+    return {
+      playing: true,
+      label: null,
+      score: frame?.score ?? null,
+      clock: frame?.clock ?? 0,
+      half: frame?.half ?? 1,
+      running: frame?.running ?? false,
+      fidelity: this.server.realtimeFidelity,
+      // A demo never finishes and never refuses: there is nothing to collect.
+      finished: null,
+      error: null,
+    };
+  }
+
+  /** Kick off the forever loop. `port` is this arena's own, for example robots. */
+  start(port: number): void {
+    this.port = port;
+    void this.run();
+  }
+
+  stop(): void {
+    this.stopping = true;
+    this.stopProducer();
+  }
+
+  private async run(): Promise<void> {
+    const bots = this.opts.bots ?? 'reference';
+    for (;;) {
+      if (this.stopping) return;
+
+      // Who fills the seats: the built-in agents always go in — a remote seat
+      // simply takes over from its reference fallback, so a seat that never
+      // shows up still has a robot on the field.
+      const agents = agentsFor(bots === 'reference' || bots === 'examples' ? undefined : bots);
+      const transports = bots === 'examples' ? await this.seatExamples() : undefined;
+      if (this.stopping) return;
+
+      await this.playOne(agents, transports);
+    }
+  }
+
+  /**
+   * Try to get the python example robots seated, and report who is actually
+   * there. A failed spawn or a timeout is not an error: the caller plays
+   * whatever is missing with the built-in reference agent, and tries again
+   * next time.
+   */
+  private async seatExamples(): Promise<Partial<Record<string, Transport>>> {
+    // Seats that are already warm stay warm; only reseat after a drop.
+    if (this.server.agents.ready && this.producer) return this.server.agents.transports();
+
+    this.stopProducer();
+    this.spawnProducer();
+
+    const timeout = new Promise<'stalled'>((ok) =>
+      setTimeout(() => ok('stalled'), PYTHON_SEAT_TIMEOUT_MS),
+    );
+    const result = await Promise.race([
+      this.server.agents.whenReady().then(() => 'seated' as const),
+      timeout,
+    ]);
+    if (result === 'stalled' && !this.server.agents.ready) {
+      this.log('the example robots did not join in time; playing built-in instead');
+    }
+    return this.server.agents.transports();
+  }
+
+  private spawnProducer(): void {
+    const script = join(REPO_ROOT, 'python', 'examples', 'play.py');
+    try {
+      this.producer = Bun.spawn(
+        ['python3', script, '--url', `ws://127.0.0.1:${this.port}/agent`, '--violet', this.opts.teams.violet, '--lime', this.opts.teams.lime],
+        { cwd: process.cwd(), stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' },
+      );
+      this.log(`spawned the example robots: python3 ${script}`);
+      this.drain(this.producer);
+    } catch (err) {
+      this.log(`could not start the example robots (${(err as Error).message}); playing built-in instead`);
+      this.producer = null;
+    }
+  }
+
+  private drain(producer: Subprocess): void {
+    for (const stream of [producer.stdout, producer.stderr]) {
+      if (!stream || typeof stream === 'number') continue;
+      void (async () => {
+        const reader = stream.getReader();
+        const decoder = new TextDecoder();
+        try {
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            for (const line of decoder.decode(value).trimEnd().split('\n')) {
+              if (line) this.log(`[example robots] ${line}`);
+            }
+          }
+        } catch {}
+      })();
+    }
+    producer.exited.then((code) => {
+      this.log(`example robots exited (code ${code})`);
+      if (this.producer === producer) this.producer = null;
+    });
+  }
+
+  private stopProducer(): void {
+    const producer = this.producer;
+    this.producer = null;
+    if (!producer) return;
+    try {
+      producer.kill('SIGTERM');
+    } catch {
+      // Already gone.
+    }
+  }
+
+  private async playOne(
+    agents: ReturnType<typeof agentsFor>,
+    transports: Partial<Record<string, Transport>> | undefined,
+  ): Promise<void> {
+    try {
+      const result = await this.server.play({
+        agents,
+        transports,
+        teams: this.opts.teams,
+        league: this.opts.league,
+        halfSeconds: this.opts.halfSeconds ?? 300,
+        seed: matchSeed(),
+        refereed: false,
+      });
+      this.log(`full time: ${this.opts.teams.violet} ${result.score.violet} — ${result.score.lime} ${this.opts.teams.lime}`);
+    } catch (err) {
+      // A match that refuses to play must not stop the loop — the screen never
+      // sits still, so log it and carry on to the next one.
+      this.log(`could not play a demo match: ${(err as Error).message}`);
+    }
+    await this.pause((this.opts.gapSeconds ?? 3) * 1000);
+  }
+
+  private async pause(ms: number): Promise<void> {
+    if (ms <= 0) return;
+    await sleep(ms);
+  }
+
+  private json(status: number, body: unknown): Response {
+    return Response.json(body, { status });
+  }
+}
+
+const REPO_ROOT = resolve(import.meta.dirname, '..');
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((done) => setTimeout(done, ms));
 }

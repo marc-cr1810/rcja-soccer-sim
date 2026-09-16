@@ -24,7 +24,7 @@
  */
 
 import { Match, type MatchAgents } from './match';
-import { addSeed, type SeedInput } from './rand';
+import { deriveSeed, type SeedInput } from './rand';
 import type { Agent } from './agent';
 
 export type Origin = 'student' | 'reference' | 'generated';
@@ -72,12 +72,15 @@ export interface LadderOptions {
   rounds?: number;
   halfSeconds?: number;
   /**
-   * Base of the per-match seeds, which are exactly `seed + matchIndex * 7919`
-   * (the 64-bit form carries into the high word). A ladder is a measurement,
-   * so a numeric base keeps the whole run deterministic and replayable across
-   * machines; a 64-bit seed is accepted for the same runs.
+   * Base of the per-match seeds. A numeric base keeps the whole run deterministic
+   * and replayable across machines; a 64-bit seed is accepted for the same runs.
    */
   seed?: SeedInput;
+  /**
+   * When true, pairs (A v B) and (B v A) are played with the exact same twin seed
+   * in each round. Eliminates environmental and noise variance when comparing teams.
+   */
+  twinSeeds?: boolean;
 }
 
 /**
@@ -161,8 +164,9 @@ export function runLadder(entries: Entry[], opts: LadderOptions = {}): LadderSum
           'lime-2': y2!,
         } satisfies MatchAgents;
 
-        const seed =
-          typeof baseSeed === 'number' ? baseSeed + matches * 7919 : addSeed(baseSeed, matches * 7919);
+        const seed = opts.twinSeeds
+          ? deriveSeed(baseSeed, 'ladder-twin', [home.name, away.name].sort().join(':'), round)
+          : deriveSeed(baseSeed, 'ladder', home.name, away.name, round);
         const result = new Match({ agents, halfSeconds, seed }).run();
         matches++;
         goals += result.score.violet + result.score.lime;

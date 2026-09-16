@@ -194,7 +194,7 @@ test-watch:
 	bun run test:watch
 
 clean:
-	rm -rf dist dist-bin dist-viewer dist-referee dist-practice dist-workspace dist-site
+	rm -rf dist dist-*
 	rm -f scratch/*.jsonl scratch/locframes.json
 	rm -rf scratch/frames scratch/rotframes
 	find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true

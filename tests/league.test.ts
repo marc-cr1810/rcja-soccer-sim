@@ -403,3 +403,39 @@ describe('a workspace', () => {
     expect((await call(port, '/workspace-api/open', { method: 'POST' })).status).toBe(401);
   });
 });
+
+describe('a demo arena on a league server', () => {
+  it('shows on the front page and takes the /live redirect when it is the only match', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'rcja-league-demo-'));
+    const submissionsDir = await mkdtemp(join(tmpdir(), 'rcja-sub-'));
+    const workspacesDir = await mkdtemp(join(tmpdir(), 'rcja-ws-'));
+    dirs.push(dataDir, submissionsDir, workspacesDir);
+
+    const server = new LeagueServer({
+      port: 0,
+      dataDir,
+      tournamentsDir: join(dataDir, 'tournaments'),
+      world: { realtime: false, submissionsDir, workspacesDir, pythonLibDir: PYTHON_LIB_DIR },
+      settings: {
+        demo: { on: true, bots: 'reference', home: 'Violet', away: 'Lime', halfSeconds: 2, league: null, gapSeconds: 0 },
+      },
+    });
+    servers.push(server);
+    const port = await server.listen();
+
+    await server.openDemo();
+
+    // The front page's "now playing" band carries it, marked as an exhibition.
+    const front = await call(port, '/api/front');
+    const live = front.payload.live as { demo?: boolean; home: string; url: string }[];
+    const demo = live.filter((one) => one.demo);
+    expect(demo).toHaveLength(1);
+    expect(demo[0]!.home).toBe('Violet');
+
+    // With only the demo playing, `/live` goes straight to it — it is what a
+    // bookmark to the hall screen means.
+    const redirect = await fetch(`http://127.0.0.1:${port}/live`, { redirect: 'manual' });
+    expect(redirect.status).toBe(302);
+    expect(redirect.headers.get('location')).toBe(demo[0]!.url);
+  }, 60_000);
+});

@@ -238,6 +238,34 @@ describe('the report', () => {
   it('says so plainly when there is nothing wrong', () => {
     expect(formatBench(skeleton())).toContain('nothing flagged');
   });
+
+  it('displays per-half scores and ball distribution histogram', () => {
+    const result = skeleton();
+    result.half1GoalsFor = 2;
+    result.half1GoalsAgainst = 0;
+    result.half2GoalsFor = 1;
+    result.half2GoalsAgainst = 1;
+    result.ball.distribution = {
+      parkedPercent: 25,
+      bins: [
+        { min: -1000, max: -800, label: 'own goal', percent: 2 },
+        { min: -800, max: -600, label: 'def zone', percent: 5 },
+        { min: -600, max: -400, label: 'def third', percent: 8 },
+        { min: -400, max: -200, label: 'def mid', percent: 11 },
+        { min: -200, max: 0, label: 'def centre', percent: 14 },
+        { min: 0, max: 200, label: 'att centre', percent: 14 },
+        { min: 200, max: 400, label: 'att mid', percent: 10 },
+        { min: 400, max: 600, label: 'att third', percent: 6 },
+        { min: 600, max: 800, label: 'att zone', percent: 3 },
+        { min: 800, max: 1000, label: 'opp goal', percent: 2 },
+      ],
+    };
+    const text = formatBench(result);
+    expect(text).toContain('H1: 2-0, H2: 1-1');
+    expect(text).toContain('ball distribution:   centre spot (parked): 25%');
+    expect(text).toContain('[-1000,  -800] own goal');
+    expect(text.split('\n').every((line) => line.length < 120)).toBe(true);
+  });
 });
 
 function skeleton(): BenchResult {
@@ -274,8 +302,8 @@ function skeleton(): BenchResult {
     kickoffs: [],
     findings: [],
     scores: [
-      { seed: 1, for: 3, against: 1 },
-      { seed: 2, for: 3, against: 1 },
+      { seed: 1, for: 3, against: 1, half1: { for: 2, against: 0 }, half2: { for: 1, against: 1 } },
+      { seed: 2, for: 3, against: 1, half1: { for: 1, against: 1 }, half2: { for: 2, against: 0 } },
     ],
   };
 }

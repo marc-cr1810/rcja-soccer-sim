@@ -167,11 +167,13 @@ is replayed.
 
 ## Arenas, and how many of them
 
-An **arena** is one child process holding one world: a fixture from the draw, or
-a practice field somebody opened. They are reached under `/a/<id>/` through the
-one port the venue configured, so a robot on a student's laptop still has
-somewhere to connect and the venue still opens one hole in one firewall.
-`/f/<id>/` keeps working, because it is in the docs and in students' history.
+An **arena** is one child process holding one world: a fixture from the draw, a
+practice field somebody opened, or — if the venue turned it on — a **demo**
+arena that plays back-to-back matches for a hall screen. They are reached under
+`/a/<id>/` through the one port the venue configured, so a robot on a student's
+laptop still has somewhere to connect and the venue still opens one hole in one
+firewall. `/f/<id>/` keeps working, because it is in the docs and in students'
+history.
 
 **Arenas are not persisted.** A league server going down takes every arena with
 it — there is nothing meaningful to resume a physics loop and four sandboxed
@@ -214,6 +216,15 @@ ordinary file, editable by hand:
     "graceMins": 5,
     "perTeam": 1,
     "claimSecs": 90
+  },
+  "demo": {
+    "on": false,
+    "bots": "reference",
+    "home": "Violet",
+    "away": "Lime",
+    "halfSeconds": 300,
+    "league": null,
+    "gapSeconds": 3
   }
 }
 ```
@@ -260,6 +271,44 @@ the server at a time.
 front of the queue before it passes to the next. It is held rather than opened
 because opening a field for a team who has gone home starts an idle clock on an
 empty field and stalls everyone behind them for the whole quiet period.
+
+### The demo arena — football for the hall screen
+
+`demo.on: true` keeps one arena playing back-to-back matches at wall-clock
+speed, *forever*, whether or not a draw is running. It kicks off its own matches
+and records no results — it is an attraction, not a record — and the whole point
+is that the screen never sits still. A venue with one hall screen and a demo
+running has football to watch all day without anybody restarting anything.
+
+It takes one arena slot of its own: **`arenas.max` must leave room for it next
+to `concurrentFixtures`**, or a fixture waits behind it while the demo plays —
+the server says exactly this at startup if it is the case.
+
+- **`bots`** — who fills the seats.
+  - `"reference"` (the default): the built-in agent plays itself, and nothing
+    needs to be spawned.
+  - `"examples"`: the repository's own `python/examples` line-up (striker and
+    keeper, both sides) joins as four remote seats.
+  - A bot-roster name, e.g. `"lab-rat"`: that deliberately poor bot against the
+    built-in reference agent.
+- **`home` / `away`** — what the two sides are called on the card.
+- **`halfSeconds`** — a simulated half; the match is played at wall-clock speed,
+  so 300 seconds a half is ten minutes in the hall.
+- **`league`** — the rule set; `null` is the default league.
+- **`gapSeconds`** — pause between matches, so the hall can read the table.
+
+Every dial is also a flag for one run: `--demo` (pass `false` to turn off),
+`--demo-bots`, `--demo-home`, `--demo-away`, `--demo-half`, `--demo-league`,
+`--demo-gap`. A demo on a live venue shows on the front page and `/live` with an
+*Exhibition* tag — and when it is the only thing playing, `/live` goes straight
+to it.
+
+Two caveats, honestly. The `examples` line-up needs `python3` on the venue
+machine, and its robots join as ordinary **remote seats** — exactly the way four
+laptops join — so they are *not* wrapped in a seat's sandbox grant. Standalone
+for a laptop that does not have them: `bun run cli arena --kind demo`. And a
+demo never plays a team's pushed submission; submissions are for matches and
+rehearsals.
 
 A broken `league.json` does not stop the server. It starts on the defaults and
 prints what it ignored, because an organiser with a stray comma twenty minutes

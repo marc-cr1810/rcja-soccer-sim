@@ -16,10 +16,13 @@ import { Noise } from '../src/sensors';
 import {
   addSeed,
   bumpSeedValue,
+  commitSeed,
+  deriveSeed,
   foldSeed,
   formatSeed,
   formatSeedValue,
   parseSeed,
+  placementJitter,
   streamSeed,
   toSeed,
   unitNormal,
@@ -213,5 +216,48 @@ describe('a 64-bit seed reaches a whole match', () => {
     // high one are the exact seeding the serve loop hands them, and they must
     // not be identical matches.
     expect(a.course).not.toEqual(b.course);
+  });
+});
+
+describe('cryptographic and fairness seed derivation', () => {
+  it('deriveSeed produces distinct, reproducible 64-bit seeds', () => {
+    const s1 = deriveSeed(1, 'fixture', 'A', 'B', 0);
+    const s2 = deriveSeed(1, 'fixture', 'A', 'B', 1);
+    const s3 = deriveSeed(1, 'fixture', 'B', 'A', 0);
+    const s1Again = deriveSeed(1, 'fixture', 'A', 'B', 0);
+
+    expect(s1).toEqual(s1Again);
+    expect(s1).not.toEqual(s2);
+    expect(s1).not.toEqual(s3);
+    expect(s2).not.toEqual(s3);
+  });
+
+  it('commitSeed is invariant to key order and sensitive to submission hashes', () => {
+    const a = commitSeed(42, { 'violet-1': 'hashA', 'lime-1': 'hashB' });
+    const b = commitSeed(42, { 'lime-1': 'hashB', 'violet-1': 'hashA' });
+    const c = commitSeed(42, { 'violet-1': 'hashA', 'lime-1': 'hashDifferent' });
+
+    expect(a).toEqual(b);
+    expect(a).not.toEqual(c);
+  });
+
+  it('placementJitter is stateless, order-independent, and bounded in [-1, 1]', () => {
+    expect(placementJitter(undefined, 0, 1)).toBe(0);
+
+    const val1 = placementJitter(12345, 0, 1);
+    const val2 = placementJitter(12345, 0, 2);
+    // Order of evaluation does not change values
+    expect(placementJitter(12345, 0, 2)).toBe(val2);
+    expect(placementJitter(12345, 0, 1)).toBe(val1);
+
+    expect(val1).toBeGreaterThanOrEqual(-1);
+    expect(val1).toBeLessThanOrEqual(1);
+    expect(val2).toBeGreaterThanOrEqual(-1);
+    expect(val2).toBeLessThanOrEqual(1);
+    expect(val1).not.toBe(val2);
+
+    // Later restarts are distinct from earlier ones
+    const restart1 = placementJitter(12345, 1, 1);
+    expect(restart1).not.toBe(val1);
   });
 });

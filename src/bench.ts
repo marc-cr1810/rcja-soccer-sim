@@ -183,6 +183,14 @@ export interface BallTelemetry {
   outByRobot: Record<string, number>;
   /** Out of plays where the ball was travelling fast: a shot rather than a dribble. */
   outWhileFast: number;
+  /**
+   * Spatial histogram of ball position along the pitch (-1000 mm to +1000 mm),
+   * signed towards the attacking goal of the team under test.
+   */
+  distribution?: {
+    parkedPercent: number;
+    bins: { min: number; max: number; label: string; percent: number }[];
+  };
 }
 
 export interface SensorAudit {
@@ -199,6 +207,14 @@ export interface SensorAudit {
   lineUnderChassis: number;
 }
 
+export interface MatchScore {
+  seed: SeedInput;
+  for: number;
+  against: number;
+  half1?: { for: number; against: number };
+  half2?: { for: number; against: number };
+}
+
 export interface BenchResult {
   matches: number;
   halfSeconds: number;
@@ -208,6 +224,12 @@ export interface BenchResult {
   /** Goals, per match, for and against the programs under test. */
   goalsFor: number;
   goalsAgainst: number;
+  /** Goals per match in Half 1, for and against the programs under test. */
+  half1GoalsFor?: number;
+  half1GoalsAgainst?: number;
+  /** Goals per match in Half 2, for and against the programs under test. */
+  half2GoalsFor?: number;
+  half2GoalsAgainst?: number;
   /** Referee calls per match, by kind. */
   calls: Record<string, number>;
   /** Calls per match charged to the team under test. */
@@ -219,7 +241,7 @@ export interface BenchResult {
   kickoffs: KickOffTelemetry[];
   findings: Finding[];
   /** Per-seed scorelines, so a result that hangs on one match is obvious. */
-  scores: { seed: SeedInput; for: number; against: number }[];
+  scores: MatchScore[];
 }
 
 export interface Finding {
@@ -333,6 +355,8 @@ export class Sampler {
   readonly robots = new Map<string, Accumulator>();
   readonly kicks = new Map<string, KickTelemetry>();
   ballSamples = 0;
+  ballParked = 0;
+  readonly ballHist: number[] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
   ballX = 0;
   ballAttack = 0;
   ballOwn = 0;
@@ -449,11 +473,19 @@ export class Sampler {
     this.trackKick(match);
 
     this.ballSamples++;
+    const signedX = ball.x * testedSign;
     // Signed towards the goal under attack, not towards +x, so the two halves
     // average together instead of cancelling out.
-    this.ballX += ball.x * testedSign;
-    if (ball.x * testedSign > THIRD) this.ballAttack++;
-    if (ball.x * testedSign < -THIRD) this.ballOwn++;
+    this.ballX += signedX;
+    if (signedX > THIRD) this.ballAttack++;
+    if (signedX < -THIRD) this.ballOwn++;
+
+    if (Math.abs(ball.x) < 1 && Math.abs(ball.z) < 1) {
+      this.ballParked++;
+    } else {
+      const idx = Math.max(0, Math.min(9, Math.floor((signedX + 1000) / 200)));
+      this.ballHist[idx] = (this.ballHist[idx] ?? 0) + 1;
+    }
 
     for (const robot of world.robots) {
       const acc = this.robots.get(robot.id) ?? blank(robot.x, robot.z);
@@ -859,10 +891,17 @@ export async function runBench(
         observe: (match) => sampler.step(match),
       });
 
+      const h1For = result.goals.filter((g) => g.team === testedSide && g.half === 1).length;
+      const h1Against = result.goals.filter((g) => g.team === otherSide && g.half === 1).length;
+      const h2For = result.goals.filter((g) => g.team === testedSide && g.half === 2).length;
+      const h2Against = result.goals.filter((g) => g.team === otherSide && g.half === 2).length;
+
       scores.push({
         seed,
         for: result.score[testedSide],
         against: result.score[otherSide],
+        half1: { for: h1For, against: h1Against },
+        half2: { for: h2For, against: h2Against },
       });
       for (const id of seats) {
         const slot = result.slots[id];
@@ -872,7 +911,10 @@ export async function runBench(
         bag.worstRun = Math.max(bag.worstRun, slot.worstRun);
         bag.errors += slot.errors;
       }
-      log(`  seed ${formatSeedValue(seed)}: ${result.score[testedSide]} - ${result.score[otherSide]}`);
+      log(
+        `  seed ${formatSeedValue(seed)}: ${result.score[testedSide]} - ${result.score[otherSide]}` +
+          `  (H1: ${h1For}-${h1Against}, H2: ${h2For}-${h2Against})`,
+      );
     }
 
     return aggregate(opts, seats, testedSide, samplers, scores, slotReports);
@@ -1007,6 +1049,32 @@ function aggregate(
     }
   }
 
+  const totalParked = sum((s) => s.ballParked as never);
+  const histCounts = Array.from({ length: 10 }, (_, i) =>
+    sum((s) => (s.ballHist[i] ?? 0) as never),
+  );
+  const BIN_RANGES: [number, number, string][] = [
+    [-1000, -800, 'own goal'],
+    [-800, -600, 'def zone'],
+    [-600, -400, 'def third'],
+    [-400, -200, 'def mid'],
+    [-200, 0, 'def centre'],
+    [0, 200, 'att centre'],
+    [200, 400, 'att mid'],
+    [400, 600, 'att third'],
+    [600, 800, 'att zone'],
+    [800, 1000, 'opp goal'],
+  ];
+  const distribution = {
+    parkedPercent: pct(totalParked, ballSamples),
+    bins: BIN_RANGES.map(([min, max, label], i) => ({
+      min,
+      max,
+      label,
+      percent: pct(histCounts[i] ?? 0, ballSamples),
+    })),
+  };
+
   const result: BenchResult = {
     matches: n,
     halfSeconds: opts.halfSeconds,
@@ -1015,6 +1083,10 @@ function aggregate(
     tested: seats,
     goalsFor: Math.round((scores.reduce((a, s) => a + s.for, 0) / n) * 10) / 10,
     goalsAgainst: Math.round((scores.reduce((a, s) => a + s.against, 0) / n) * 10) / 10,
+    half1GoalsFor: Math.round((scores.reduce((a, s) => a + (s.half1?.for ?? 0), 0) / n) * 10) / 10,
+    half1GoalsAgainst: Math.round((scores.reduce((a, s) => a + (s.half1?.against ?? 0), 0) / n) * 10) / 10,
+    half2GoalsFor: Math.round((scores.reduce((a, s) => a + (s.half2?.for ?? 0), 0) / n) * 10) / 10,
+    half2GoalsAgainst: Math.round((scores.reduce((a, s) => a + (s.half2?.against ?? 0), 0) / n) * 10) / 10,
     calls,
     callsAgainstUs,
     ball: {
@@ -1026,6 +1098,7 @@ function aggregate(
       overEndline: Math.round((sum((s) => s.overEndline as never) / n) * 10) / 10,
       outWhileFast: Math.round((sum((s) => s.outWhileFast as never) / n) * 10) / 10,
       outByRobot,
+      distribution,
     },
     kicks,
     robots,
@@ -1388,11 +1461,23 @@ export function formatBench(r: BenchResult, baseline?: BenchResult): string {
     `  ${r.matches} matches of 2x${r.halfSeconds}s v ${r.opponent}` +
       `   sensors ${r.idealSensors ? 'ideal' : 'noisy'}   testing ${r.tested.join(' ')}`,
   );
+  const halfBreakdown =
+    r.half1GoalsFor !== undefined && r.half2GoalsFor !== undefined
+      ? `   (H1: ${r.half1GoalsFor}-${r.half1GoalsAgainst}, H2: ${r.half2GoalsFor}-${r.half2GoalsAgainst})`
+      : '';
+  const scoreDetails = r.scores
+    .map((s) =>
+      s.half1 && s.half2 && r.scores.length <= 4
+        ? `${s.for}-${s.against} [${s.half1.for}-${s.half1.against}, ${s.half2.for}-${s.half2.against}]`
+        : `${s.for}-${s.against}`,
+    )
+    .join('  ');
   out.push(`  ${BAR}`);
   out.push(
     `  SCORE  ${r.goalsFor} - ${r.goalsAgainst} per match` +
       delta(r.goalsFor, baseline?.goalsFor, 'up') +
-      `      (${r.scores.map((s) => `${s.for}-${s.against}`).join('  ')})`,
+      halfBreakdown +
+      `      (${scoreDetails})`,
   );
 
   // -- what the referee had to do ------------------------------------------
@@ -1442,6 +1527,17 @@ export function formatBench(r: BenchResult, baseline?: BenchResult): string {
     `  ball up-field:       ${r.ball.meanX} mm   in your attacking third ${r.ball.inTestedAttackThird}%` +
       `   in your own ${r.ball.inTestedOwnThird}%`,
   );
+  if (r.ball.distribution) {
+    const dist = r.ball.distribution;
+    out.push(`  ball distribution:   centre spot (parked): ${dist.parkedPercent}%`);
+    const maxBar = 20;
+    for (const b of dist.bins) {
+      const barLen = Math.min(maxBar, Math.round((b.percent / 100) * maxBar * 3));
+      const bar = '█'.repeat(barLen);
+      const range = `[${String(b.min).padStart(5)}, ${String(b.max).padStart(5)}]`;
+      out.push(`    ${range} ${b.label.padEnd(11)} ${b.percent.toFixed(1).padStart(5)}%  ${bar}`);
+    }
+  }
 
   // -- teamwork ---------------------------------------------------------------
   // "relayed" is ground truth from the wire (a `say` with a `ball` in it, any

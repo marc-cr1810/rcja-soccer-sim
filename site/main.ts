@@ -198,6 +198,8 @@ interface Live {
   clock: number;
   half: 1 | 2;
   running: boolean;
+  /** A demo attraction: no fixture behind it, and it plays forever. */
+  demo?: boolean;
 }
 
 interface Standing {
@@ -256,12 +258,17 @@ function scoreline(sides: {
 function liveScoreline(live: Live): string {
   const half = `half ${live.half}`;
   return scoreline({
-    href: `/m/${encodeURIComponent(live.fixtureId)}`,
+    // A demo has no match page behind it — the arena viewer is the page.
+    href: live.demo ? live.url : `/m/${encodeURIComponent(live.fixtureId)}`,
     home: live.home,
     away: live.away,
     homeGoals: live.score.violet,
     awayGoals: live.score.lime,
-    state: [live.running ? 'live' : 'stopped', half, clock(live.clock)],
+    state: [
+      live.demo ? 'Exhibition' : live.running ? 'live' : 'stopped',
+      half,
+      clock(live.clock),
+    ],
     live: live.running,
   });
 }

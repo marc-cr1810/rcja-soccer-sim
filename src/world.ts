@@ -37,6 +37,7 @@ import {
   type Body,
 } from './physics';
 import { openDrive, stepDrive, type DriveSpec } from './drive';
+import { placementJitter } from './rand';
 
 export type TeamId = 'violet' | 'lime';
 
@@ -335,25 +336,6 @@ function separateAtRestart(robots: Robot[]): void {
   }
 }
 
-/**
- * A small deterministic source of -1..1, for restart placement.
- *
- * Returns 0 for ever when no seed is given, which is the old exactly-on-the-
- * marks behaviour, so nothing that does not ask for variation gets any.
- */
-function makePlacementRandom(seed: number | undefined): () => number {
-  if (seed === undefined) return () => 0;
-  // mulberry32: tiny, well-distributed, and the same on every machine, which
-  // a result somebody is expected to reproduce needs.
-  let a = (seed ^ 0x9e3779b9) >>> 0;
-  return () => {
-    a = (a + 0x6d2b79f5) >>> 0;
-    let t = a;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return (((t ^ (t >>> 14)) >>> 0) / 4294967296) * 2 - 1;
-  };
-}
 
 
 export class World {
@@ -449,14 +431,8 @@ export class World {
    */
   private reportedOutOfPlay = false;
 
-  /**
-   * Where the legal slack in a restart placement comes from.
-   *
-   * Its own stream, advanced only by `resetRobots`, so adding placement
-   * variation does not shift any other seeded stream and a match with it off
-   * is exactly the match it always was.
-   */
-  private placement: () => number;
+  /** Count of restarts placed, providing stateless, order-independent jitter. */
+  private restartCount = 0;
 
   /**
    * Per-match ball rolling friction multiplier. Derived from the match seed
@@ -468,7 +444,6 @@ export class World {
 
   constructor(config: MatchConfig) {
     this.config = config;
-    this.placement = makePlacementRandom(config.placementSeed);
     this.commsEnabled = config.commsEnabled ?? config.league.commsAllowed;
     this.ballFriction = config.ballFriction ?? 1;
     this.ballBounce = BALL_BOUNCE;
@@ -655,34 +630,39 @@ export class World {
     // amounts are deliberately small - enough that no two restarts play out
     // the same, not so much that a team's opening is a different problem each
     // time.
-    const jitter = (mm: number): number => this.placement() * mm;
+    const rIdx = this.restartCount;
+    const pSeed = this.config.placementSeed;
+    const jitter = (key: number, mm: number): number =>
+      placementJitter(pSeed, rIdx, key) * mm;
+
     // The striker taking the kick-off keeps its standoff: 5.4.7 is decided by
     // the gap to the ball, so that is the one number not to move. Across the
     // ball is free.
-    const kickerZ = jitter(35);
+    const kickerZ = jitter(0, 35);
     // The waiting striker has the whole width of the box front to wait on, and
     // room to stand off the line, as long as its body still overlaps the box.
-    const waitingZ = jitter(220);
-    const waitingBack = jitter(30);
+    const waitingZ = jitter(1, 220);
+    const waitingBack = jitter(2, 30);
     const strikerFor = (team: TeamId, sign: 1 | -1): { x: number; z: number } =>
       kickingOff === team
         ? { x: sign * kickoffX, z: kickerZ }
         : { x: sign * (waiting - Math.abs(waitingBack)), z: waitingZ };
 
     // A keeper may stand anywhere in front of its goal; off-centre is normal.
-    // Drawn per keeper rather than once for both, or the two ends start as
-    // exact reflections of each other every time - which is a symmetry real
-    // play does not have, and quietly makes the two halves of the field less
-    // independent than the variation was added to make them.
-    const keeperFor = (sign: 1 | -1): { x: number; z: number } => ({
-      x: sign * (goalieX + Math.abs(jitter(25))),
-      z: jitter(60),
-    });
+    // Drawn per keeper with symmetric keys (violet: 3, 4; lime: 5, 6) so
+    // evaluation order never introduces a bias.
+    const keeperFor = (isViolet: boolean, sign: 1 | -1): { x: number; z: number } => {
+      const baseKey = isViolet ? 3 : 5;
+      return {
+        x: sign * (goalieX + Math.abs(jitter(baseKey, 25))),
+        z: jitter(baseKey + 1, 60),
+      };
+    };
 
     const violetS = strikerFor('violet', violetSign);
-    const violetK = keeperFor(violetSign);
+    const violetK = keeperFor(true, violetSign);
     const limeS = strikerFor('lime', limeSign);
-    const limeK = keeperFor(limeSign);
+    const limeK = keeperFor(false, limeSign);
     // Facing up the field, towards this team's current attacking end.
     const facing = (sign: 1 | -1): number => (sign < 0 ? 0 : Math.PI);
 
@@ -701,15 +681,55 @@ export class World {
 
   /** Put an arrangement out on the field and reset everything a restart resets. */
   private applyArrangement(arrangement: Arrangement, kickingOff: TeamId): void {
+    this.restartCount++;
     // A robot still serving a 5.7 stand-down does not get a free pass just
     // because some restart repositions everyone else - only returnRobot()
     // (5.7.4) brings it back, automatically or by a referee's hand. Without
     // this, any kick-off - including a referee's own, at the top of a half -
     // would silently reinstate a robot mid-penalty.
-    const stillRemoved = new Map(this.robots.filter((r) => r.removed).map((r) => [r.id, r]));
+    const stillRemoved = new Map(
+      this.robots
+        .filter((r) => r.removed)
+        .map((r) => [
+          r.id,
+          {
+            penaltyRemaining: r.penaltyRemaining,
+            removalRule: r.removalRule,
+            removalReason: r.removalReason,
+          },
+        ]),
+    );
+    const existingRobots = new Map(this.robots.map((r) => [r.id, r]));
     const mass = robotMass(this.config.league);
 
-    this.robots = arrangement.robots.map((spec) => makeRobot(spec, mass));
+    this.robots = arrangement.robots.map((spec) => {
+      const existing = existingRobots.get(spec.id);
+      if (existing) {
+        existing.x = spec.x;
+        existing.z = spec.z;
+        existing.vx = 0;
+        existing.vz = 0;
+        existing.heading = spec.heading;
+        existing.isGoalie = spec.isGoalie;
+        existing.mass = mass;
+        existing.radius = ROBOT_RADIUS;
+        existing.omega = 0;
+        existing.drive = openDrive();
+        existing.motors = [0, 0, 0, 0];
+        existing.wheelSpeeds = [0, 0, 0, 0];
+        existing.inGoalAreaFor = 0;
+        existing.whollyOutFor = 0;
+        existing.sinceOpponentContact = 99;
+        existing.inactiveGoalieFor = 0;
+        existing.manual = false;
+        existing.removed = false;
+        existing.penaltyRemaining = 0;
+        existing.removalRule = undefined;
+        existing.removalReason = undefined;
+        return existing;
+      }
+      return makeRobot(spec, mass);
+    });
     // Whatever the draw, nobody starts inside anybody: the separation pass
     // would otherwise shove them apart before the whistle and the restart
     // would not be the one that was set. Only ever the two of a non-kicking

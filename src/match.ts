@@ -120,6 +120,14 @@ export interface MatchOptions {
   inclined?: boolean;
   idealSensors?: boolean;
   /**
+   * Per-match ball rolling friction multiplier.
+   *
+   * If omitted, derived deterministically from `seed` (0.9 to 1.1). Passing this
+   * allows multi-leg tournament fixtures to share the exact same pitch friction
+   * across home and away legs while varying sensor noise and restarts.
+   */
+  ballFriction?: number;
+  /**
    * A human starts each half and can pause, resume, abandon, award a
    * kick-off, remove/return a robot, or correct the score — but does not
    * have to do any of it. Goals, restarts, lack of progress, multiple
@@ -189,7 +197,7 @@ export interface MatchResult {
   score: Record<TeamId, number>;
   /** Seconds of match time played. */
   clock: number;
-  goals: { team: TeamId; at: number }[];
+  goals: { team: TeamId; at: number; half: 1 | 2 }[];
   /** Per-robot connection health, for the match record. */
   slots: Record<string, ReturnType<AgentSlot['report']>>;
   /**
@@ -286,7 +294,7 @@ export class Match {
    * inside a single half - the granularity a mercy rule needs.
    */
   private slotOrderFlipped = false;
-  private readonly goals: { team: TeamId; at: number }[] = [];
+  private readonly goals: { team: TeamId; at: number; half: 1 | 2 }[] = [];
   private lastScore = { violet: 0, lime: 0 };
   private readonly calls: Record<string, number> = {};
   private readonly eventLog: MatchEvent[] = [];
@@ -320,7 +328,9 @@ export class Match {
       // Every match gets its own carpet. Drawn from the seed so a replay is
       // the same carpet, and drawn from the whole 64-bit seed (not the folded
       // placement seed) so the same restart placement still varies the roll.
-      ballFriction: 0.9 + (foldSeed(streamSeed(seed, BALL_FRICTION_STREAM)) / 0x100000000) * 0.2,
+      ballFriction:
+        opts.ballFriction ??
+        0.9 + (foldSeed(streamSeed(seed, BALL_FRICTION_STREAM)) / 0x100000000) * 0.2,
       inclined: opts.inclined ?? false,
       commsEnabled: league.commsAllowed,
       autoResolve: opts.autoResolve,
@@ -621,7 +631,7 @@ export class Match {
     for (const team of ['violet', 'lime'] as const) {
       while (this.world.score[team] > this.lastScore[team]) {
         this.lastScore[team]++;
-        this.goals.push({ team, at: this.world.clock });
+        this.goals.push({ team, at: this.world.clock, half: this.world.half });
       }
     }
   }
@@ -668,13 +678,25 @@ export class Match {
   private makeSlot(id: string, transport: Transport, motors = MOTOR_COUNT): Slot {
     return {
       id,
-      senses: new Senses(withWord(this.seed, hash(id)), motors, this.idealSensors),
+      senses: new Senses(this.seedForSlot(id), motors, this.idealSensors),
       agent: new AgentSlot(transport),
       kickCooldown: 0,
       command: { motors: [0, 0, 0, 0] },
       wasConnected: true,
       wasRemoved: false,
     };
+  }
+
+  /**
+   * Symmetrized seed derivation per slot.
+   *
+   * Rather than binding `'violet-1'` permanently to a hardcoded salt across
+   * all matches, the parity bit from the 64-bit seed maps sides symmetrically.
+   * Over random seeds, neither color is preferentially mapped to the "first"
+   * noise stream, while any single seed remains 100% deterministic and replayable.
+   */
+  private seedForSlot(id: string): Seed {
+    return withWord(this.seed, hash(id));
   }
 
   /**

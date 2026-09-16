@@ -12,12 +12,17 @@
  * — it owns accounts, the draw, the schedule and the front page, and every
  * world it shows is a child running the same binary a team runs on a laptop.
  *
- * An **arena** is that child. Two kinds, differing in almost nothing:
+ * An **arena** is that child. Three kinds, differing in almost nothing:
  *
  * - a **fixture** arena comes from the draw, is refereed, writes a result, and
  *   is started and stopped by whoever is running the tournament;
  * - a **practice** arena comes from somebody pressing a button, is refereed by
- *   nobody, is never scored, and closes itself once nobody is using it.
+ *   nobody, is never scored, and closes itself once nobody is using it;
+ * - a **demo** arena exists to fill a hall screen: open while the draw runs or
+ *   when nothing is on, it plays back-to-back matches at wall-clock speed and
+ *   is never scored either. It counts against the same budget, is exempt from
+ *   the idle sweep like a fixture, and is never refereed — a match it kicks
+ *   off starts itself.
  *
  * They are all reached through the one port the venue configured, because a
  * robot on a student's laptop has to reach a practice arena's `/agent` and the
@@ -46,6 +51,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
 import { sampleTree, usageBetween, type TreeSample, type Usage } from './usage';
+import type { LeagueId } from './leagues';
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
 
@@ -64,7 +70,7 @@ const SELF = process.execPath;
 const CLI = join(REPO_ROOT, 'src', 'cli.ts');
 
 /** What an arena is for. The difference is in who may act on it, not in the football. */
-export type ArenaKind = 'fixture' | 'practice';
+export type ArenaKind = 'fixture' | 'practice' | 'demo';
 
 export interface ArenaSupervisorOptions {
   /**
@@ -331,8 +337,24 @@ export class ArenaSupervisor {
    * open, and handing back a URL that 502s for the next second is worse than
    * taking the second here.
    */
-  async create(options: { kind: ArenaKind; owner?: string | null } = { kind: 'practice' }): Promise<ArenaInfo> {
-    const { kind } = options;
+  async create(options: {
+    kind?: ArenaKind;
+    owner?: string | null;
+    /**
+     * For a demo arena only: who plays, and how. The hub holds no opinions
+     * about sides or half-lengths — it passes the venue's on.
+     */
+    demo?: {
+      home: string;
+      away: string;
+      /** `reference`, `examples`, or a bot-roster name. */
+      bots: string;
+      halfSeconds: number;
+      league: LeagueId | null;
+      gapSeconds: number;
+    };
+  } = { kind: 'practice' }): Promise<ArenaInfo> {
+    const kind = options.kind ?? 'practice';
     const max = this.opts.maxArenas ?? DEFAULT_MAX_ARENAS;
     if (this.arenas.size >= max) {
       throw new Error(`this server is already running ${max} arenas`);
@@ -359,6 +381,16 @@ export class ArenaSupervisor {
     args.push('arena', '--kind', kind, '--port', String(port), '--die-with-parent');
     args.push('--scratch', scratch);
     if (kind === 'fixture') args.push('--referee-token', refereeToken);
+    if (kind === 'demo') {
+      const demo = options.demo;
+      if (!demo) throw new Error('a demo arena needs demo settings');
+      args.push('--demo-home', demo.home);
+      args.push('--demo-away', demo.away);
+      args.push('--demo-bots', demo.bots);
+      args.push('--demo-half', String(demo.halfSeconds));
+      if (demo.league !== null) args.push('--demo-league', demo.league);
+      args.push('--demo-gap', String(demo.gapSeconds));
+    }
     if (this.opts.submissionsDir) args.push('--submissions', this.opts.submissionsDir);
     if (this.opts.workspacesDir) {
       args.push('--workspaces-dir', resolve(this.opts.workspacesDir));

@@ -18,7 +18,7 @@
 
 import { award, blankStanding, compareStandings, invert, type Standing } from './ladder';
 import { slugifyTeam } from './manifest';
-import { addSeed, type SeedInput } from './rand';
+import { deriveSeed, foldSeed, type SeedInput } from './rand';
 import type { MatchResult } from './match';
 import type { LeagueId } from './leagues';
 
@@ -45,6 +45,10 @@ export interface Fixture {
    * draw.
    */
   seeds: SeedInput[];
+  /**
+   * Pitch ball rolling friction multiplier, shared across all legs of this fixture.
+   */
+  ballFriction?: number;
 }
 
 export interface Draw {
@@ -119,8 +123,6 @@ export interface DrawOptions {
   seed?: SeedInput;
 }
 
-/** Spacing between fixtures' seeds, as the ladder already uses. */
-const SEED_STRIDE = 7919;
 
 /**
  * Build the fixture list: every ordered pairing, both ways round.
@@ -144,19 +146,19 @@ export function makeDraw(entrants: string[], opts: DrawOptions): Draw {
   for (const home of unique) {
     for (const away of unique) {
       if (home === away) continue;
-      const index = fixtures.length;
+      // Derive an ungameable, uncorrelated fixture seed using SHA-256
+      const fixtureSeed = deriveSeed(baseSeed, opts.name, home, away);
+      const ballFriction = 0.9 + (foldSeed(deriveSeed(fixtureSeed, 'friction')) / 0x100000000) * 0.2;
       const seeds = Array<SeedInput>(legs);
       for (let leg = 0; leg < legs; leg++) {
-        seeds[leg] =
-          typeof baseSeed === 'number'
-            ? baseSeed + index * SEED_STRIDE + leg
-            : addSeed(addSeed(baseSeed, index * SEED_STRIDE), leg);
+        seeds[leg] = deriveSeed(fixtureSeed, 'leg', leg);
       }
       fixtures.push({
         id: `${slugifyTeam(home)}-v-${slugifyTeam(away)}`,
         home,
         away,
         seeds,
+        ballFriction,
       });
     }
   }

@@ -15,5 +15,5 @@ export default defineConfig({
   // both places, and the server redirects /practice to /practice/ so the
   // browser has a directory to resolve them against.
   base: './',
-  build: { outDir: '../dist-practice', emptyOutDir: true },
+  build: { outDir: '../dist/practice', emptyOutDir: true },
 });

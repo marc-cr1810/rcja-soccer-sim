@@ -9,5 +9,5 @@ export default defineConfig({
   // absolute base makes the last two fetch the *site's* /assets and arrive as
   // an unstyled page stuck on "connecting…".
   base: './',
-  build: { outDir: '../dist-viewer', emptyOutDir: true },
+  build: { outDir: '../dist/viewer', emptyOutDir: true },
 });

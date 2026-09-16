@@ -3,7 +3,7 @@
  * The practice console.
  *
  * A third client, on the same pattern as the referee's: its own HTML entry,
- * its own Vite build (`vite.practice.config.ts`, output to `dist-practice/`),
+ * its own Vite build (`vite.practice.config.ts`, output to `dist/practice/`),
  * and no import of anything under `viewer/` or `referee/`. It watches the
  * field over the same unauthenticated socket every spectator uses, and acts
  * through `POST /practice-api/*` — which exists only on a server that is a

@@ -22,6 +22,7 @@
 
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { isLeagueId, type LeagueId } from './leagues';
 
 /** Per-seat grants, from `src/lineup.ts` where they were constants. */
 export const DEFAULT_SEAT_CPU_PERCENT = 50;
@@ -90,9 +91,41 @@ export interface PracticeSettings {
   claimSecs: number;
 }
 
+/**
+ * A demo arena that plays forever, filling a hall screen when the draw is
+ * running or when nothing is on.
+ *
+ * The whole point is that the screen never sits still: one arena child runs
+ * back-to-back matches at wall-clock speed with a fresh seed every time, never
+ * recording a result. `bots` decides who plays — the built-in reference agent,
+ * one of the deliberately poor bots, or the four python example robots that
+ * join as remote seats.
+ */
+export interface DemoSettings {
+  /** Whether to keep a demo arena always playing, alongside the schedule. */
+  on: boolean;
+  /**
+   * Who fills the seats: `reference` (built-in vs built-in), `examples` (the
+   * repo's own `python/examples` line-up, both sides), or a bot-roster name
+   * (reference vs that bot).
+   */
+  bots: string;
+  /** The violet side's name on the card and in the team names. */
+  home: string;
+  /** The lime side. */
+  away: string;
+  /** Simulated seconds in a half. */
+  halfSeconds: number;
+  /** Which rule set; `null` means the default league. */
+  league: LeagueId | null;
+  /** Wall-clock pause between matches, so the hall can read the table. */
+  gapSeconds: number;
+}
+
 export interface LeagueSettings {
   arenas: ArenaSettings;
   practice: PracticeSettings;
+  demo: DemoSettings;
 }
 
 /** Where a value came from, for a console that has to be able to explain itself. */
@@ -120,6 +153,26 @@ export function defaultSettings(): LeagueSettings {
       concurrentFixtures: 2,
     },
     practice: { open: true, max: null, idleMins: 20, graceMins: 5, perTeam: 1, claimSecs: 90 },
+    demo: { on: false, bots: 'reference', home: 'Violet', away: 'Lime', halfSeconds: 300, league: null, gapSeconds: 3 },
+  };
+}
+
+/**
+ * Fill in defaults for whatever a caller passed, field by field.
+ *
+ * A `LeagueServer` constructor takes a settings object because a test wants to
+ * say "two practice fields and nothing else" without repeating the untouched
+ * halves of the file — so missing fields here are defaults, never `undefined`.
+ */
+export function mergeSettings(partial: Partial<LeagueSettings> | undefined): LeagueSettings {
+  const defaults = defaultSettings();
+  if (!partial) return defaults;
+  return {
+    ...defaults,
+    ...partial,
+    arenas: { ...defaults.arenas, ...partial.arenas },
+    practice: { ...defaults.practice, ...partial.practice },
+    demo: { ...defaults.demo, ...partial.demo },
   };
 }
 
@@ -191,6 +244,7 @@ export function loadSettings(dataDir: string, overrides: Partial<Flags> = {}): L
 
   const arenas = (raw.arenas ?? {}) as Record<string, unknown>;
   const practice = (raw.practice ?? {}) as Record<string, unknown>;
+  const demo = (raw.demo ?? {}) as Record<string, unknown>;
 
   const set = <K extends string>(path: K, used: boolean): void => {
     sources[path] = used ? 'file' : 'default';
@@ -246,6 +300,63 @@ export function loadSettings(dataDir: string, overrides: Partial<Flags> = {}): L
   settings.practice.claimSecs = Math.round(claim.value);
   set('practice.claimSecs', claim.used);
 
+  // Demo arena — a single, always-on, never-scored child that plays
+  // back-to-back matches for the hall screen.
+  if (typeof demo.on === 'boolean') {
+    settings.demo.on = demo.on;
+    set('demo.on', true);
+  } else {
+    if (demo.on !== undefined) complaints.push('demo.on must be true or false; using false');
+    set('demo.on', false);
+  }
+
+  if (typeof demo.bots === 'string' && demo.bots !== '') {
+    settings.demo.bots = demo.bots;
+    set('demo.bots', true);
+  } else {
+    if (demo.bots !== undefined) complaints.push('demo.bots must be a string; using "reference"');
+    set('demo.bots', false);
+  }
+
+  if (typeof demo.home === 'string' && demo.home !== '') {
+    settings.demo.home = demo.home;
+    set('demo.home', true);
+  } else {
+    if (demo.home !== undefined) complaints.push('demo.home must be a string; using "Violet"');
+    set('demo.home', false);
+  }
+
+  if (typeof demo.away === 'string' && demo.away !== '') {
+    settings.demo.away = demo.away;
+    set('demo.away', true);
+  } else {
+    if (demo.away !== undefined) complaints.push('demo.away must be a string; using "Lime"');
+    set('demo.away', false);
+  }
+
+  const demoHalf = readNumber(demo.halfSeconds, 'demo.halfSeconds', 300, { min: 30, max: 1800 }, complaints);
+  settings.demo.halfSeconds = Math.round(demoHalf.value);
+  set('demo.halfSeconds', demoHalf.used);
+
+  if (typeof demo.league === 'string') {
+    if (isLeagueId(demo.league)) {
+      settings.demo.league = demo.league;
+      set('demo.league', true);
+    } else {
+      complaints.push(`demo.league "${demo.league}" is not a known league; using the default`);
+      set('demo.league', false);
+    }
+  } else {
+    if (demo.league !== undefined && demo.league !== null) {
+      complaints.push('demo.league must be "lightweight" or "open"; using the default');
+    }
+    set('demo.league', false);
+  }
+
+  const demoGap = readNumber(demo.gapSeconds, 'demo.gapSeconds', 3, { min: 0, max: 60 }, complaints);
+  settings.demo.gapSeconds = Math.round(demoGap.value);
+  set('demo.gapSeconds', demoGap.used);
+
   applyFlags(settings, sources, overrides);
   return { settings, sources, file, complaints };
 }
@@ -259,6 +370,13 @@ export interface Flags {
   practiceMax: number;
   idleMins: number;
   perTeam: number;
+  demoOn: boolean;
+  demoBots: string;
+  demoHome: string;
+  demoAway: string;
+  demoHalf: number;
+  demoLeague: LeagueId | null;
+  demoGap: number;
 }
 
 function applyFlags(
@@ -279,6 +397,13 @@ function applyFlags(
   take(flags.practiceMax, 'practice.max', (v) => (settings.practice.max = v));
   take(flags.idleMins, 'practice.idleMins', (v) => (settings.practice.idleMins = v));
   take(flags.perTeam, 'practice.perTeam', (v) => (settings.practice.perTeam = v));
+  take(flags.demoOn, 'demo.on', (v) => (settings.demo.on = v));
+  take(flags.demoBots, 'demo.bots', (v) => (settings.demo.bots = v));
+  take(flags.demoHome, 'demo.home', (v) => (settings.demo.home = v));
+  take(flags.demoAway, 'demo.away', (v) => (settings.demo.away = v));
+  take(flags.demoHalf, 'demo.halfSeconds', (v) => (settings.demo.halfSeconds = v));
+  take(flags.demoLeague, 'demo.league', (v) => (settings.demo.league = v));
+  take(flags.demoGap, 'demo.gapSeconds', (v) => (settings.demo.gapSeconds = v));
 }
 
 /**

@@ -94,6 +94,15 @@ describe('a draw', () => {
     expect(makeDraw(['A', 'B'], { name: 'x' }).refereed).toBe(true);
     expect(makeDraw(['A', 'B'], { name: 'x', refereed: false }).refereed).toBe(false);
   });
+
+  it('provides a consistent pitch ballFriction across all legs of a fixture', () => {
+    const draw = makeDraw(['ACT', 'QLD'], { name: 'finals', legs: 3 });
+    for (const fixture of draw.fixtures) {
+      expect(fixture.ballFriction).toBeDefined();
+      expect(fixture.ballFriction).toBeGreaterThanOrEqual(0.9);
+      expect(fixture.ballFriction).toBeLessThanOrEqual(1.1);
+    }
+  });
 });
 
 describe('a best-of-three fixture', () => {

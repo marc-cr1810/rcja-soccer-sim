@@ -1,7 +1,7 @@
 import { defineConfig } from 'vite';
 
 // The referee console only, built as a genuinely separate bundle from the
-// spectator viewer (vite.config.ts / dist-viewer) — a different root, a
+// spectator viewer (vite.config.ts / dist/viewer) — a different root, a
 // different output directory, no shared entry — so the spectator bundle can
 // never end up carrying referee code or vice versa.
 export default defineConfig({
@@ -16,5 +16,5 @@ export default defineConfig({
   // been found by opening a bundle somewhere new; relative is the answer every
   // time, because the bundle does not get to know where it is mounted.
   base: './',
-  build: { outDir: '../dist-referee', emptyOutDir: true },
+  build: { outDir: '../dist/referee', emptyOutDir: true },
 });

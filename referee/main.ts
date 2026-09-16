@@ -3,7 +3,7 @@
  * The referee console.
  *
  * A second, separate client from the spectator viewer — its own HTML entry,
- * its own Vite build (`vite.referee.config.ts`, output to `dist-referee/`),
+ * its own Vite build (`vite.referee.config.ts`, output to `dist/referee/`),
  * and no import of anything under `viewer/`. PHASES.md is explicit that this
  * has to be a genuinely different surface, authenticated and never reachable
  * from the untrusted spectator bundle, not the same page with buttons added.

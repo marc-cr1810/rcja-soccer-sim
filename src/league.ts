@@ -48,7 +48,7 @@ import { randomBytes } from 'node:crypto';
 import { TeamApi } from './team-api';
 import { WorkspaceStore } from './workspace';
 import type { PlayRequest, PlayedMatch, ArenaState } from './arena';
-import { defaultSettings, type LeagueSettings, type SettingSource } from './settings';
+import { mergeSettings, type LeagueSettings, type SettingSource } from './settings';
 import { readMachine, resolveBudget, type Budget, type Machine } from './capacity';
 import { totalUsage } from './usage';
 import { Accounts, type Account } from './accounts';
@@ -123,7 +123,7 @@ export interface LeagueOptions {
    * against its own hardware, so there is one answer to "how many arenas may
    * run here" rather than one per caller.
    */
-  settings?: LeagueSettings;
+  settings?: Partial<LeagueSettings>;
   /** Where each setting came from, for a console that has to explain itself. */
   settingSources?: Record<string, SettingSource>;
   log?: (line: string) => void;
@@ -150,6 +150,8 @@ export interface LiveFixture {
   running: boolean;
   /** Simulated seconds per wall second, or `null` before a window closed. */
   fidelity: number | null;
+  /** `true` for a demo attraction — it has no fixture behind it. */
+  demo?: boolean;
 }
 
 /** A fixture in progress: which arena holds it, and what it last said. */
@@ -209,6 +211,11 @@ export class LeagueServer {
   private readonly fieldNotices = new Map<string, string>();
   /** Fields with a closing time on them, for the owner's dashboard. */
   private readonly closing = new Map<string, string>();
+  /** A demo arena, if one has been opened to fill a hall screen. */
+  private demoArena: { arenaId: string; state: ArenaState | null } | null = null;
+  private demoPoll: ReturnType<typeof setInterval> | null = null;
+  /** True once `close()` has been called, to avoid reopening a demo on shutdown. */
+  private closingLeague = false;
 
   constructor(private readonly opts: LeagueOptions) {
     this.log = opts.log ?? (() => {});
@@ -216,7 +223,7 @@ export class LeagueServer {
     this.workspaceRoot = opts.world.workspaceRoot ? resolve(opts.world.workspaceRoot) : null;
     this.accounts = new Accounts({ file: join(resolve(opts.dataDir), 'league.db') });
     this.authority = accountsAuthority(this.accounts);
-    this.settings = opts.settings ?? defaultSettings();
+    this.settings = mergeSettings(opts.settings);
     this.machine = readMachine();
     this.budget = resolveBudget(this.settings, this.machine);
     this.teams = new TeamApi({
@@ -327,6 +334,16 @@ export class LeagueServer {
     this.tenancy.forget(arena.id);
     this.fieldNotices.delete(arena.id);
     this.closing.delete(arena.id);
+    if (arena.kind === 'demo') {
+      this.stopDemoPoll();
+      this.demoArena = null;
+      // Reopen after a brief pause if still configured — the screen never sits
+      // still, and a crash is a miss, never a pause.
+      if (!this.closingLeague && this.settings.demo.on) {
+        setTimeout(() => void this.openDemo(), 5_000).unref?.();
+      }
+      return;
+    }
     if (arena.kind !== 'practice') return;
     const offer = this.tenancy.slotFreed();
     if (offer) {
@@ -372,6 +389,8 @@ export class LeagueServer {
   }
 
   async close(): Promise<void> {
+    this.closingLeague = true;
+    this.stopDemoPoll();
     this.bunServer?.stop(true);
     // Every arena dies with the hub, which is the honest thing: a child holds a
     // physics loop and four sandboxed interpreters, and there is nothing to
@@ -411,6 +430,65 @@ export class LeagueServer {
     if (!live) return;
     this.arenas.close(live.arenaId);
     this.liveFixtures.delete(fixtureId);
+  }
+
+  // ------------------------------------------------------------------- demo
+
+  /**
+   * Open a demo arena, if the venue wants one.
+   *
+   * A demo never records a result, so there is no `playLeg` or `closeFixture`
+   * — the child plays itself, and the hub just keeps the front page's "now
+   * playing" band up to date with a poll. Answers with the arena's relative
+   * URL, or `null` when no demo is configured or it could not open.
+   */
+  async openDemo(): Promise<string | null> {
+    if (!this.settings.demo.on || this.closingLeague) return null;
+    const demo = this.settings.demo;
+    try {
+      const arena = await this.arenas.create({
+        kind: 'demo',
+        demo: {
+          home: demo.home,
+          away: demo.away,
+          bots: demo.bots,
+          halfSeconds: demo.halfSeconds,
+          league: demo.league,
+          gapSeconds: demo.gapSeconds,
+        },
+      });
+      this.demoArena = { arenaId: arena.id, state: null };
+      this.log(`demo arena ${arena.id} playing ${demo.home} v ${demo.away} forever`);
+      this.demoPoll = setInterval(() => void this.pollDemo(), POLL_MS);
+      this.demoPoll.unref?.();
+      return `/a/${arena.id}/`;
+    } catch (err) {
+      this.log(`could not open the demo arena: ${(err as Error).message}`);
+      return null;
+    }
+  }
+
+  private async pollDemo(): Promise<void> {
+    if (!this.demoArena) return;
+    const port = this.arenas.portOf(this.demoArena.arenaId);
+    if (port === null) {
+      this.stopDemoPoll();
+      return;
+    }
+    try {
+      const answer = await fetch(`http://127.0.0.1:${port}/arena-api/state`);
+      const payload = (await answer.json()) as { state: ArenaState };
+      this.demoArena.state = payload.state;
+      this.arenas.reportFidelity(this.demoArena.arenaId, payload.state.fidelity);
+    } catch {
+      // A missed poll is not a failed match — and a demo is never a match.
+    }
+  }
+
+  private stopDemoPoll(): void {
+    if (this.demoPoll === null) return;
+    clearInterval(this.demoPoll);
+    this.demoPoll = null;
   }
 
   /**
@@ -464,7 +542,7 @@ export class LeagueServer {
 
   /** Everything in progress right now, as the front page wants it. */
   get live(): LiveFixture[] {
-    return [...this.liveFixtures.values()].map(({ fixture, arenaId, state }) => ({
+    const fixtures: LiveFixture[] = [...this.liveFixtures.values()].map(({ fixture, arenaId, state }) => ({
       fixtureId: fixture.id,
       arenaId,
       url: `/a/${arenaId}/`,
@@ -476,6 +554,23 @@ export class LeagueServer {
       running: state?.running ?? false,
       fidelity: state?.fidelity ?? null,
     }));
+    if (this.demoArena) {
+      const { state } = this.demoArena;
+      fixtures.push({
+        fixtureId: '',
+        arenaId: this.demoArena.arenaId,
+        url: `/a/${this.demoArena.arenaId}/`,
+        home: this.settings.demo.home,
+        away: this.settings.demo.away,
+        score: state?.score ?? { violet: 0, lime: 0 },
+        clock: state?.clock ?? 0,
+        half: state?.half ?? 1,
+        running: state?.running ?? false,
+        fidelity: state?.fidelity ?? null,
+        demo: true,
+      });
+    }
+    return fixtures;
   }
 
   /** The one playing this fixture, if one is. */

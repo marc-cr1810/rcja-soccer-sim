@@ -10,6 +10,8 @@
  * global `Math` source: the same `Seed` always produces the same numbers out.
  */
 
+import { createHash, randomBytes } from 'node:crypto';
+
 /**
  * The two 16-hex-digit hex seeds the CLI accepts and prints, as a pair of
  * 32-bit words. Stored rather than as a single number because a number keeps
@@ -58,6 +60,62 @@ export function addSeed(seed: Seed, n: number): Seed {
 /** Advance a seed by one, for a sequence of matches from an explicit `--seed`. */
 export function bumpSeedValue(value: SeedInput): SeedInput {
   return typeof value === 'number' ? value + 1 : addSeed(value, 1);
+}
+
+/** 64 fresh bits for one match, from the OS entropy pool. */
+export function matchSeed(): SeedInput {
+  const b = randomBytes(8);
+  return { hi: b.readUInt32BE(0), lo: b.readUInt32BE(4) };
+}
+
+/**
+ * Derive an uncorrelated, cryptographic 64-bit seed from a base seed and context tokens.
+ *
+ * Prevents seed snooping, predictability, and linear low-bit correlations in
+ * tournaments and fixture schedules. Uses SHA-256 for uniform bit avalanche.
+ */
+export function deriveSeed(base: SeedInput, ...contexts: (string | number)[]): Seed {
+  const s = toSeed(base);
+  const hash = createHash('sha256');
+  hash.update(formatSeed(s));
+  for (const c of contexts) {
+    hash.update(`:${c}`);
+  }
+  const buf = hash.digest();
+  return {
+    hi: buf.readUInt32BE(0),
+    lo: buf.readUInt32BE(4),
+  };
+}
+
+/**
+ * Commit-reveal seeding: fold code submission hashes into the match seed.
+ *
+ * Ensures that neither side can predict the match seed before submitting their code.
+ */
+export function commitSeed(base: SeedInput, submissions: Record<string, string>): Seed {
+  const keys = Object.keys(submissions).sort();
+  const tokens = keys.map((k) => `${k}=${submissions[k]}`);
+  return deriveSeed(base, 'commit', ...tokens);
+}
+
+/**
+ * Stateless, order-independent deterministic jitter for kick-off / restart placement.
+ *
+ * Returns a value in [-1, 1], or 0 if placementSeed is undefined.
+ * Unlike a stateful sequential PRNG, this function is order-independent:
+ * evaluating robot B before robot A, or scoring earlier in the match, does not
+ * shift or perturb the values computed for other restarts or robots.
+ */
+export function placementJitter(
+  placementSeed: number | undefined,
+  restartIndex: number,
+  slotKey: number,
+): number {
+  if (placementSeed === undefined) return 0;
+  const h1 = mix32((placementSeed ^ Math.imul(restartIndex, 0x9e3779b9)) >>> 0);
+  const h2 = mix32((h1 ^ Math.imul(slotKey, 0x6d2b79f5)) >>> 0);
+  return (h2 / 0x100000000) * 2 - 1;
 }
 
 /**

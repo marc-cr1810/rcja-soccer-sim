@@ -32,6 +32,13 @@ describe('the ladder runs', () => {
     for (const row of s.table) expect(row.played).toBe(2);
   });
 
+  it('supports twinSeeds to play home and away pairings with identical seeds', () => {
+    const entries = [reference(), bot('statue', () => [statue, statue])];
+    const s = runLadder(entries, { halfSeconds: 20, seed: 42, twinSeeds: true });
+    expect(s.matches).toBe(2);
+    for (const row of s.table) expect(row.played).toBe(2);
+  });
+
   it('awards three points for a win and one each for a draw', () => {
     const s = runLadder([reference(), bot('statue', () => [statue, statue])], {
       halfSeconds: 20,

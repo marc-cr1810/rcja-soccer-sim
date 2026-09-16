@@ -166,6 +166,13 @@ export function resolveBudget(settings: LeagueSettings, machine: Machine): Budge
     );
   }
 
+  if (settings.demo.on && spare < 1) {
+    warnings.push(
+      `the demo arena fills a hall screen and takes a slot of its own, but every one of the ${max} arenas is held for ${fixtures} fixtures. ` +
+        `Raise arenas.max by one or turn demo off — otherwise a fixture waits behind it.`,
+    );
+  }
+
   return {
     grant,
     guaranteed,

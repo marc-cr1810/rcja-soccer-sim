@@ -227,7 +227,7 @@ describe('the match server', () => {
   });
 
   it('refuses to serve files outside the viewer', async () => {
-    const server = new MatchServer({ port: 0, viewerRoot: 'dist-viewer', realtime: false });
+    const server = new MatchServer({ port: 0, viewerRoot: 'dist/viewer', realtime: false });
     servers.push(server);
     const port = await server.listen();
     const res = await fetch(`http://127.0.0.1:${port}/../package.json`);

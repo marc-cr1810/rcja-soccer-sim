@@ -20,6 +20,8 @@ import { HALF_LENGTH, HALF_WIDTH, WALL_X, WALL_Z } from './field';
 import { IR_REFERENCE_RANGE } from './sensors';
 import type { ActuatorFrame, SensorFrame } from './protocol';
 import type { Agent } from './agent';
+import { botRoster } from './bots';
+import type { MatchAgents } from './match';
 
 const ROBOT_RADIUS = 110;
 
@@ -676,4 +678,30 @@ export function referenceTeam(team: 'violet' | 'lime', skill = 1) {
     [`${team}-1`]: new ReferenceAgent({ team, number: 1, role: 'striker', skill }),
     [`${team}-2`]: new ReferenceAgent({ team, number: 2, role: 'goalie', skill }),
   } as Record<string, ReferenceAgent>;
+}
+
+/**
+ * Who is playing, as the four seats.
+ *
+ * Until submitted programs can be loaded (or a demo asks for the Python
+ * examples) the reference agent fills both sides, which is what an organiser
+ * wants on the screen while the hall fills up.
+ *
+ * An `opponent` swaps the lime side for one of the deliberately poor robots.
+ * Not only for demonstrations: a waller drives itself off the field within
+ * seconds, and that is the only quick way to watch a rule 5.7 stand-down
+ * actually happen rather than waiting most of a match for one.
+ */
+export function agentsFor(opponent: string | undefined): MatchAgents {
+  const violet = referenceTeam('violet');
+  if (!opponent || opponent === 'reference') {
+    return { ...violet, ...referenceTeam('lime') } as unknown as MatchAgents;
+  }
+  const bot = botRoster().find((b) => b.name === opponent);
+  if (!bot) {
+    const names = ['reference', ...botRoster().map((b) => b.name)].join(', ');
+    throw new Error(`unknown opponent "${opponent}". try: ${names}`);
+  }
+  const [y1, y2] = bot.make('lime');
+  return { ...violet, 'lime-1': y1!, 'lime-2': y2! } as unknown as MatchAgents;
 }

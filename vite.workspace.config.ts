@@ -15,5 +15,5 @@ export default defineConfig({
   root: 'workspace',
   // Relative, so the bundle is right wherever the venue mounts it.
   base: './',
-  build: { outDir: '../dist-workspace', emptyOutDir: true },
+  build: { outDir: '../dist/workspace', emptyOutDir: true },
 });

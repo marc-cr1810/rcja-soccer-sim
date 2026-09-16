@@ -63,7 +63,7 @@ jobs:
         run: |
           tar -czf "rcja-soccer-sim-${VER}-linux-x64.tar.gz" \
             dist/bin/rcja-soccer-sim-linux-x64 \
-            dist-site dist-viewer dist-referee dist-practice dist-workspace \
+            dist/site dist/viewer dist/referee dist/practice dist/workspace \
             python systemd Makefile README.md LICENSE
 
       - name: Publish GitHub Release

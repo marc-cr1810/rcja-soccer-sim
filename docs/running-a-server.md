@@ -208,7 +208,7 @@ referee token:    <a long random string>
 ```
 
 This is a **separate page from the spectator viewer** — a different build
-(`bun run build:referee`, landing in `dist-referee/` next to `dist-viewer/`),
+(`bun run build:referee`, landing in `dist/referee/` next to `dist/viewer/`),
 served at `/referee` rather than `/`, and sharing no code with it. Opening
 `/` needs nothing at all, the same as always; opening `/referee` shows a
 login prompt for the token, and every action from there — kick off, pause,
