@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve Release Tag
+        id: vars
+        run: |
+          if [ -n "${{ github.ref_name }}" ] && [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            echo "VERSION=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          else
+            TAG="v$(date +'%y.%-m')-$(git rev-parse --short=6 HEAD)"
+            echo "VERSION=$TAG" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies & build bundles
+        run: |
+          bun install
+          make build
+
+      - name: Compile Standalone Cross-Platform Binaries
+        env:
+          VER: ${{ steps.vars.outputs.VERSION }}
+        run: |
+          mkdir -p dist/bin
+          # Linux x64
+          bun build --compile --target=bun-linux-x64 \
+            --define APP_VERSION="\"$VER\"" \
+            --outfile=dist/bin/rcja-soccer-sim-linux-x64 ./src/cli.ts
+
+          # Linux ARM64 (Raspberry Pi & ARM servers)
+          bun build --compile --target=bun-linux-arm64 \
+            --define APP_VERSION="\"$VER\"" \
+            --outfile=dist/bin/rcja-soccer-sim-linux-arm64 ./src/cli.ts
+
+          # macOS Apple Silicon
+          bun build --compile --target=bun-darwin-arm64 \
+            --define APP_VERSION="\"$VER\"" \
+            --outfile=dist/bin/rcja-soccer-sim-darwin-arm64 ./src/cli.ts
+
+      - name: Package Release Tarball
+        env:
+          VER: ${{ steps.vars.outputs.VERSION }}
+        run: |
+          tar -czf "rcja-soccer-sim-${VER}-linux-x64.tar.gz" \
+            dist/bin/rcja-soccer-sim-linux-x64 \
+            dist-site dist-viewer dist-referee dist-practice dist-workspace \
+            python systemd Makefile README.md LICENSE
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.vars.outputs.VERSION }}
+          name: RCJA Soccer Sim ${{ steps.vars.outputs.VERSION }}
+          files: |
+            dist/bin/rcja-soccer-sim-linux-x64
+            dist/bin/rcja-soccer-sim-linux-arm64
+            dist/bin/rcja-soccer-sim-darwin-arm64
+            rcja-soccer-sim-*-linux-x64.tar.gz
+          generate_release_notes: true

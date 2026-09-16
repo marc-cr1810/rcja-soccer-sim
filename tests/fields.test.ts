@@ -19,6 +19,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
 import { LeagueServer } from '../src/league';
+import { WorkspaceStore } from '../src/workspace';
 
 const PYTHON_LIB_DIR = resolve(import.meta.dirname, '../python');
 const PASSWORD = 'a-long-enough-password';
@@ -34,6 +35,8 @@ afterEach(async () => {
 interface Started {
   server: LeagueServer;
   port: number;
+  /** Where this league's team folders live, for a test that puts code in one. */
+  workspacesDir: string;
 }
 
 /**
@@ -46,7 +49,8 @@ interface Started {
 async function start(practice: Record<string, unknown> = {}): Promise<Started> {
   const dataDir = await mkdtemp(join(tmpdir(), 'rcja-fields-'));
   const submissionsDir = await mkdtemp(join(tmpdir(), 'rcja-sub-'));
-  dirs.push(dataDir, submissionsDir);
+  const workspacesDir = await mkdtemp(join(tmpdir(), 'rcja-ws-'));
+  dirs.push(dataDir, submissionsDir, workspacesDir);
 
   const server = new LeagueServer({
     port: 0,
@@ -60,12 +64,12 @@ async function start(practice: Record<string, unknown> = {}): Promise<Started> {
         seatMemoryMb: 512,
         reserveCores: 1,
       },
-      practice: { open: true, max: null, idleMins: 20, perTeam: 1, claimSecs: 90, ...practice },
+      practice: { open: true, max: null, idleMins: 20, graceMins: 5, perTeam: 1, claimSecs: 90, ...practice },
     },
-    world: { realtime: false, submissionsDir, pythonLibDir: PYTHON_LIB_DIR },
+    world: { realtime: false, submissionsDir, workspacesDir, pythonLibDir: PYTHON_LIB_DIR },
   });
   servers.push(server);
-  return { server, port: await server.listen() };
+  return { server, port: await server.listen(), workspacesDir };
 }
 
 interface Answer {
@@ -428,3 +432,140 @@ async function until(check: () => boolean, timeoutMs = 10_000): Promise<void> {
     await new Promise((r) => setTimeout(r, 50));
   }
 }
+
+/**
+ * Running what a team is still writing.
+ *
+ * The mechanism is a seat fill like any other, so what has to be true here is
+ * what the hub adds around it: that it is *your* code and nobody else's, that
+ * running it spends the same robot occupancy as pushing it would, and that the
+ * traceback it produces is yours to read. Whether the program itself starts is
+ * the sandbox's business and is verified live.
+ */
+describe('run it from the workspace', () => {
+  async function typed(started: Started, slug: string, robot: 1 | 2, entry = 'robot.py'): Promise<void> {
+    const store = new WorkspaceStore({ dir: started.workspacesDir });
+    await store.write(slug, robot, 'manifest.json', JSON.stringify({ team: slug, robot, entry }));
+    await store.write(slug, robot, entry, 'print("hello")\n');
+  }
+
+  it('opens a field, seats the robot, and says where to watch', async () => {
+    const started = await start();
+    const act = await team(started, 'ACT Robotics');
+    await typed(started, 'act-robotics', 1);
+
+    const ran = await call(started.port, '/practice/run', {
+      method: 'POST',
+      cookie: act,
+      body: JSON.stringify({ robot: 1 }),
+    });
+    expect(ran.status).toBe(200);
+    expect(ran.payload.field.url).toBe(`/a/${ran.payload.field.id}/practice/`);
+    expect(ran.payload.seat).toBe('violet-1');
+
+    // Their own field, not an anonymous one — and their robot really is in it,
+    // which is what makes "what is my robot doing" answerable.
+    const yours = await call(started.port, '/api/team/act-robotics', { cookie: act });
+    expect(yours.payload.yours.fields[0].id).toBe(ran.payload.field.id);
+    expect(yours.payload.yours.robots[0].at.seatId).toBe('violet-1');
+  }, 40_000);
+
+  it('uses the field the team already has, rather than asking for another', async () => {
+    const started = await start();
+    const act = await team(started, 'ACT Robotics');
+    await typed(started, 'act-robotics', 1);
+    const opened = await openField(started, act);
+
+    const ran = await call(started.port, '/practice/run', {
+      method: 'POST',
+      cookie: act,
+      body: JSON.stringify({ robot: 1 }),
+    });
+    expect(ran.status).toBe(200);
+    expect(ran.payload.field.id).toBe(opened.payload.field.id);
+  }, 40_000);
+
+  it('spends the same robot occupancy a pushed robot would', async () => {
+    const started = await start();
+    const act = await team(started, 'ACT Robotics');
+    const nsw = await team(started, 'NSW Lightning');
+    await typed(started, 'act-robotics', 1);
+    await call(started.port, '/practice/run', { method: 'POST', cookie: act, body: JSON.stringify({ robot: 1 }) });
+
+    // A second field, somebody else's, and the same robot. One robot, one
+    // place: it is in a seat already and the sentence says which.
+    const theirs = await openField(started, nsw);
+    await call(started.port, `/api/fields/${theirs.payload.field.id}/invite`, {
+      method: 'POST',
+      cookie: nsw,
+      body: JSON.stringify({ team: 'act-robotics' }),
+    });
+    await call(started.port, `/api/fields/${theirs.payload.field.id}/accept`, { method: 'POST', cookie: act });
+
+    const twice = await call(
+      started.port,
+      `/a/${theirs.payload.field.id}/practice-api/seat`,
+      { ...seat('violet-1', { kind: 'workspace', team: 'act-robotics' }), cookie: act },
+    );
+    expect(twice.status).toBe(409);
+    expect(twice.payload.reason).toContain('robot 1');
+  }, 60_000);
+
+  it('will not run one team\'s unpushed code for another', async () => {
+    const started = await start();
+    const act = await team(started, 'ACT Robotics');
+    const nsw = await team(started, 'NSW Lightning');
+    await typed(started, 'nsw-lightning', 1);
+    const mine = await openField(started, act);
+
+    const stolen = await call(
+      started.port,
+      `/a/${mine.payload.field.id}/practice-api/seat`,
+      { ...seat('lime-1', { kind: 'workspace', team: 'nsw-lightning' }), cookie: act },
+    );
+    expect(stolen.status).toBe(403);
+    expect(nsw).toBeTruthy();
+  }, 40_000);
+
+  it('lets an organiser run code they may already open in an editor, and nobody else', async () => {
+    const started = await start();
+    const act = await team(started, 'ACT Robotics');
+    const organiser = await admin(started);
+    await typed(started, 'act-robotics', 1);
+    const mine = await openField(started, act);
+
+    // Running a workspace reads code that was never pushed, so it is gated on
+    // being allowed to open that team's editor rather than merely on being
+    // allowed to seat their robot. An organiser may do both — that is the
+    // eleven-at-night promise the workspace makes — and a rival team may do
+    // neither, which is the case the gate exists for.
+    const unpushed = await call(
+      started.port,
+      `/a/${mine.payload.field.id}/practice-api/seat`,
+      { ...seat('lime-2', { kind: 'workspace', team: 'act-robotics' }), cookie: organiser },
+    );
+    expect(unpushed.status).toBe(200);
+  }, 40_000);
+
+  it('keeps a seat\'s output to the team whose seat it is', async () => {
+    const started = await start();
+    const act = await team(started, 'ACT Robotics');
+    const nsw = await team(started, 'NSW Lightning');
+    await typed(started, 'act-robotics', 1);
+    const ran = await call(started.port, '/practice/run', {
+      method: 'POST',
+      cookie: act,
+      body: JSON.stringify({ robot: 1 }),
+    });
+    const id = ran.payload.field.id;
+
+    const mine = await call(started.port, `/a/${id}/practice-api/output?seat=violet-1`, { cookie: act });
+    expect(mine.status).toBe(200);
+    expect(Array.isArray(mine.payload.lines)).toBe(true);
+
+    // Another team's half-written code failing is their business. They are not
+    // even on this field, so they are refused before the seat is considered.
+    const theirs = await call(started.port, `/a/${id}/practice-api/output?seat=violet-1`, { cookie: nsw });
+    expect(theirs.status).toBe(403);
+  }, 40_000);
+});

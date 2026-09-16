@@ -2,14 +2,16 @@
 
 NAME ?=
 ARGS ?=
+TAG_VERSION = v$$(date +'%y.%-m')-$$(git rev-parse --short=6 HEAD 2>/dev/null || echo dev)
 
 .PHONY: help install link \
 	build build-all build-bin build-viewer build-referee build-practice build-workspace build-site \
 	dev-viewer dev-referee dev-practice dev-workspace dev-site \
-	serve serve-agents serve-referee practice league arena capacity \
+	serve serve-agents serve-referee practice league league-setup arena capacity \
 	play play-violet play-lime \
 	match ladder bench check-name draw tournament-serve table \
-	check typecheck test test-watch check-py clean
+	check typecheck test test-watch check-py clean clean-data clean-all \
+	systemd-user update tag
 
 help:
 	@echo "\033[1mrcja-soccer-sim\033[0m"
@@ -23,14 +25,18 @@ help:
 	@echo "  make build-<target>         Build single frontend (viewer | referee | practice | workspace | site)"
 	@echo "  make dev-<target>           Start Vite dev server (viewer | referee | practice | workspace | site)"
 	@echo ""
-	@echo "\033[36mServers & Practice:\033[0m"
+	@echo "\033[36mServers & Venue Operations:\033[0m"
+	@echo "  make league-setup           Initialize a new league and create the first admin [ARGS=...]"
+	@echo "  make league                 Run full venue league server with public portal [ARGS=...]"
 	@echo "  make serve                  Run match server with reference agents [ARGS=...]"
 	@echo "  make serve-agents           Run match server, waiting for 4 robot programs [ARGS=...]"
 	@echo "  make serve-referee          Run match server with referee console [ARGS=...]"
 	@echo "  make practice               Open interactive practice field [ARGS=...]"
-	@echo "  make league                 Run full venue league server with public portal [ARGS=...]"
 	@echo "  make arena                  Run arena worker [ARGS=...]"
 	@echo "  make capacity               Measure server match capacity [ARGS=...]"
+	@echo "  make systemd-user           Install and configure systemd user service"
+	@echo "  make update                 Pull latest changes, rebuild, and restart systemd service"
+	@echo "  make tag                    Create release tag (vYY.M-hash)"
 	@echo ""
 	@echo "\033[36mExample Robots:\033[0m"
 	@echo "  make play                   Start striker+goalie for both sides (after serve-agents)"
@@ -52,6 +58,8 @@ help:
 	@echo "  make test                   Run test suite (bun test)"
 	@echo "  make test-watch             Run test suite in watch mode"
 	@echo "  make clean                  Remove build artifacts and scratch data"
+	@echo "  make clean-data             Remove local repository test state (rm -rf data)"
+	@echo "  make clean-all              Remove both build artifacts and test state"
 
 ## --- Setup & Build ---
 install:
@@ -65,7 +73,8 @@ build: build-viewer build-referee build-practice build-workspace build-site
 build-all: build build-bin
 
 build-bin:
-	bun run build:bin
+	@VER=$$(bun -e "import { getVersion } from './src/version'; console.log(getVersion())" 2>/dev/null || echo "dev"); \
+	bun build --compile --define APP_VERSION="\"$$VER\"" --outfile=dist/bin/rcja-soccer-sim ./src/cli.ts
 
 build-viewer:
 	bun run build:viewer
@@ -99,25 +108,40 @@ dev-site:
 
 ## --- Servers & Venues ---
 serve: build-viewer
-	bun run serve $(if $(ARGS),-- $(ARGS))
+	bun run cli serve $(if $(ARGS),-- $(ARGS))
 
 serve-agents: build-viewer
-	bun run serve -- --agents $(ARGS)
+	bun run cli serve -- --agents $(ARGS)
 
 serve-referee: build-viewer build-referee
-	bun run serve -- --referee $(ARGS)
+	bun run cli serve -- --referee $(ARGS)
 
 practice: build-viewer build-practice
-	bun run serve -- practice $(ARGS)
+	bun run cli practice $(ARGS)
+
+league-setup:
+	bun run cli league-setup $(ARGS)
 
 league: build-viewer build-referee build-practice build-workspace build-site
-	bun run serve -- league $(ARGS)
+	bun run cli league $(if $(NAME),--name "$(NAME)") $(ARGS)
 
 arena:
-	bun run serve -- arena $(ARGS)
+	bun run cli arena $(ARGS)
 
 capacity:
-	bun run serve -- capacity $(ARGS)
+	bun run cli capacity $(ARGS)
+
+systemd-user: build
+	bun run cli service install $(if $(NAME),--name "$(NAME)") $(ARGS)
+
+update:
+	bun run cli upgrade
+
+tag:
+	@TAG=$$(echo $(TAG_VERSION)); \
+	git tag -a "$$TAG" -m "Release $$TAG"; \
+	echo "\033[32mCreated tag $$TAG\033[0m"; \
+	echo "Push it with: git push origin $$TAG"
 
 ## --- Robot Control ---
 play:
@@ -131,13 +155,13 @@ play-lime:
 
 ## --- Simulation & Tournaments ---
 match:
-	bun run serve -- match $(ARGS)
+	bun run cli match $(ARGS)
 
 ladder:
-	bun run serve -- ladder $(ARGS)
+	bun run cli ladder $(ARGS)
 
 bench:
-	bun run serve -- bench $(ARGS)
+	bun run cli bench $(ARGS)
 
 check-name:
 	@if [ -z "$(NAME)" ]; then \
@@ -146,13 +170,13 @@ check-name:
 	fi
 
 draw: check-name
-	bun run serve -- draw --name "$(NAME)" $(ARGS)
+	bun run cli draw --name "$(NAME)" $(ARGS)
 
 tournament-serve: check-name build-viewer
-	bun run serve -- tournament --name "$(NAME)" $(ARGS)
+	bun run cli tournament --name "$(NAME)" $(ARGS)
 
 table: check-name
-	bun run serve -- table --name "$(NAME)" $(ARGS)
+	bun run cli table --name "$(NAME)" $(ARGS)
 
 ## --- Verification & Quality ---
 check: typecheck check-py
@@ -174,3 +198,8 @@ clean:
 	rm -f scratch/*.jsonl scratch/locframes.json
 	rm -rf scratch/frames scratch/rotframes
 	find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+
+clean-data:
+	rm -rf data
+
+clean-all: clean clean-data

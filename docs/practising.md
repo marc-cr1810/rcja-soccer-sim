@@ -81,6 +81,11 @@ Each of the four seats is one robot, and each can be:
 - **not in it** — the robot is not part of this situation at all. This is how
   you rehearse one robot alone, or robot 1 against robot 2: take the rest off.
 - **a built-in robot** — the reference agent, as an opponent or a teammate.
+- **what I am writing** — the code in your [browser workspace](writing-in-a-browser.md)
+  as it stands right now, pushed or not. This is the fast loop: type, press
+  **Run it**, watch. The server takes a *copy* when you press it, so you can
+  carry on typing while it plays, and what is on the field stays the version you
+  ran until you run it again.
 - **a pushed robot** — your submission. It runs sandboxed, exactly as it would
   in a match. **Restart** re-spawns it, which is what you want after pushing a
   new version; **Stop** kills it.
@@ -107,6 +112,27 @@ Each of the four seats is one robot, and each can be:
   This is the practice loop from [writing a robot](writing-a-robot.md) — no
   push, no validation, no waiting — and a practice field is the place it was
   always meant to point at.
+
+## Running what you are writing
+
+The quickest way onto a field is the **Run it** button — in the browser editor
+beside *Push to the competition*, and on your team page beside each robot. It
+opens your field if you have not got one, puts that robot in a seat, and takes
+you to it. If every field is in use you are told your place in the queue, the
+same as pressing *Open one*.
+
+Running is not pushing. The code is run exactly as you typed it, including code
+that does not parse — that is what it is for. Nothing about it reaches the
+competition until you press *Push*, and a match still plays whatever you last
+pushed.
+
+**Reading what went wrong.** A seat running your code has an **Output** button.
+Whatever your program printed is under it, and so is the traceback when it
+crashed — the same text you would see in a terminal if you were running it on
+your own machine. If your program dies at startup you will see it exit and be
+restarted a few times, and then the reason. The **Restart** button re-runs it
+and keeps what was already said, so you can read the crash and the retry next
+to each other.
 
 **Whose robot is whose.** On a league server you fill the seats holding your
 own robots, and so does every team you invite. Seats holding somebody else's
@@ -135,6 +161,27 @@ A robot whose program is not answering comes **off the field** rather than
 standing on it as an obstacle, and goes straight back on when the program
 reconnects. There is no thirty-second stand-down here; that is a match
 sanction, and restarting your own program in practice is not a sanction.
+
+## Giving a field back
+
+A field holds a whole simulation and up to four sandboxed programs, and a venue
+has only so many. So a field nobody is using is given back.
+
+**What counts as using it:** somebody on it — you or a guest, with the console
+or the viewer open and in front of them — or somebody doing something to it: a
+drag, a seat change, start, stop. **A connected robot does not.** A field of
+robots playing to an empty stand is exactly the thing being reclaimed, and a
+program somebody forgot to close should not outrank the team waiting in line.
+
+You are **warned before anything happens**, on the field itself and on your team
+page, with the time it will close. Touching anything at all cancels it. How long
+you get depends on whether anybody is waiting: on a quiet afternoon it is
+generous, and when there is a queue the quietest field goes first.
+
+**Closing costs you a process, not your afternoon.** The arrangement — who was
+on the field, where, and where the ball was — is saved into your team folder,
+and the next field you open comes back with it already set up. What you lose is
+the running programs, which you start again in one press.
 
 A practice field spends most of its life **stopped** — that is its normal state
 while you drag things into place. A robot seated on a stopped field is still

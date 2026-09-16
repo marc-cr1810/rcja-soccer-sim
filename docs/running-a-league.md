@@ -46,17 +46,45 @@ Entering, refereeing and administering need one.
 | control a match | | | ✓ | ✓ |
 | accounts, invitations | | | | ✓ |
 
-## The first admin, and every account after it
+## Initializing a league and creating the first admin
 
 The first organiser cannot be made from a page that requires an organiser to log
 into, so it is made from the terminal:
 
 ```bash
-bun run serve -- account --create --role admin --name "Your Name"
+rcja-soccer-sim league-setup
+```
+*(or `bun run cli league-setup` / `make league-setup`)*
+
+This creates the required storage folders (`league/`, `tournaments/`, `submissions/`, `workspaces/`),
+prompts securely for an admin password (masked off the terminal, never saved in bash history),
+and creates the root administrator account.
+
+You can also create accounts individually with `account --create`:
+
+```bash
+rcja-soccer-sim account --create --role admin --name "Your Name"
 ```
 
-It asks for a password twice and prints the name to log in as. Everybody else
-registers with a **single-use invitation code**:
+## Managing teams from the terminal
+
+An organiser can create and manage teams directly from the CLI without opening a browser:
+
+```bash
+# Create a team, generate their workspace, and mint their push key in one step:
+rcja-soccer-sim team create "ACT Robotics"
+
+# List all registered teams, active keys, and robot submissions:
+rcja-soccer-sim team list
+
+# Mint an additional push API key for a team:
+rcja-soccer-sim team key "ACT Robotics"
+
+# Issue a single-use registration invite code:
+rcja-soccer-sim team invite "ACT Robotics"
+```
+
+A team can also register themselves using an invitation code:
 
 ```bash
 bun run serve -- invite --role team --team "ACT Robotics"
@@ -183,6 +211,7 @@ ordinary file, editable by hand:
     "open": true,
     "max": null,
     "idleMins": 20,
+    "graceMins": 5,
     "perTeam": 1,
     "claimSecs": 90
   }
@@ -205,6 +234,20 @@ Two things follow from the numbers and are not settings you can turn:
   fit more fields in is not available: a rehearsal under different conditions is
   a rehearsal of a different sport. Lowering `seatCpuPercent` lowers it
   everywhere, and it is recorded in every match result as a condition of play.
+
+`practice.idleMins` and `practice.graceMins` are how a field nobody is using
+comes back. After `idleMins` of quiet the field is marked, with a banner on it
+and a line on the owner's team page saying when it will close; `graceMins`
+later, it closes. Touching anything at all cancels it — so does simply having
+the console or the viewer open in front of you. **A connected robot does not**:
+a program somebody left running when they went home is the thing being
+reclaimed, not a reason to keep the field. When teams are queued the quiet
+period halves (never below three minutes) and only the quietest field goes per
+sweep, so the limit bites when it is needed and not on a quiet afternoon.
+
+Closing a field costs the team its processes and not its setup: the arrangement
+is written to `workspaces/<team>/field.json` and the next field they open comes
+back with it.
 
 `practice.perTeam` is the setting that does the most work at a real event: a
 global cap of eight is no protection at all if one team opens eight. One field
@@ -279,6 +322,77 @@ bun run serve -- arenas stop <id> --url http://localhost:8080 --key rcja_…
 
 Both are on `/admin` as well. They are here too because the day this gets asked
 in earnest is the day `/admin` is the thing that has gone wrong.
+
+## Installing on a fresh host
+
+### Quick install (Standalone binary)
+
+On a Linux host (e.g. Ubuntu or Debian venue machine), install the system prerequisites and run the one-line installer:
+
+```bash
+# Install sandboxing and python
+sudo apt update && sudo apt install -y bubblewrap python3
+
+# Install rcja-soccer-sim standalone binary (no Bun or Node required)
+curl -fsSL https://raw.githubusercontent.com/marc-cr1810/rcja-soccer-sim/main/install.sh | bash
+```
+
+This places `rcja-soccer-sim` in `~/.local/bin/rcja-soccer-sim`, ensures permissions, and enables systemd linger.
+
+Then initialize the venue league:
+```bash
+rcja-soccer-sim league-setup
+```
+Data files will be cleanly stored in `~/.local/share/rcja-soccer-sim/` (XDG standard).
+
+---
+
+## Running as a background service (Linux systemd)
+
+The binary manages its own systemd user service with no root privileges needed:
+
+```bash
+# Install, configure and start the background service immediately:
+rcja-soccer-sim service install
+
+# Check live service status:
+rcja-soccer-sim service status
+
+# Tail live output and match events:
+rcja-soccer-sim service logs
+
+# Restart or stop the service:
+rcja-soccer-sim service restart
+rcja-soccer-sim service stop
+```
+
+*(From a git clone, `make systemd-user` is also available and runs `service install`.)*
+
+---
+
+## Updating and release notifications
+
+### Startup release notifications
+Whenever `rcja-soccer-sim league` or `serve` starts, it checks GitHub Releases in the background (cached for 12 hours). If a newer version is published, it prints a notification banner:
+
+```text
+  ╭────────────────────────────────────────────────────────╮
+  │  Update available: 26.9-0f74e6 → 26.10-1a2b3c          │
+  │  Run 'rcja-soccer-sim upgrade' to update               │
+  ╰────────────────────────────────────────────────────────╯
+```
+*(To disable checks in offline air-gapped environments, pass `--no-update-check` or set `RCJA_NO_UPDATE_CHECK=1`)*.
+
+### One-command upgrade
+To update the server to the latest release:
+
+```bash
+rcja-soccer-sim upgrade
+```
+
+- **For binary installations**: downloads the latest matching platform binary from GitHub Releases, replaces the executable atomically, and restarts the running systemd service.
+- **For git installations**: automatically runs `git pull`, `bun install`, `make build`, and restarts the service.
+- All team accounts, registrations, tournaments, and match results are preserved untouched.
 
 ## What this is not yet
 

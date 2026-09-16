@@ -285,6 +285,13 @@ export const SeatFillSchema = z
         .openapi({ description: 'Minted by the hub for this one seat and injected on the way through. A browser never sends this.' }),
     }),
     z.object({ kind: z.literal('submission'), team: z.string().trim().min(1) }),
+    z.object({
+      kind: z.literal('workspace'),
+      team: z.string().trim().min(1).openapi({
+        description:
+          "Whose workspace to run, as it stands — unpushed and unvalidated. Which of the team's two robots comes from the seat, as it does for a submission.",
+      }),
+    }),
   ])
   .openapi('SeatFill', { description: 'What is driving a seat, or that nothing is' });
 export type SeatFill = z.infer<typeof SeatFillSchema>;
@@ -297,6 +304,9 @@ export const SeatStateSchema = z
     filled: z.boolean().openapi({ description: 'Whether a program is in the seat' }),
     connected: z.boolean().openapi({ description: 'Whether that program is answering' }),
     detail: z.string().optional().openapi({ description: 'Why the seat is not what was asked for, when it is not' }),
+    outputSeq: z
+      .number()
+      .openapi({ description: "How many lines this seat's program has said, ever. Moves when there is new output to fetch." }),
   })
   .openapi('SeatState');
 export type SeatState = z.infer<typeof SeatStateSchema>;
@@ -596,6 +606,15 @@ export const SeatBodySchema = z
   })
   .openapi('SeatBody', { description: 'Body for POST /practice-api/seat' });
 export type SeatBody = z.infer<typeof SeatBodySchema>;
+
+export const RunBodySchema = z
+  .object({
+    robot: z.union([z.literal(1), z.literal(2)]).openapi({
+      description: "Which of the team's two robots to run from its workspace",
+    }),
+  })
+  .openapi('RunBody', { description: 'Body for POST /practice/run' });
+export type RunBody = z.infer<typeof RunBodySchema>;
 
 export const SeatActionBodySchema = z
   .object({ seat: z.enum(['violet-1', 'violet-2', 'lime-1', 'lime-2']) })

@@ -15,8 +15,15 @@
  * and restarting its program with the other.
  */
 
+import { randomBytes } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+
 import { Match, SEAT_IDS, type SeatId } from './match';
-import { resolveLineup, spawnSeat, type SeatProcess } from './lineup';
+import { resolveLineup, spawnSeat, type LineupEntry, type SeatProcess } from './lineup';
+import { WorkspaceStore } from './workspace';
 import { ReferenceAgent } from './reference';
 import type { SeedInput } from './rand';
 import type { Transport } from './agent';
@@ -46,7 +53,25 @@ export type SeatFill =
        */
       token?: string;
     }
-  | { kind: 'submission'; team: string };
+  | { kind: 'submission'; team: string }
+  | {
+      /**
+       * Whatever this team last typed in the browser, run as it stands.
+       *
+       * The difference from `submission` is not how it runs — same sandbox,
+       * same grants, same gateway — but what it is: unpushed, unvalidated,
+       * possibly not even parseable. That is the point. A push is the code
+       * that plays matches and is held to the whole validator; this is the
+       * code somebody is still writing, and refusing to run it until it was
+       * good enough to compete would be refusing to run it when it is needed.
+       *
+       * Which of the team's two robots is not carried here: the seat says.
+       * `violet-2` is that team's robot 2, exactly as it is for a submission,
+       * so one-robot-one-place needs nothing new to count this.
+       */
+      kind: 'workspace';
+      team: string;
+    };
 
 /**
  * What happens when the situation resolves itself — a goal, a ball out of
@@ -80,6 +105,14 @@ export interface SeatState {
   connected: boolean;
   /** Why the seat is not what was asked for, when it is not. */
   detail?: string;
+  /**
+   * How many lines this seat's program has said, ever.
+   *
+   * The number rather than the text: state is polled once a second by everybody
+   * on the field, and a traceback is read by one person on one seat. A console
+   * watching this move knows to go and fetch the rest.
+   */
+  outputSeq: number;
 }
 
 export interface PracticeState {
@@ -94,6 +127,34 @@ export interface PracticeState {
 export interface PracticeOptions {
   /** Where validated pushes live, for a seat filled by a submission. */
   submissionsDir: string;
+  /**
+   * Where team folders live, for a seat running what somebody is still typing.
+   *
+   * Absent on a field with no workspaces behind it — a `bun run serve practice`
+   * on a laptop — and then a workspace seat is refused with a sentence rather
+   * than quietly falling back to something else.
+   */
+  workspacesDir?: string | null;
+  /**
+   * Where to keep this field's arrangement, so closing costs a process and not
+   * an afternoon.
+   *
+   * A supervisor hands this in — `workspaces/<owner>/field.json` — and the file
+   * is written here, by the arena itself, whenever the situation changes. Not
+   * written by whoever closes the field: an arena dies by having its process
+   * group killed, so a crash, a pre-emption and a hub restart all lose a
+   * save-on-close, and those are exactly the endings this exists for.
+   */
+  fieldStatePath?: string | null;
+  /**
+   * Somewhere to keep the copies a Run seat is running out of.
+   *
+   * A supervisor hands this in and removes it when the arena ends, which is
+   * the only thing that can: an arena is killed rather than asked to stop.
+   * Without one — a practice field started by hand — the system temp directory
+   * does, and ctrl-c cleans up on the way out.
+   */
+  runRoot?: string | null;
   /** The repo's python/ directory. Without one, no submission can be spawned. */
   pythonLibDir?: string | null;
   league?: LeagueId;
@@ -122,6 +183,33 @@ export interface PracticeOptions {
  */
 const PRACTICE_HALF_SECONDS = 300;
 
+/**
+ * How much of a seat's output is kept, and it is a deliberately small amount.
+ *
+ * What a student needs is the last traceback, not a session log: a program that
+ * prints every tick would otherwise push the one thing worth reading off the
+ * end anyway, and four of these live in an arena that is also holding a physics
+ * loop. Whichever limit is hit first wins.
+ */
+const OUTPUT_MAX_LINES = 200;
+const OUTPUT_MAX_BYTES = 32 * 1024;
+
+/**
+ * How long a drag settles before the arrangement is written down.
+ *
+ * Dragging a robot across the field is a stream of these; the file only has to
+ * be right shortly after somebody stops moving things, and the whole point is
+ * that it survives an ending nobody got to prepare for.
+ */
+const FIELD_SAVE_DEBOUNCE_MS = 2_000;
+
+/** One seat's output, oldest first, with a number that only ever goes up. */
+interface SeatOutput {
+  lines: { seq: number; text: string }[];
+  seq: number;
+  bytes: number;
+}
+
 function teamOf(id: string): TeamId {
   return id.startsWith('violet') ? 'violet' : 'lime';
 }
@@ -138,6 +226,12 @@ export class PracticeSession {
   private readonly processes = new Map<SeatId, SeatProcess>();
   /** The transport currently wired into each seat, so a reconnect can be spotted. */
   private readonly wired = new Map<SeatId, Transport>();
+  /** What each seat's program has said, for the student who has to read it. */
+  private readonly output = new Map<SeatId, SeatOutput>();
+  /** The snapshot directory a workspace seat is running out of, to be removed. */
+  private readonly runDirs = new Map<SeatId, string>();
+  private readonly workspaces: WorkspaceStore | null;
+  private saveTimer: ReturnType<typeof setTimeout> | null = null;
   private mode: ResolveMode = 'restage';
 
   constructor(
@@ -161,9 +255,47 @@ export class PracticeSession {
       seed: opts.seed ?? 1,
       idealSensors: opts.idealSensors ?? false,
     });
-    this.arrangement = this.capture();
+    this.workspaces = opts.workspacesDir ? new WorkspaceStore({ dir: opts.workspacesDir }) : null;
+    // What somebody spent twenty minutes dragging into place, if this field has
+    // been open before. Read here rather than awaited later so the first thing
+    // staged is already the right thing: a field that opens on the defaults and
+    // jumps a moment afterwards looks like it lost the arrangement and found it
+    // again.
+    this.arrangement = readArrangement(opts.fieldStatePath) ?? this.capture();
+    // `stage` sets what a restart goes back to as well as putting it out now.
     this.match.stage(this.arrangement);
     for (const id of SEAT_IDS) this.seats.set(id, { fill: { kind: 'built-in' } });
+  }
+
+  // --------------------------------------------------------------- the output
+
+  /** Keep a line this seat's program said, trimming the oldest away. */
+  private append(id: SeatId, text: string): void {
+    const buffer = this.output.get(id) ?? { lines: [], seq: 0, bytes: 0 };
+    for (const line of text.split('\n')) {
+      buffer.seq += 1;
+      buffer.lines.push({ seq: buffer.seq, text: line });
+      buffer.bytes += Buffer.byteLength(line, 'utf8') + 1;
+    }
+    while (buffer.lines.length > OUTPUT_MAX_LINES || buffer.bytes > OUTPUT_MAX_BYTES) {
+      const dropped = buffer.lines.shift();
+      if (!dropped) break;
+      buffer.bytes -= Buffer.byteLength(dropped.text, 'utf8') + 1;
+    }
+    this.output.set(id, buffer);
+  }
+
+  /**
+   * What this seat has said since line `since`.
+   *
+   * `seq` comes back whether or not anything did, because a console that has
+   * fallen behind the ring buffer needs to know it has rather than waiting for
+   * a line that was dropped.
+   */
+  outputOf(id: SeatId, since = 0): { seq: number; lines: { seq: number; text: string }[] } {
+    const buffer = this.output.get(id);
+    if (!buffer) return { seq: 0, lines: [] };
+    return { seq: buffer.seq, lines: buffer.lines.filter((line) => line.seq > since) };
   }
 
   /** The field as it stands right now, as an arrangement. */
@@ -201,6 +333,7 @@ export class PracticeSession {
             ? this.match.hasSeat(id)
             : (this.wired.get(id)?.connected ?? false),
         detail: seat.detail,
+        outputSeq: this.output.get(id)?.seq ?? 0,
       };
     }
     return {
@@ -265,8 +398,41 @@ export class PracticeSession {
    * on purpose.
    */
   private remember(): void {
+    this.saveField();
     if (this.mode === 'play-on') return;
     this.match.setArrangement(this.arrangement);
+  }
+
+  /**
+   * Write the arrangement down, shortly.
+   *
+   * Debounced rather than immediate because a drag arrives as a stream of
+   * these, and the file only has to be right once somebody has stopped moving
+   * things. The first change in a window schedules the write; whatever the
+   * situation is when it fires is what gets saved.
+   */
+  private saveField(): void {
+    const path = this.opts.fieldStatePath;
+    if (!path || this.saveTimer) return;
+    this.saveTimer = setTimeout(() => {
+      this.saveTimer = null;
+      void this.writeField(path);
+    }, FIELD_SAVE_DEBOUNCE_MS);
+    // Housekeeping, not work: a pending save should not hold the process open.
+    this.saveTimer.unref?.();
+  }
+
+  private async writeField(path: string): Promise<void> {
+    try {
+      // The team folder may not exist yet: a team can be given a field before
+      // they have ever opened the editor.
+      await mkdir(dirname(path), { recursive: true });
+      await Bun.write(path, `${JSON.stringify({ arrangement: this.arrangement }, null, 2)}\n`);
+    } catch (err) {
+      // A field that cannot save its arrangement is still a field. Said once,
+      // to the venue's log, rather than thrown at the person dragging a robot.
+      this.opts.log?.(`could not save the arrangement: ${(err as Error).message}`);
+    }
   }
 
   /** Put a robot into the situation, or take it out of it entirely. */
@@ -306,9 +472,16 @@ export class PracticeSession {
     else this.match.setArrangement(this.arrangement);
   }
 
-  /** What drives this seat from now on. Spawns or kills programs as needed. */
-  async setSeat(id: SeatId, fill: SeatFill): Promise<void> {
+  /**
+   * What drives this seat from now on. Spawns or kills programs as needed.
+   *
+   * Changing what a seat is *for* clears what the last thing in it said: a
+   * traceback belongs to a program, and reading the previous occupant's crash
+   * under a different robot's name is worse than reading nothing.
+   */
+  async setSeat(id: SeatId, fill: SeatFill, keepOutput = false): Promise<void> {
     this.stopSeat(id);
+    if (!keepOutput) this.output.delete(id);
     this.seats.set(id, { fill });
 
     if (fill.kind === 'empty') {
@@ -351,10 +524,15 @@ export class PracticeSession {
 
     const libDir = this.opts.pythonLibDir;
     if (!libDir) {
-      this.seats.set(id, { fill, detail: 'this server cannot run submissions' });
-      this.match.clearSeat(id);
+      this.fault(id, fill, 'this server cannot run submissions');
       return;
     }
+
+    if (fill.kind === 'workspace') {
+      await this.runWorkspace(id, fill.team, libDir);
+      return;
+    }
+
     const side = teamOf(id);
     const resolved = await resolveLineup(this.opts.submissionsDir, {
       violet: side === 'violet' ? fill.team : '',
@@ -362,10 +540,58 @@ export class PracticeSession {
     });
     const entry = resolved[id];
     if (!entry) {
-      this.seats.set(id, { fill, detail: `no pushed robot ${numberOf(id)} for "${fill.team}"` });
-      this.match.clearSeat(id);
+      this.fault(id, fill, `no pushed robot ${numberOf(id)} for "${fill.team}"`);
       return;
     }
+    this.startProgram(id, fill, entry, libDir);
+  }
+
+  /**
+   * Run what a team has typed, as it stands.
+   *
+   * A copy of the folder rather than the folder itself — see
+   * `WorkspaceStore.snapshot` — and a token minted right here, because nothing
+   * outside this arena ever needs it: the program is started by us, joins our
+   * own gateway over our own socket, and dies with the seat. A pushed
+   * submission carries a token issued at submit time for the same job; this one
+   * has no push to have been issued by.
+   */
+  private async runWorkspace(id: SeatId, team: string, libDir: string): Promise<void> {
+    const fill = this.seats.get(id)!.fill;
+    if (!this.workspaces) {
+      this.fault(id, fill, 'this server is not hosting team workspaces');
+      return;
+    }
+
+    let dir: string;
+    try {
+      dir = await mkdtemp(join(this.opts.runRoot ?? tmpdir(), `run-${id}-`));
+    } catch (err) {
+      this.fault(id, fill, `could not make somewhere to run it: ${(err as Error).message}`);
+      return;
+    }
+    this.runDirs.set(id, dir);
+
+    const snapshot = await this.workspaces.snapshot(team, numberOf(id), dir);
+    if (!snapshot.ok) {
+      // The one failure a student actually hits, so it is said in both places
+      // they might look: under the seat, and in the seat's own output.
+      this.fault(id, fill, snapshot.reason);
+      return;
+    }
+
+    this.startProgram(id, fill, { ...snapshot.value, token: randomBytes(18).toString('base64url') }, libDir);
+  }
+
+  /** This seat is not going to run, and this is why — said where it is read. */
+  private fault(id: SeatId, fill: SeatFill, reason: string): void {
+    this.seats.set(id, { fill, detail: reason });
+    this.append(id, reason);
+    this.match.clearSeat(id);
+  }
+
+  /** Start a resolved program in a seat, keeping what it says. */
+  private startProgram(id: SeatId, fill: SeatFill, entry: LineupEntry, libDir: string): void {
     this.match.clearSeat(id);
     this.seats.set(id, { fill, detail: 'starting' });
     this.processes.set(
@@ -380,19 +606,44 @@ export class PracticeSession {
           memoryLimitMb: this.opts.seatMemoryMb,
         },
         this.opts.log,
+        (text) => this.append(id, scrub(text, entry.dir)),
+        () => {
+          // Only if nothing else has happened to the seat in the meantime: a
+          // team who changed their mind mid-crash-loop should not have the
+          // dead program's last word land on whatever they chose instead.
+          const seat = this.seats.get(id);
+          if (seat?.fill === fill) {
+            this.seats.set(id, { fill, detail: 'its program would not start — see Output' });
+          }
+        },
       ),
     );
   }
 
-  /** Restart whatever is in this seat. The situation is left alone. */
+  /**
+   * Restart whatever is in this seat. The situation is left alone.
+   *
+   * The output is kept, with a line to say a restart happened: what a student
+   * is doing when they press this is comparing the crash with what happens
+   * next, and clearing the panel takes away the half of that they already had.
+   */
   async restartSeat(id: SeatId): Promise<void> {
-    await this.setSeat(id, this.seats.get(id)!.fill);
+    this.append(id, '— restarted —');
+    await this.setSeat(id, this.seats.get(id)!.fill, true);
   }
 
   /** Kill this seat's program without forgetting what was in it. */
   stopSeat(id: SeatId): void {
     this.processes.get(id)?.stop();
     this.processes.delete(id);
+    const runDir = this.runDirs.get(id);
+    if (runDir) {
+      this.runDirs.delete(id);
+      // The copy this seat was running out of. Removed after the process is
+      // stopped, and failing to remove it is not worth telling anybody about:
+      // it is a temporary directory and the machine will have it back.
+      void rm(runDir, { recursive: true, force: true }).catch(() => {});
+    }
     this.wired.delete(id);
     this.server.agents.close(id);
     // Nothing is driving it now, so nothing should be pretending to: the seat
@@ -451,6 +702,72 @@ export class PracticeSession {
   /** Stop every program this field started. */
   close(): void {
     for (const id of SEAT_IDS) this.stopSeat(id);
+    if (!this.saveTimer) return;
+    clearTimeout(this.saveTimer);
+    this.saveTimer = null;
+    // A drag in the last couple of seconds is still part of the situation
+    // somebody arranged. Written on the spot rather than scheduled, because the
+    // process this is running in is usually about to exit.
+    const path = this.opts.fieldStatePath;
+    if (!path) return;
+    try {
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, `${JSON.stringify({ arrangement: this.arrangement }, null, 2)}\n`);
+    } catch {
+      // Same as the debounced write: a field that cannot save its arrangement
+      // is still a field, and this one is on its way out anyway.
+    }
+  }
+}
+
+/**
+ * Take the server's own directories out of what a student reads.
+ *
+ * A traceback names the file it failed in by its full path, and under a Run
+ * that path is a scratch directory with a random name in it — which tells the
+ * person who wrote the code nothing, and invites them to wonder what it is.
+ * They wrote `robot.py`, so it should say `robot.py`.
+ */
+function scrub(text: string, dir: string): string {
+  return text.split(`${dir}/`).join('');
+}
+
+/**
+ * The arrangement a field was left in, if it was left in one.
+ *
+ * Hand-written is a case, not an accident: this file sits in the team's own
+ * folder beside their code, and the promise the whole workspace makes is that
+ * an admin can fix any of it in a text editor at eleven at night. So anything
+ * unreadable, half-written or nonsense is *ignored* and the field opens on the
+ * defaults — never thrown, because a broken scratch file must not be the reason
+ * a team cannot open a field.
+ */
+function readArrangement(path: string | null | undefined): Arrangement | null {
+  if (!path || !existsSync(path)) return null;
+  try {
+    const data = JSON.parse(readFileSync(path, 'utf8')) as { arrangement?: unknown };
+    const raw = data.arrangement as Arrangement | undefined;
+    if (!raw || !Array.isArray(raw.robots) || !raw.ball) return null;
+
+    const robots: PlacedRobot[] = [];
+    for (const robot of raw.robots) {
+      if (!SEAT_IDS.includes(robot?.id as SeatId)) continue;
+      if (![robot.x, robot.z, robot.heading].every((n) => Number.isFinite(n))) continue;
+      robots.push({
+        id: robot.id,
+        x: robot.x,
+        z: robot.z,
+        heading: robot.heading,
+        isGoalie: robot.isGoalie === true,
+      });
+    }
+    if (!Number.isFinite(raw.ball.x) || !Number.isFinite(raw.ball.z)) return null;
+
+    // A saved field with nobody on it is a saved field: a team that took all
+    // four robots off to look at one thing meant that.
+    return { robots, ball: { x: raw.ball.x, z: raw.ball.z } };
+  } catch {
+    return null;
   }
 }
 

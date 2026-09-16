@@ -30,6 +30,7 @@ __pycache__/
 # ─── Runtime State & Databases ────────────────────────────────────────────────
 # Runtime state a server accumulates in whatever directory it is run from:
 # pushed submissions, teams' working folders, tournaments, and accounts database.
+data/
 submissions/
 workspaces/
 tournaments/

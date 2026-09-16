@@ -95,18 +95,27 @@ still what will play.
 
 ## Watching it play
 
-There is no Run button yet. It is coming, and it needs something this does not
-have: a field that belongs to your team, which means accounts rather than a
-secret your organiser wrote down. That is the next phase.
+**Run it** is beside *Push to the competition* on a
+[league server](running-a-league.md). It opens your team's
+[practice field](practising.md) if you have not got one, puts that robot in a
+seat and takes you to it, and from there you drag things around and watch.
 
-Until then you are not stuck. Push from here, then ask your organiser to put
-your robot on a [practice field](practising.md) — a seat takes a pushed
-submission by team name, so yours goes on the same as anybody else's, and you
-watch it in the browser like a match. Slower than it will be, and it costs
-somebody else thirty seconds, but nothing about your robot is waiting on it.
+What runs is **what you typed, as it stands**: the server takes a copy the
+moment you press it, so you can carry on editing while it plays, and the robot
+on the field stays the version you ran until you run it again. Your code does
+not have to be good, or finished, or even parse — running it is how you find
+out that it does not. Nothing here reaches the competition until you press
+*Push*.
 
-If your organiser has given you the link to a practice field of your own, you
-can fill the seats yourself from its console.
+**When it crashes**, the seat has an **Output** button and your traceback is
+under it, the same text a terminal would have shown you. That is the whole
+point of running it on a field rather than guessing.
+
+On a plain match server started with `--team-tokens` there is no Run button:
+there are no accounts, so there is nothing to decide whose field is whose. Push
+from here instead, and ask your organiser to put your robot on a practice field
+— a seat takes a pushed submission by team name. If they have given you the
+link to a field, you can fill its seats yourself from its console.
 
 ## What this is not
 

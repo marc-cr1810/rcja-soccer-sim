@@ -1,0 +1,21 @@
+[Unit]
+Description=RCJA Soccer Simulation League Server
+After=network.target
+Documentation=https://github.com/rcja/rcja-soccer-sim
+
+[Service]
+Type=simple
+WorkingDirectory=%h/programming/typescript/rcja-soccer-sim
+ExecStart=/usr/local/bin/bun src/cli.ts league
+Restart=on-failure
+RestartSec=3s
+
+# Ensure user cgroups are delegated so robot sandboxes can set CPU/memory limits
+Delegate=yes
+
+# Environment
+Environment=NODE_ENV=production
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:%h/.bun/bin
+
+[Install]
+WantedBy=default.target

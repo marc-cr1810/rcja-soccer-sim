@@ -117,6 +117,24 @@ export function spawnSeat(
   entry: LineupEntry,
   opts: LineupOptions,
   log: (line: string) => void = () => {},
+  /**
+   * The same output again, unprefixed, for somebody keeping it per seat.
+   *
+   * `log` goes to a venue's terminal, where a line has to say which seat it
+   * came from and nobody is watching anyway. A student whose code does not
+   * parse needs the traceback itself, in the browser, under their own seat —
+   * so the text is offered raw as well and `practice.ts` keeps it.
+   */
+  onOutput: (text: string) => void = () => {},
+  /**
+   * Called once this seat has stopped being retried.
+   *
+   * A seat whose program dies at import is respawned a few times and then left
+   * alone, and until somebody says so the seat goes on claiming it is starting.
+   * "Starting" that never ends is the least useful thing a console can say to
+   * the person whose code did not compile.
+   */
+  onGaveUp: () => void = () => {},
 ): SeatProcess {
   const maxRespawns = opts.maxRespawns ?? DEFAULT_MAX_RESPAWNS;
   let child: Subprocess | null = null;
@@ -166,7 +184,9 @@ export function spawnSeat(
           while (true) {
             const { done, value } = await reader.read();
             if (done) break;
-            log(`[${id}] ${decoder.decode(value).trimEnd()}`);
+            const text = decoder.decode(value).trimEnd();
+            log(`[${id}] ${text}`);
+            onOutput(text);
           }
         } catch {}
       }
@@ -179,7 +199,9 @@ export function spawnSeat(
           while (true) {
             const { done, value } = await reader.read();
             if (done) break;
-            log(`[${id}] ${decoder.decode(value).trimEnd()}`);
+            const text = decoder.decode(value).trimEnd();
+            log(`[${id}] ${text}`);
+            onOutput(text);
           }
         } catch {}
       }
@@ -188,11 +210,19 @@ export function spawnSeat(
     spawned.exited.then((code) => {
       if (child === spawned) child = null;
       if (stopped) return;
+      // The frame around a traceback, and worth as much as the traceback: a
+      // student reading "exited (code 1)" five times knows their program is
+      // dying at import rather than sitting there not answering.
       if (attempt >= maxRespawns) {
-        log(`[${id}] exited (code ${code}) after ${attempt} attempts; not respawning again`);
+        const line = `exited (code ${code}) after ${attempt} attempts; not respawning again`;
+        log(`[${id}] ${line}`);
+        onOutput(line);
+        onGaveUp();
         return;
       }
-      log(`[${id}] exited (code ${code}); respawning (attempt ${attempt + 1} of ${maxRespawns})`);
+      const line = `exited (code ${code}); respawning (attempt ${attempt + 1} of ${maxRespawns})`;
+      log(`[${id}] ${line}`);
+      onOutput(line);
       spawnOne(attempt + 1);
     });
   };

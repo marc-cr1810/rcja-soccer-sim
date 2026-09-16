@@ -16,8 +16,11 @@ import { runLadder, formatLadder, type Entry } from './ladder';
 import { ReferenceAgent } from './reference';
 import { botRoster } from './bots';
 import { resolveLineup, spawnLineup, type SpawnedLineup } from './lineup';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { checkLatestRelease, formatUpdateBanner, performUpgrade, GITHUB_REPO } from './update';
 import { randomBytes } from 'node:crypto';
+import { homedir, networkInterfaces } from 'node:os';
 import { join, resolve } from 'node:path';
 import { DEFAULT_OPTIONS, formatBench, runBench, type BenchResult } from './bench';
 import { slugifyTeam } from './manifest';
@@ -26,6 +29,7 @@ import { hashSubmission } from './submission';
 import { formatTable, makeDraw, type Draw } from './tournament';
 import { listEntrants, loadDraw, loadResults, saveDraw } from './tournament-store';
 import { runDraw } from './tournament-run';
+import { getVersion } from './version';
 import {
   bumpSeedValue,
   formatSeedValue,
@@ -264,7 +268,7 @@ async function serve(flags: Map<string, string>): Promise<void> {
     pythonLibDir: pythonLibDir(),
     workspaceRoot: wsRoot,
     workspaceTokens,
-    workspacesDir: flags.get('workspaces-dir'),
+    workspacesDir: workspacesRoot(flags),
     // Present means the operator said something ("0" included); absent lets
     // the server pick its own default for the mode.
     kickoffCountdown: flags.has('kickoff-countdown')
@@ -273,9 +277,19 @@ async function serve(flags: Map<string, string>): Promise<void> {
   });
   const port = await server.listen();
 
-  console.log(`\n  RCJA Soccer Simulation — match server`);
+  console.log(`\n  RCJA Soccer Simulation (${getVersion()}) — match server`);
   console.log(`  sensors:   ${idealSensors ? 'ideal — noise-free, and not a mode to read a result from' : 'realistic (noise, drift, camera latency)'}`);
   console.log(`  watch at  http://localhost:${port}`);
+  for (const lan of lanAddresses()) {
+    console.log(`            http://${lan}:${port}`);
+  }
+  if (!flags.has('no-update-check') && process.env.RCJA_NO_UPDATE_CHECK !== '1') {
+    checkLatestRelease(submissionsRoot(flags))
+      .then((info) => {
+        if (info?.updateAvailable) console.log(formatUpdateBanner(info));
+      })
+      .catch(() => {});
+  }
   if (!root) {
     console.log(`  (no viewer built yet — run: bun run build:viewer)`);
   }
@@ -452,6 +466,7 @@ async function arena(flags: Map<string, string>): Promise<void> {
     viewHz: num(flags, 'view-hz', 60),
     pythonLibDir: pythonLibDir(),
     submissionsDir: flags.get('submissions'),
+    scratchDir: flags.has('scratch') ? resolve(flags.get('scratch')!) : undefined,
     control: (req, url) => fixture?.handle(req, url) ?? null,
   });
 
@@ -485,11 +500,18 @@ async function practiceArena(flags: Map<string, string>, spawned: boolean): Prom
     idealSensors: flags.get('ideal-sensors') === 'true',
     pythonLibDir: pythonLibDir(),
     submissionsDir: flags.get('submissions'),
+    scratchDir: flags.has('scratch') ? resolve(flags.get('scratch')!) : undefined,
   });
   const port = await server.listen();
 
   const session = new PracticeSession(server, {
     submissionsDir: server.submissionsDirectory,
+    // Resolved, not passed through: this arena is spawned with the hub's own
+    // working directory and a relative path that happens to work today is the
+    // bug this repo has now had three times.
+    workspacesDir: flags.has('workspaces-dir') ? resolve(flags.get('workspaces-dir')!) : null,
+    fieldStatePath: flags.has('field-state') ? resolve(flags.get('field-state')!) : null,
+    runRoot: flags.has('scratch') ? resolve(flags.get('scratch')!) : null,
     pythonLibDir: pythonLibDir() ?? null,
     league: leagueFrom(flags),
     idealSensors: flags.get('ideal-sensors') === 'true',
@@ -658,10 +680,6 @@ async function bench(flags: Map<string, string>): Promise<void> {
   console.log(formatBench(result, baseline));
 }
 
-function tournamentsRoot(): string {
-  return resolve('tournaments');
-}
-
 function requireName(flags: Map<string, string>): string {
   const name = flags.get('name');
   if (!name || name === 'true') {
@@ -680,7 +698,7 @@ function requireName(flags: Map<string, string>): string {
  */
 async function draw(flags: Map<string, string>): Promise<void> {
   const name = requireName(flags);
-  const submissionsDir = resolve('submissions');
+  const submissionsDir = submissionsRoot(flags);
   const teamsFlag = flags.get('teams');
   const entrants =
     teamsFlag && teamsFlag !== 'true'
@@ -709,7 +727,7 @@ async function draw(flags: Map<string, string>): Promise<void> {
 
   let dir: string;
   try {
-    dir = await saveDraw(tournamentsRoot(), made);
+    dir = await saveDraw(tournamentsRoot(flags), made);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === 'EEXIST') {
@@ -744,7 +762,7 @@ async function draw(flags: Map<string, string>): Promise<void> {
  * against nobody.
  */
 async function tournament(flags: Map<string, string>): Promise<void> {
-  const root = tournamentsRoot();
+  const root = tournamentsRoot(flags);
   const id = slugifyTeam(requireName(flags));
 
   let made: Draw;
@@ -846,10 +864,45 @@ async function tournament(flags: Map<string, string>): Promise<void> {
   await server.close();
 }
 
+/**
+ * Resolves the default storage directory for league assets.
+ * - Option B (in this repository for testing): `./data/<subdir>`.
+ * - Option A (proper install on an actual system): `~/.local/share/rcja-soccer-sim/<subdir>` (Linux XDG standard).
+ */
+export function defaultStorageDir(
+  subdir: 'league' | 'tournaments' | 'submissions' | 'workspaces',
+  cwd: string = process.cwd(),
+): string {
+  // 1. If running inside this project repo (detected by package.json name):
+  const localPkg = resolve(cwd, 'package.json');
+  if (existsSync(localPkg)) {
+    try {
+      const pkg = JSON.parse(readFileSync(localPkg, 'utf8'));
+      if (pkg.name === 'rcja-soccer-sim') {
+        return resolve(cwd, 'data', subdir);
+      }
+    } catch {}
+  }
 
+  // 2. Otherwise use XDG user data directory (~/.local/share/rcja-soccer-sim/<subdir>)
+  const xdgData = process.env.XDG_DATA_HOME || join(homedir(), '.local', 'share');
+  return join(xdgData, 'rcja-soccer-sim', subdir);
+}
 
 function leagueData(flags: Map<string, string>): string {
-  return resolve(flags.get('data') ?? 'league');
+  return flags.has('data') ? resolve(flags.get('data')!) : defaultStorageDir('league');
+}
+
+function tournamentsRoot(flags?: Map<string, string>): string {
+  return flags?.has('tournaments') ? resolve(flags.get('tournaments')!) : defaultStorageDir('tournaments');
+}
+
+function submissionsRoot(flags?: Map<string, string>): string {
+  return flags?.has('submissions') ? resolve(flags.get('submissions')!) : defaultStorageDir('submissions');
+}
+
+function workspacesRoot(flags?: Map<string, string>): string {
+  return flags?.has('workspaces-dir') ? resolve(flags.get('workspaces-dir')!) : defaultStorageDir('workspaces');
 }
 
 /** A password, off the terminal rather than out of a shell history. */
@@ -1022,6 +1075,428 @@ async function invite(flags: Map<string, string>): Promise<void> {
   }
 }
 
+/** Non-loopback IPv4 addresses on this machine, for displaying venue LAN URLs. */
+function lanAddresses(): string[] {
+  const nets = networkInterfaces();
+  const results: string[] = [];
+  for (const name of Object.keys(nets)) {
+    for (const net of nets[name] ?? []) {
+      if (net.family === 'IPv4' && !net.internal) {
+        results.push(net.address);
+      }
+    }
+  }
+  return results;
+}
+
+/**
+ * Initialize a new league from scratch.
+ *
+ * Sets up data folders, checks for existing admins, and prompts securely
+ * for the first administrator's password off the terminal (so nothing lands
+ * in shell history). Does not seed dummy teams — an admin creates them.
+ */
+async function leagueSetup(flags: Map<string, string>): Promise<void> {
+  if (flags.has('help')) {
+    console.log(`
+  rcja-soccer-sim league-setup
+
+    Initialize a new league: creates data folders and the first admin account.
+    Prompts interactively for the admin password if not provided.
+
+  Options:
+    --name <name>       admin display name (default: Admin)
+    --data <dir>        where league.db lives (default: ./league)
+    --password <pass>   admin password (optional, prompted securely if omitted)
+`);
+    return;
+  }
+
+  const { mkdir } = await import('node:fs/promises');
+  const dataDir = leagueData(flags);
+  const submissionsDir = submissionsRoot(flags);
+  const workspacesDir = workspacesRoot(flags);
+  const tournamentsDir = tournamentsRoot(flags);
+
+  await mkdir(dataDir, { recursive: true });
+  await mkdir(tournamentsDir, { recursive: true });
+  await mkdir(submissionsDir, { recursive: true });
+  await mkdir(workspacesDir, { recursive: true });
+
+  const { Accounts, MIN_PASSWORD } = await import('./accounts');
+  const dbPath = join(dataDir, 'league.db');
+  const accounts = new Accounts({ file: dbPath });
+
+  try {
+    const existingAdmins = accounts.list().filter((a) => a.role === 'admin' && !a.disabledAt);
+    if (existingAdmins.length > 0) {
+      console.log(`\n  league already set up at ${dataDir}`);
+      console.log(`  admin account: ${existingAdmins.map((a) => `${a.displayName} (${a.slug})`).join(', ')}`);
+      console.log(`\n  Start the league with:`);
+      console.log(`    rcja-soccer-sim league    (or: bun run cli league / make league)\n`);
+      return;
+    }
+
+    const name = flags.get('name') ?? flags.get('admin') ?? 'Admin';
+    console.log(`\n  Initializing league under ${dataDir}...`);
+    console.log(`  Creating initial admin: ${name}`);
+
+    const password = await passwordFrom(flags, `admin password (at least ${MIN_PASSWORD} characters)`);
+    const created = accounts.createAccount({ role: 'admin', displayName: name, password });
+    if (!created.ok) {
+      console.error(`\n  failed to create admin: ${created.reason}\n`);
+      process.exit(1);
+    }
+    accounts.record(null, 'account.manage', created.value.slug, 'created during league-setup');
+
+    console.log(`\n  ✓ league initialized at ${dataDir}`);
+    console.log(`  ✓ admin account "${created.value.displayName}" created (login: ${created.value.slug})\n`);
+    console.log(`  CLI commands to manage your league:`);
+    console.log(`    Start the league server:`);
+    console.log(`      rcja-soccer-sim league`);
+    console.log(`    Create a team (with workspace & push key):`);
+    console.log(`      rcja-soccer-sim team create "Team Name"`);
+    console.log(`    List all teams:`);
+    console.log(`      rcja-soccer-sim team list`);
+    console.log(`    Invite a referee:`);
+    console.log(`      rcja-soccer-sim invite --role referee`);
+    console.log(`    Create a tournament draw:`);
+    console.log(`      rcja-soccer-sim draw --name "state-round-1" --teams "Team1,Team2"\n`);
+  } finally {
+    accounts.close();
+  }
+}
+
+/**
+ * Manage teams directly from the CLI without needing a web browser.
+ *
+ * Commands:
+ *   team create <name>   create account, workspace, and mint a push API key
+ *   team list            list all teams, keys, and submission status
+ *   team key <name>      mint an additional push API key for a team
+ *   team invite <name>   issue a single-use registration invite code
+ */
+async function teamCommand(flags: Map<string, string>, words: string[]): Promise<void> {
+  const { Accounts } = await import('./accounts');
+  const { mkdir } = await import('node:fs/promises');
+  const dataDir = leagueData(flags);
+  const workspacesDir = workspacesRoot(flags);
+  const submissionsDir = submissionsRoot(flags);
+  const accounts = new Accounts({ file: join(dataDir, 'league.db') });
+
+  try {
+    const sub = words[0];
+
+    if (sub === 'create' || sub === 'add') {
+      const name = words.slice(1).join(' ') || flags.get('name') || flags.get('team');
+      if (!name) {
+        console.error('\n  team create needs a team name. Example:\n    rcja-soccer-sim team create "ACT Robotics"\n');
+        process.exit(1);
+      }
+      const password = flags.get('password') ?? randomBytes(8).toString('hex');
+      const made = accounts.createAccount({ role: 'team', displayName: name, password });
+      if (!made.ok) {
+        console.error(`\n  failed to create team: ${made.reason}\n`);
+        process.exit(1);
+      }
+
+      const teamWs = join(workspacesDir, made.value.slug);
+      await mkdir(teamWs, { recursive: true });
+
+      const keyInfo = accounts.createKey(made.value.id, 'default');
+      accounts.record(null, 'account.manage', made.value.slug, 'created from CLI team command');
+
+      const port = flags.get('port') ?? '8080';
+      const lan = lanAddresses()[0] ?? 'localhost';
+
+      console.log(`\n  ✓ Team "${made.value.displayName}" created (${made.value.slug})`);
+      console.log(`  -------------------------------------------------------------`);
+      console.log(`  Push Key:     ${keyInfo.key}`);
+      console.log(`  Workspace:    ${teamWs}`);
+      console.log(`  Submit URL:   http://${lan}:${port}/submit`);
+      console.log(`  Browser:      http://${lan}:${port}/workspace`);
+      console.log(`  -------------------------------------------------------------`);
+      console.log(`  Push robot command:`);
+      console.log(`    python3 python/submit.py --url http://${lan}:${port}/submit --key ${keyInfo.key} --dir <robot-dir>\n`);
+      return;
+    }
+
+    if (sub === 'list') {
+      const teams = accounts.list().filter((a) => a.role === 'team');
+      if (teams.length === 0) {
+        console.log('\n  no teams registered yet. Create one:\n    rcja-soccer-sim team create "Team Name"\n');
+        return;
+      }
+      console.log('\n  Registered Teams:');
+      console.log('  ' + 'TEAM'.padEnd(24) + 'SLUG'.padEnd(20) + 'KEYS'.padEnd(8) + 'SUBMISSIONS');
+      console.log('  ' + '-'.repeat(65));
+      for (const t of teams) {
+        const keys = accounts.listKeys(t.id).filter((k) => !k.revokedAt);
+        const sub1 = existsSync(join(submissionsDir, t.slug, '1'));
+        const sub2 = existsSync(join(submissionsDir, t.slug, '2'));
+        const subs = [sub1 ? 'bot 1' : null, sub2 ? 'bot 2' : null].filter(Boolean).join(', ') || 'none';
+        console.log(
+          '  ' +
+            t.displayName.padEnd(24) +
+            t.slug.padEnd(20) +
+            String(keys.length).padEnd(8) +
+            subs,
+        );
+      }
+      console.log('');
+      return;
+    }
+
+    if (sub === 'key') {
+      const name = words.slice(1).join(' ') || flags.get('name') || flags.get('team');
+      if (!name) {
+        console.error('\n  team key needs a team name. Example:\n    rcja-soccer-sim team key "ACT Robotics"\n');
+        process.exit(1);
+      }
+      const slug = slugifyTeam(name);
+      const team = accounts.bySlug(slug);
+      if (!team || team.role !== 'team') {
+        console.error(`\n  no team found matching "${name}" (slug: ${slug})\n`);
+        process.exit(1);
+      }
+      const label = flags.get('label') ?? 'cli';
+      const keyInfo = accounts.createKey(team.id, label);
+      console.log(`\n  ✓ Minted new push key for "${team.displayName}":`);
+      console.log(`    ${keyInfo.key}\n`);
+      return;
+    }
+
+    if (sub === 'invite') {
+      const name = words.slice(1).join(' ') || flags.get('name') || flags.get('team');
+      if (!name) {
+        console.error('\n  team invite needs a team name. Example:\n    rcja-soccer-sim team invite "ACT Robotics"\n');
+        process.exit(1);
+      }
+      const made = accounts.createInvite({ role: 'team', team: name });
+      if (!made.ok) {
+        console.error(`\n  failed to create invite: ${made.reason}\n`);
+        process.exit(1);
+      }
+      console.log(`\n  ✓ Registration invite code for "${made.value.team}":`);
+      console.log(`    Code:     ${made.value.code}`);
+      console.log(`    Expires:  ${made.value.expiresAt.slice(0, 10)}`);
+      console.log(`    (Give this code to the team to register at /register)\n`);
+      return;
+    }
+
+    console.log(`
+  rcja-soccer-sim team <command>
+
+    team create <name>     create a team with workspace and push key
+    team list              list all registered teams and their submissions
+    team key <name>        mint a new push API key for a team
+    team invite <name>     issue a single-use registration invite code
+
+  --data <dir>   where league.db lives (default: ./league)
+`);
+  } finally {
+    accounts.close();
+  }
+}
+
+/**
+ * Generates the systemd user service unit definition.
+ */
+export function generateServiceUnit(options: {
+  execPath: string;
+  isCliScript: boolean;
+  cliScriptPath?: string;
+  workDir: string;
+  args?: string;
+}): string {
+  const binCmd = options.isCliScript && options.cliScriptPath
+    ? `${options.execPath} ${options.cliScriptPath} league${options.args ? ' ' + options.args : ''}`
+    : `${options.execPath} league${options.args ? ' ' + options.args : ''}`;
+
+  return `[Unit]
+Description=RCJA Soccer Sim League Server
+After=network.target
+Documentation=https://github.com/${GITHUB_REPO}
+
+[Service]
+Type=simple
+WorkingDirectory=${options.workDir}
+ExecStart=${binCmd}
+Restart=on-failure
+RestartSec=3s
+Delegate=yes
+Environment=NODE_ENV=production
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin:%h/.bun/bin
+
+[Install]
+WantedBy=default.target
+`;
+}
+
+async function serviceInstall(flags: Map<string, string>): Promise<void> {
+  if (process.platform !== 'linux') {
+    console.error('\n  systemd user services are only supported on Linux.\n');
+    process.exit(1);
+  }
+
+  const scriptArg = process.argv[1];
+  const isCliScript = Boolean(scriptArg && scriptArg.endsWith('cli.ts'));
+  const cliScriptPath = isCliScript && scriptArg ? resolve(scriptArg) : undefined;
+  const workDir = existsSync(resolve('package.json')) ? process.cwd() : homedir();
+
+  const extraArgs: string[] = [];
+  if (flags.has('name')) extraArgs.push(`--name "${flags.get('name')}"`);
+  if (flags.has('port')) extraArgs.push(`--port ${flags.get('port')}`);
+  if (flags.has('data')) extraArgs.push(`--data "${flags.get('data')}"`);
+
+  const unitContent = generateServiceUnit({
+    execPath: process.execPath,
+    isCliScript,
+    cliScriptPath,
+    workDir,
+    args: extraArgs.join(' '),
+  });
+
+  const unitDir = join(homedir(), '.config', 'systemd', 'user');
+  mkdirSync(unitDir, { recursive: true });
+  const unitFile = join(unitDir, 'rcja-soccer-sim.service');
+  writeFileSync(unitFile, unitContent, 'utf8');
+
+  spawnSync('systemctl', ['--user', 'daemon-reload'], { stdio: 'inherit' });
+  spawnSync('loginctl', ['enable-linger', process.env.USER || ''], { stdio: 'ignore' });
+
+  if (flags.get('start') !== 'false') {
+    spawnSync('systemctl', ['--user', 'enable', '--now', 'rcja-soccer-sim'], { stdio: 'inherit' });
+    console.log(`\n  \x1b[32m✓\x1b[0m Service installed, enabled, and started: ${unitFile}`);
+  } else {
+    console.log(`\n  \x1b[32m✓\x1b[0m Service installed: ${unitFile}`);
+  }
+
+  console.log(`
+  Service Commands:
+    rcja-soccer-sim service status     # View service status
+    rcja-soccer-sim service logs       # Tail live logs (journalctl)
+    rcja-soccer-sim service restart    # Restart service
+    rcja-soccer-sim service stop       # Stop service
+    rcja-soccer-sim service uninstall  # Remove service
+`);
+}
+
+function serviceStatus(): void {
+  if (process.platform !== 'linux') {
+    console.error('\n  systemd is only supported on Linux.\n');
+    process.exit(1);
+  }
+  spawnSync('systemctl', ['--user', 'status', 'rcja-soccer-sim'], { stdio: 'inherit' });
+}
+
+function serviceRestart(): void {
+  if (process.platform !== 'linux') {
+    console.error('\n  systemd is only supported on Linux.\n');
+    process.exit(1);
+  }
+  const res = spawnSync('systemctl', ['--user', 'restart', 'rcja-soccer-sim'], { stdio: 'inherit' });
+  if (res.status === 0) {
+    console.log('\n  \x1b[32m✓\x1b[0m Service rcja-soccer-sim restarted.\n');
+  }
+}
+
+function serviceStop(): void {
+  if (process.platform !== 'linux') {
+    console.error('\n  systemd is only supported on Linux.\n');
+    process.exit(1);
+  }
+  const res = spawnSync('systemctl', ['--user', 'stop', 'rcja-soccer-sim'], { stdio: 'inherit' });
+  if (res.status === 0) {
+    console.log('\n  \x1b[32m✓\x1b[0m Service rcja-soccer-sim stopped.\n');
+  }
+}
+
+function serviceStart(): void {
+  if (process.platform !== 'linux') {
+    console.error('\n  systemd is only supported on Linux.\n');
+    process.exit(1);
+  }
+  const res = spawnSync('systemctl', ['--user', 'start', 'rcja-soccer-sim'], { stdio: 'inherit' });
+  if (res.status === 0) {
+    console.log('\n  \x1b[32m✓\x1b[0m Service rcja-soccer-sim started.\n');
+  }
+}
+
+function serviceLogs(flags: Map<string, string>): void {
+  if (process.platform !== 'linux') {
+    console.error('\n  systemd is only supported on Linux.\n');
+    process.exit(1);
+  }
+  const lines = flags.get('lines') || '50';
+  const follow = flags.get('follow') !== 'false';
+  const args = ['--user', '-u', 'rcja-soccer-sim', '-n', lines];
+  if (follow) args.push('-f');
+  spawnSync('journalctl', args, { stdio: 'inherit' });
+}
+
+function serviceUninstall(): void {
+  if (process.platform !== 'linux') {
+    console.error('\n  systemd is only supported on Linux.\n');
+    process.exit(1);
+  }
+  spawnSync('systemctl', ['--user', 'disable', '--now', 'rcja-soccer-sim'], { stdio: 'ignore' });
+  const unitFile = join(homedir(), '.config', 'systemd', 'user', 'rcja-soccer-sim.service');
+  if (existsSync(unitFile)) {
+    unlinkSync(unitFile);
+  }
+  spawnSync('systemctl', ['--user', 'daemon-reload'], { stdio: 'ignore' });
+  console.log('\n  \x1b[32m✓\x1b[0m Service disabled and unit file removed.\n');
+}
+
+async function serviceCommand(flags: Map<string, string>, words: string[]): Promise<void> {
+  const sub = words[0];
+  switch (sub) {
+    case 'install':
+      await serviceInstall(flags);
+      break;
+    case 'status':
+      serviceStatus();
+      break;
+    case 'restart':
+      serviceRestart();
+      break;
+    case 'stop':
+      serviceStop();
+      break;
+    case 'start':
+      serviceStart();
+      break;
+    case 'logs':
+      serviceLogs(flags);
+      break;
+    case 'uninstall':
+      serviceUninstall();
+      break;
+    case 'help':
+    case undefined:
+    default:
+      console.log(`
+  rcja-soccer-sim service <subcommand>
+
+  Subcommands:
+    install     Install, configure and enable systemd user service
+    status      Show status of rcja-soccer-sim service
+    restart     Restart rcja-soccer-sim service
+    stop        Stop rcja-soccer-sim service
+    start       Start rcja-soccer-sim service
+    logs        Follow live service logs (journalctl)
+    uninstall   Disable and remove systemd service
+`);
+      if (sub && sub !== 'help') process.exit(1);
+      break;
+  }
+}
+
+async function upgradeCommand(flags: Map<string, string>): Promise<void> {
+  await performUpgrade(leagueData(flags));
+}
+
 /**
  * The venue deployment: a front door, and the draw being played behind it.
  *
@@ -1036,7 +1511,7 @@ async function invite(flags: Map<string, string>): Promise<void> {
  */
 async function league(flags: Map<string, string>): Promise<void> {
   const { LeagueServer } = await import('./league');
-  const root = tournamentsRoot();
+  const root = tournamentsRoot(flags);
   const name = flags.get('name');
   const id = name && name !== 'true' ? slugifyTeam(name) : null;
 
@@ -1079,8 +1554,8 @@ async function league(flags: Map<string, string>): Promise<void> {
       viewerRoot: viewerRoot(),
       refereeRoot: refereeRoot(),
       workspaceRoot: workspaceRoot(),
-      workspacesDir: flags.get('workspaces-dir'),
-      submissionsDir: flags.get('submissions'),
+      workspacesDir: workspacesRoot(flags),
+      submissionsDir: submissionsRoot(flags),
       pythonLibDir: pythonLibDir(),
       realtime: refereed,
       viewHz: num(flags, 'view-hz', 60),
@@ -1091,9 +1566,22 @@ async function league(flags: Map<string, string>): Promise<void> {
   });
 
   const port = await server.listen();
-  console.log(`\n  RCJA Soccer Simulation — league server`);
+  console.log(`\n  RCJA Soccer Simulation (${getVersion()}) — league server`);
   console.log(`  front page:  http://localhost:${port}`);
+  for (const lan of lanAddresses()) {
+    console.log(`               http://${lan}:${port}`);
+  }
   console.log(`  watch:       http://localhost:${port}/live`);
+  for (const lan of lanAddresses()) {
+    console.log(`               http://${lan}:${port}/live`);
+  }
+  if (!flags.has('no-update-check') && process.env.RCJA_NO_UPDATE_CHECK !== '1') {
+    checkLatestRelease(leagueData(flags))
+      .then((info) => {
+        if (info?.updateAvailable) console.log(formatUpdateBanner(info));
+      })
+      .catch(() => {});
+  }
   if (!site) console.log(`  (no site built yet — run: bun run build:site)`);
   console.log(
     `  arenas:      up to ${budget.max}` +
@@ -1104,15 +1592,20 @@ async function league(flags: Map<string, string>): Promise<void> {
   if (made) console.log(`  playing:     ${made.name} — ${made.fixtures.length} fixtures`);
   else console.log(`  playing:     nothing — pass --name <draw> to run one`);
   if (server.accounts.empty) {
-    console.log(`\n  there are no accounts yet. Make the first admin:`);
-    console.log(`    bun run serve -- account --create --role admin --name "Your Name"`);
+    console.log(`\n  there are no accounts yet. Initialize the league:`);
+    console.log(`    rcja-soccer-sim league-setup    (or: bun run cli league-setup)\n`);
   }
   console.log(`\n  ctrl-c to stop; re-run to carry on where it stopped\n`);
 
-  process.on('SIGINT', () => {
-    void server.close();
-    process.exit(0);
-  });
+  // SIGTERM as well as ctrl-c: a venue running this under systemd, or simply
+  // restarting it, sends the first and never the second — and going down
+  // without closing leaves every arena's scratch directory behind.
+  for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+    process.on(signal, () => {
+      void server.close();
+      process.exit(0);
+    });
+  }
 
   if (!made) return;
 
@@ -1287,7 +1780,7 @@ function budgetFlags(flags: Map<string, string>): Record<string, number> {
 }
 
 async function table(flags: Map<string, string>): Promise<void> {
-  const root = tournamentsRoot();
+  const root = tournamentsRoot(flags);
   const id = slugifyTeam(requireName(flags));
   let made: Draw;
   try {
@@ -1335,11 +1828,15 @@ function usage(): void {
     tournament  play a draw through, resumably                 [--name --headless --port --referee-token]
     table       print a tournament's table as it stands        [--name]
 
-    league    run the venue: a front page, accounts, and a draw  [--name --port --data --headless]
-    capacity  what this machine can run, and what an arena costs  [--measure --data]
-    arenas    list what a league server is running, or stop one     [stop <id> --url --key]
-    account   make or repair an account                          [--create --passwd --list --role --name --data]
-    invite    issue a single-use registration code               [--role --team --list --data]
+    league-setup  initialize a league: data folders and the first admin   [--name --data --password]
+    team          manage teams: create, list, mint keys, or invite        [create|list|key|invite <name>]
+    league        run the venue: a front page, accounts, and a draw       [--name --port --data --headless]
+    capacity      what this machine can run, and what an arena costs      [--measure --data]
+    arenas        list what a league server is running, or stop one       [stop <id> --url --key]
+    account       make or repair an account                               [--create --passwd --list --role --name --data]
+    invite        issue a single-use registration code                    [--role --team --list --data]
+    service       manage systemd user background service (Linux)          [install|status|restart|stop|logs|uninstall]
+    upgrade       check for and install latest release from GitHub
 
   --opponent puts a test robot on the lime side instead of the reference
   agent: naive-chaser, shover, chaser+camper, spinner, waller, wanderer, statue
@@ -1437,50 +1934,77 @@ where the folders are kept (default ./workspaces). Needs bun run
 `);
 }
 
-const { command, flags, words } = parse(process.argv.slice(2));
-switch (command) {
-  case 'serve':
-    await serve(flags);
-    break;
-  case 'practice':
-    await practice(flags);
-    break;
-  case 'arena':
-    await arena(flags);
-    break;
-  case 'match':
-    once(flags);
-    break;
-  case 'ladder':
-    ladder(flags);
-    break;
-  case 'bench':
-    await bench(flags);
-    break;
-  case 'draw':
-    await draw(flags);
-    break;
-  case 'tournament':
-    await tournament(flags);
-    break;
-  case 'table':
-    await table(flags);
-    break;
-  case 'capacity':
-    await capacity(flags);
-    break;
-  case 'arenas':
-    await arenasCommand(flags, words);
-    break;
-  case 'league':
-    await league(flags);
-    break;
-  case 'account':
-    await account(flags);
-    break;
-  case 'invite':
-    await invite(flags);
-    break;
-  default:
-    usage();
+if (import.meta.main) {
+  const { command, flags, words } = parse(process.argv.slice(2));
+
+  if (flags.has('version') || command === 'version' || command === '--version' || command === '-v') {
+    console.log(`rcja-soccer-sim ${getVersion()}`);
+    process.exit(0);
+  }
+
+  switch (command) {
+    case 'version':
+      console.log(`rcja-soccer-sim ${getVersion()}`);
+      break;
+    case 'league-setup':
+    case 'setup':
+      await leagueSetup(flags);
+      break;
+    case 'team':
+    case 'teams':
+      await teamCommand(flags, words);
+      break;
+    case 'serve':
+      await serve(flags);
+      break;
+    case 'practice':
+      await practice(flags);
+      break;
+    case 'arena':
+      await arena(flags);
+      break;
+    case 'match':
+      once(flags);
+      break;
+    case 'ladder':
+      ladder(flags);
+      break;
+    case 'bench':
+      await bench(flags);
+      break;
+    case 'draw':
+      await draw(flags);
+      break;
+    case 'tournament':
+      await tournament(flags);
+      break;
+    case 'table':
+      await table(flags);
+      break;
+    case 'capacity':
+      await capacity(flags);
+      break;
+    case 'arenas':
+      await arenasCommand(flags, words);
+      break;
+    case 'league':
+      await league(flags);
+      break;
+    case 'account':
+      await account(flags);
+      break;
+    case 'invite':
+      await invite(flags);
+      break;
+    case 'service':
+    case 'systemd':
+      await serviceCommand(flags, words);
+      break;
+    case 'upgrade':
+    case 'update':
+      await upgradeCommand(flags);
+      break;
+    default:
+      usage();
+  }
 }

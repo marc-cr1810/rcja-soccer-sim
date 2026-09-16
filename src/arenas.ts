@@ -41,6 +41,8 @@
 import type { Subprocess } from 'bun';
 import { randomBytes } from 'node:crypto';
 import { connect, createServer } from 'node:net';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
 import { sampleTree, usageBetween, type TreeSample, type Usage } from './usage';
@@ -88,6 +90,14 @@ export interface ArenaSupervisorOptions {
   /** Where the venue keeps pushed submissions, so an arena can load them. */
   submissionsDir?: string;
   /**
+   * Where the venue keeps team workspaces, so an arena can run what a team is
+   * still typing — and so a practice field can give a team's arrangement back.
+   *
+   * Absent on a supervisor with no workspaces behind it, and then an arena is
+   * told nothing: Run is refused with a sentence and nothing is persisted.
+   */
+  workspacesDir?: string;
+  /**
    * Called once an arena's process has actually gone, however it went.
    *
    * Swept as idle, stopped from the admin console, pre-empted by a fixture,
@@ -98,6 +108,43 @@ export interface ArenaSupervisorOptions {
    * ending rather than to any of the ways of asking for one.
    */
   onArenaEnded?: (arena: { id: string; kind: ArenaKind; owner: string | null }) => void;
+  /**
+   * Minutes between marking a quiet arena for closing and actually closing it.
+   *
+   * The warning is the whole point: a fifteen-year-old who walked away for
+   * lunch should come back to an explanation, not an absence.
+   */
+  graceMinutes?: number;
+  /**
+   * Called when a quiet arena is marked for closing, and again with
+   * `closingAt: null` when somebody turns up and it is reprieved.
+   *
+   * A supervisor cannot say this itself — it has no idea who owns the field or
+   * where they are looking — so it says it happened and whoever keeps the
+   * ledgers puts it on the field and on the owner's dashboard.
+   */
+  onArenaWarned?: (arena: { id: string; owner: string | null; closingAt: string | null }) => void;
+  /**
+   * How many teams are waiting for a field right now.
+   *
+   * Reclamation scales with demand rather than a flat maximum lifetime: a hard
+   * ceiling on how long a field may live punishes everybody on a quiet
+   * afternoon to stop one person on a busy one. With nobody waiting, be
+   * generous; with somebody waiting, come round sooner and take the quietest
+   * field first. A function rather than a number because the queue is the
+   * caller's and changes between sweeps.
+   */
+  queued?: () => number;
+  /**
+   * The shortest quiet period a queue may shorten the configured one to.
+   *
+   * Somebody waiting should not mean a field is taken off a team who looked
+   * away to read an error message. It can only ever *lower* the configured
+   * time — a floor above it would mean a queue made fields live longer, which
+   * is the opposite of the point — and it is here rather than in `league.json`
+   * because it is a safety rail on a rule, not a dial a venue turns.
+   */
+  busyIdleFloorMinutes?: number;
   /** Per-seat grants, passed to every arena so practice and finals play alike. */
   seatCpuPercent?: number;
   seatMemoryMb?: number;
@@ -128,9 +175,37 @@ interface Arena {
   port: number;
   child: Subprocess;
   createdAt: number;
-  /** Sockets currently proxied to it — viewers and robots both. */
+  /**
+   * Connections currently proxied to it that mean *somebody is there* — a
+   * viewer's stream, a console's request. A robot's `/agent` socket is not one
+   * of them, deliberately: see `lastUsed`.
+   */
   open: number;
-  idleSince: number | null;
+  /**
+   * When somebody was last actually using this field.
+   *
+   * Not "when was this arena last talked to". A robot connected to it does not
+   * move this, which is a deliberate change: a field of robots playing to an
+   * empty stand is precisely the waste being reclaimed, and letting `/agent`
+   * hold an arena open means the team that forgot to close a terminal outranks
+   * the team waiting in the queue.
+   */
+  lastUsed: number;
+  /** When this arena will close unless somebody turns up, once warned. */
+  closingAt: number | null;
+  /**
+   * A directory this arena may put working files in, owned by *this* process.
+   *
+   * An arena dies by having its process group killed — swept, stopped,
+   * pre-empted, or with the hub — so it never gets to tidy up after itself, and
+   * anything it made under `/tmp` would simply stay there. A copy of a team's
+   * code is not something to leave lying around a venue machine for a week. So
+   * the supervisor makes the directory, tells the child where it is, and
+   * removes it when the arena ends — for the same reason the ledgers are
+   * emptied there: the ending is the one event every way of stopping arrives
+   * at.
+   */
+  scratch: string;
   /**
    * The credential this arena's referee surface accepts.
    *
@@ -159,6 +234,8 @@ interface Arena {
 
 const DEFAULT_MAX_ARENAS = 4;
 const DEFAULT_IDLE_MINUTES = 20;
+const DEFAULT_GRACE_MINUTES = 5;
+const DEFAULT_BUSY_IDLE_FLOOR_MINUTES = 3;
 /** How often idle arenas are swept up. */
 const SWEEP_MS = 30_000;
 /** How often every arena's cost is re-read from `/proc`. */
@@ -184,17 +261,17 @@ async function freePort(): Promise<number> {
 
 export class ArenaSupervisor {
   private readonly arenas = new Map<string, Arena>();
-  private readonly sweep: NodeJS.Timeout;
+  private readonly sweeper: NodeJS.Timeout;
   private readonly sampler: NodeJS.Timeout;
   private readonly log: (line: string) => void;
 
   constructor(private opts: ArenaSupervisorOptions = {}) {
     this.log = opts.log ?? (() => {});
-    this.sweep = setInterval(() => this.closeIdle(), SWEEP_MS);
+    this.sweeper = setInterval(() => this.sweep(), SWEEP_MS);
     this.sampler = setInterval(() => this.sample(), SAMPLE_MS);
     // Housekeeping, not work: a server with nothing else to do should still be
     // allowed to exit.
-    this.sweep.unref?.();
+    this.sweeper.unref?.();
     this.sampler.unref?.();
   }
 
@@ -276,11 +353,22 @@ export class ArenaSupervisor {
 
     const id = randomBytes(6).toString('base64url');
     const port = await freePort();
+    const scratch = await mkdtemp(join(tmpdir(), 'rcja-arena-'));
     const refereeToken = randomBytes(24).toString('base64url');
     const args = COMPILED ? [] : [CLI];
     args.push('arena', '--kind', kind, '--port', String(port), '--die-with-parent');
+    args.push('--scratch', scratch);
     if (kind === 'fixture') args.push('--referee-token', refereeToken);
     if (this.opts.submissionsDir) args.push('--submissions', this.opts.submissionsDir);
+    if (this.opts.workspacesDir) {
+      args.push('--workspaces-dir', resolve(this.opts.workspacesDir));
+      // Where this field remembers its arrangement. Only for a field that
+      // belongs to somebody: an anonymous one has no folder to keep it in, and
+      // nobody to give it back to.
+      if (kind === 'practice' && options.owner) {
+        args.push('--field-state', resolve(this.opts.workspacesDir, options.owner, 'field.json'));
+      }
+    }
     if (this.opts.seatCpuPercent !== undefined) args.push('--seat-cpu', String(this.opts.seatCpuPercent));
     if (this.opts.seatMemoryMb !== undefined) args.push('--seat-mem', String(this.opts.seatMemoryMb));
     // Every supervised arena is reached only through whoever is supervising
@@ -323,9 +411,11 @@ export class ArenaSupervisor {
       owner: options.owner ?? null,
       port,
       child,
+      scratch,
       createdAt: Date.now(),
       open: 0,
-      idleSince: Date.now(),
+      lastUsed: Date.now(),
+      closingAt: null,
       refereeToken,
       lastSample: null,
       usage: null,
@@ -371,6 +461,7 @@ export class ArenaSupervisor {
     } catch (err) {
       stop(arena);
       this.arenas.delete(id);
+      this.ended(arena);
       throw err;
     }
 
@@ -382,15 +473,37 @@ export class ArenaSupervisor {
   /**
    * Mark an arena as having one open connection, returning a release function.
    *
-   * Idle-timeout is gated on `open === 0`. This increments it so the arena is
-   * not swept while a request is in flight. The caller must call the returned
-   * function when the connection closes. Returns `null` if the arena is gone.
+   * The sweep will not take an arena while somebody is on it, so a viewer's
+   * socket and a console's request are counted here and keep it alive for as
+   * long as they last. A robot's `/agent` socket passes `presence: false` and
+   * is counted nowhere: a field of robots playing to an empty stand is exactly
+   * what is being reclaimed. The caller must call the returned function when
+   * the connection closes, whichever it is. Returns `null` if the arena is
+   * gone, which is how a caller knows to answer 404.
    */
-  trackConnection(id: string): (() => void) | null {
+  trackConnection(id: string, opts: { presence?: boolean } = {}): (() => void) | null {
     const arena = this.arenas.get(id);
     if (!arena) return null;
-    this.hold(arena);
-    return () => this.release(arena);
+    if (opts.presence ?? true) {
+      this.hold(arena);
+      return () => this.release(arena);
+    }
+    // A robot's socket is not counted at all — that is the rule, not an
+    // oversight. What the caller still wants is the `null` above, which is how
+    // it knows there is no arena to connect to.
+    return () => {};
+  }
+
+  /**
+   * Somebody is using this field: a person watching it or acting on it.
+   *
+   * Separate from `trackConnection` because most presence is not a connection
+   * at all — it is a request that has already finished, or a console poll from
+   * a tab somebody is actually looking at.
+   */
+  touch(id: string): void {
+    const arena = this.arenas.get(id);
+    if (arena) this.used(arena);
   }
 
   /** Stop one arena now. */
@@ -404,7 +517,7 @@ export class ArenaSupervisor {
   }
 
   closeAll(): void {
-    clearInterval(this.sweep);
+    clearInterval(this.sweeper);
     clearInterval(this.sampler);
     for (const arena of this.arenas.values()) stop(arena);
     const all = [...this.arenas.values()];
@@ -423,6 +536,10 @@ export class ArenaSupervisor {
   private ended(arena: Arena): void {
     if (arena.ended) return;
     arena.ended = true;
+    // Whatever the child was working out of. Nothing in there is worth keeping
+    // — a copy of code that is still in the team's own workspace — and this is
+    // the only moment anything gets to remove it.
+    void rm(arena.scratch, { recursive: true, force: true }).catch(() => {});
     try {
       this.opts.onArenaEnded?.({ id: arena.id, kind: arena.kind, owner: arena.owner });
     } catch (err) {
@@ -446,12 +563,38 @@ export class ArenaSupervisor {
 
   private hold(arena: Arena): void {
     arena.open += 1;
-    arena.idleSince = null;
+    this.used(arena);
   }
 
   private release(arena: Arena): void {
     arena.open = Math.max(0, arena.open - 1);
-    if (arena.open === 0 && arena.idleSince === null) arena.idleSince = Date.now();
+    this.used(arena);
+  }
+
+  /**
+   * The field has just been used, so the quiet clock starts again from now —
+   * and any warning it had is off.
+   *
+   * The reprieve is said out loud, not just recorded: a banner that appeared
+   * and then stopped being true without saying so is worse than no banner.
+   */
+  private used(arena: Arena): void {
+    arena.lastUsed = Date.now();
+    if (arena.closingAt === null) return;
+    arena.closingAt = null;
+    this.warned(arena);
+  }
+
+  private warned(arena: Arena): void {
+    try {
+      this.opts.onArenaWarned?.({
+        id: arena.id,
+        owner: arena.owner,
+        closingAt: arena.closingAt === null ? null : new Date(arena.closingAt).toISOString(),
+      });
+    } catch (err) {
+      this.log(`[arena ${arena.id}] ${(err as Error).message}`);
+    }
   }
 
   /**
@@ -472,19 +615,64 @@ export class ArenaSupervisor {
   }
 
   /**
-   * Close practice arenas nobody is using.
+   * Give back practice fields nobody is using — warned first, then closed.
    *
-   * Fixture arenas are exempt: one is spawned and stopped by whoever is
-   * running the draw, and a fixture with nobody watching is still a fixture.
+   * Fixture arenas are exempt: one is spawned and stopped by whoever is running
+   * the draw, and a fixture with nobody watching is still a fixture.
+   *
+   * Two stages, because a field is somebody's afternoon: quiet for long enough
+   * and it is *marked*, with whoever owns it told when it will go; quiet for
+   * the grace period after that and it actually goes. Anything at all — a
+   * person opening it, a drag, a seat change — cancels the first stage, in
+   * `used()`.
+   *
+   * How long "long enough" is depends on whether anybody is waiting. Nobody in
+   * the queue and a field can sit idle for the full configured time; somebody
+   * waiting and the quiet period halves, and only the *quietest* field is taken
+   * per sweep, so a queue of one does not clear the hall.
+   *
+   * Run on a timer every half minute, and callable directly — by a test that
+   * should not have to wait for one, and by anything that wants the machine
+   * tidied now rather than at the next tick.
    */
-  private closeIdle(): void {
-    const idleFor = (this.opts.idleMinutes ?? DEFAULT_IDLE_MINUTES) * 60_000;
+  sweep(): void {
     const now = Date.now();
+    const waiting = this.opts.queued?.() ?? 0;
+    const configured = (this.opts.idleMinutes ?? DEFAULT_IDLE_MINUTES) * 60_000;
+    const floor = (this.opts.busyIdleFloorMinutes ?? DEFAULT_BUSY_IDLE_FLOOR_MINUTES) * 60_000;
+    // A queue may only ever shorten the wait. Clamped to the configured time as
+    // well as to the floor, because a floor above what the venue asked for
+    // would mean a queue made fields live *longer*.
+    const quietFor = waiting > 0 ? Math.min(configured, Math.max(floor, configured / 2)) : configured;
+    const graceFor = (this.opts.graceMinutes ?? DEFAULT_GRACE_MINUTES) * 60_000;
+
+    const idle: Arena[] = [];
     for (const arena of [...this.arenas.values()]) {
       if (arena.kind !== 'practice') continue;
-      if (arena.idleSince === null || now - arena.idleSince < idleFor) continue;
-      this.log(`[arena ${arena.id}] nobody watching; closing`);
-      this.close(arena.id);
+
+      if (arena.closingAt !== null) {
+        if (now < arena.closingAt) continue;
+        this.log(`[arena ${arena.id}] nobody came back; closing`);
+        this.close(arena.id);
+        continue;
+      }
+
+      // A person on the field, or one who was here a moment ago. A connected
+      // robot is deliberately not either of those.
+      if (arena.open > 0 || now - arena.lastUsed < quietFor) continue;
+      idle.push(arena);
+    }
+
+    if (idle.length === 0) return;
+    idle.sort((a, b) => a.lastUsed - b.lastUsed);
+    // Everything quiet goes when nobody is waiting — the machine is simply
+    // holding fields nobody wants. With a queue, take the quietest one only:
+    // the point is to free a field for the team at the front, not to clear
+    // every field that happens to be between drags.
+    for (const arena of waiting > 0 ? idle.slice(0, 1) : idle) {
+      arena.closingAt = now + graceFor;
+      this.log(`[arena ${arena.id}] quiet; closing in ${Math.round(graceFor / 60_000)} min unless somebody comes back`);
+      this.warned(arena);
     }
   }
 }

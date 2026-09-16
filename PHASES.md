@@ -719,11 +719,40 @@ its *normal* state while somebody arranges it — and is cured by the same chang
 
 ---
 
-## Phase 10 — Run it, and give it back
+## Phase 10 — Run it, and give it back ✅
 
 *Gate: a team presses Run on the code in its workspace and watches its own
 robot play; when it crashes they read the traceback in the browser; and a field
 they walk away from comes back on its own, with their arrangement intact.*
+
+Passed. A team signed in, typed a robot in the browser editor, pressed **Run
+it**, and arrived on their own practice field watching it play — one press, no
+push, no organiser. `retrun 5` on line 3 got them a seat reading *its program
+would not start — see Output* and, under the button, `File "robot.py", line 3 /
+retrun 5 / SyntaxError: invalid syntax`, five times over as it was retried and
+given up on. Fixing it and pressing **Restart** brought the robot back with the
+crash still above the `— restarted —` line. Rewriting the workspace to nonsense
+while it played changed nothing on the field: what runs is the copy taken when
+Run was pressed. A field arranged into a corner case and then abandoned — with
+its robot still connected and playing — was warned on the field and on the
+owner's dashboard (*it will close at 07:50 PM*), closed a minute later, and gave
+its slot back; the next field the team opened came up with the arrangement
+already set out, read back from a `field.json` in their own folder. A drag
+during the grace period cancelled the closing, on both screens, and started the
+clock again.
+
+`src/practice.ts` · `src/workspace.ts` · `src/lineup.ts` · `src/arenas.ts` ·
+`src/league.ts` · `workspace/` · `practice/` ·
+[docs/practising.md](docs/practising.md)
+
+Two things came out of running it rather than testing it. A copy of a team's
+code, and the Unix socket directory every arena makes, were both being left in
+`/tmp` for the life of the machine — an arena is *killed*, so it never tidies up
+after itself, and there were 790 abandoned socket directories on the development
+machine before anybody looked. The supervisor now makes one directory per arena
+and removes it at the ending it already hears about, and the league server
+answers `SIGTERM` as well as ctrl-c, which is what a venue restarting it
+actually sends.
 
 Phase 8 made a field belong to a team. This is what the team does with it — and
 the two halves belong together because they are the same folder: Run reads the

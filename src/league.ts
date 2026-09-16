@@ -41,6 +41,7 @@ import { extname, join, normalize, resolve } from 'node:path';
 
 import { splitArenaPath, type ServerOptions } from './server';
 import { ArenaSupervisor } from './arenas';
+import { AGENT_PATH } from './gateway';
 import { Occupancy, numberOfSeat, type Placement } from './occupancy';
 import { Tenancy } from './tenancy';
 import { randomBytes } from 'node:crypto';
@@ -71,6 +72,7 @@ import {
   RegisterBodySchema,
   InviteTeamBodySchema,
   ResetPasswordBodySchema,
+  RunBodySchema,
   SeatActionBodySchema,
   SeatBodySchema,
   SetDisabledBodySchema,
@@ -161,6 +163,8 @@ interface LeagueWsData {
   type: 'relay';
   upstream: WebSocket;
   queue?: (string | Buffer)[];
+  /** Let go of the arena this socket was holding open. */
+  release?: () => void;
 }
 
 export class LeagueServer {
@@ -203,6 +207,8 @@ export class LeagueServer {
    * explanation, and they are looking at the field.
    */
   private readonly fieldNotices = new Map<string, string>();
+  /** Fields with a closing time on them, for the owner's dashboard. */
+  private readonly closing = new Map<string, string>();
 
   constructor(private readonly opts: LeagueOptions) {
     this.log = opts.log ?? (() => {});
@@ -226,13 +232,20 @@ export class LeagueServer {
     this.occupancy = new Occupancy();
     this.arenas = new ArenaSupervisor({
       submissionsDir: resolve(opts.world.submissionsDir ?? 'submissions'),
+      workspacesDir: resolve(opts.world.workspacesDir ?? 'workspaces'),
       maxArenas: this.budget.max,
       fixtureSlots: this.budget.fixtures,
       seatCpuPercent: this.settings.arenas.seatCpuPercent,
       seatMemoryMb: this.settings.arenas.seatMemoryMb,
       idleMinutes: this.settings.practice.idleMins,
+      graceMinutes: this.settings.practice.graceMins,
+      // Reclamation scales with demand rather than a flat lifetime, and the
+      // queue is the hub's. A function rather than a number so the supervisor
+      // reads it fresh on every sweep and knows nothing about tenancy.
+      queued: () => this.tenancy.waiting().length,
       log: (line) => this.log(line),
       onArenaEnded: (arena) => this.arenaEnded(arena),
+      onArenaWarned: (arena) => this.arenaWarned(arena),
     });
   }
 
@@ -275,6 +288,33 @@ export class LeagueServer {
   }
 
   /**
+   * A quiet field is about to be given back, or has just been reprieved.
+   *
+   * Said in both places the owner might be looking: on the field itself, where
+   * Phase 8's notice banner already exists for exactly this kind of sentence,
+   * and on their dashboard, which is where they are if they are not on the
+   * field. Cleared the moment somebody turns up, because a warning that stopped
+   * being true without saying so is worse than no warning at all.
+   */
+  private arenaWarned(arena: { id: string; owner: string | null; closingAt: string | null }): void {
+    if (arena.closingAt === null) {
+      this.fieldNotices.delete(arena.id);
+      this.closing.delete(arena.id);
+      return;
+    }
+    const at = new Date(arena.closingAt);
+    // Written out rather than localised: this string is composed on the server
+    // and read in a hall, and the server's idea of a locale is whatever the
+    // machine was installed with rather than anything about the people looking.
+    const when = `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`;
+    this.closing.set(arena.id, arena.closingAt);
+    this.fieldNotices.set(
+      arena.id,
+      `Nobody has used this field for a while, so it will close at ${when} and go to whoever is waiting. Move something, or press anything, to keep it.`,
+    );
+  }
+
+  /**
    * An arena's process has gone — swept, stopped, pre-empted or crashed.
    *
    * Both ledgers are emptied of it here rather than at each of the places that
@@ -286,6 +326,7 @@ export class LeagueServer {
     this.occupancy.releaseArena(arena.id);
     this.tenancy.forget(arena.id);
     this.fieldNotices.delete(arena.id);
+    this.closing.delete(arena.id);
     if (arena.kind !== 'practice') return;
     const offer = this.tenancy.slotFreed();
     if (offer) {
@@ -319,6 +360,7 @@ export class LeagueServer {
         },
         close: (ws) => {
           try { ws.data.upstream.close(); } catch {}
+          ws.data.release?.();
         },
       },
     });
@@ -457,6 +499,14 @@ export class LeagueServer {
       const port = this.arenas.portOf(forArena.id);
       if (port === null) return new Response('no arena by that name', { status: 404 });
       const path = forArena.rest;
+      // Both doors are relayed, but they do not mean the same thing to a field
+      // that is deciding whether anybody still wants it: a viewer's socket is a
+      // person watching, and a robot's `/agent` is a program that may well have
+      // been left running by somebody who went home. Until now neither was
+      // tracked here at all, so a hub-supervised field was kept alive only by
+      // its console polling.
+      const presence = path.split('?')[0] !== AGENT_PATH;
+      const release = this.arenas.trackConnection(forArena.id, { presence });
       try {
         const queue: (string | Buffer)[] = [];
         const upstream = new WebSocket(`ws://127.0.0.1:${port}${path}`);
@@ -467,9 +517,20 @@ export class LeagueServer {
           };
           upstream.onerror = () => fail(new Error('upstream failed'));
         });
-        server.upgrade(req, { data: { type: 'relay', upstream, queue } });
+        const upgraded = server.upgrade(req, {
+          data: { type: 'relay', upstream, queue, release: release ?? undefined },
+        });
+        if (!upgraded) {
+          // Nothing will ever call `close` for this socket, so the hold has to
+          // be let go here or the arena is held open by a connection that was
+          // never made — and a held arena is never swept.
+          release?.();
+          try { upstream.close(); } catch {}
+          return new Response('could not open the stream', { status: 400 });
+        }
         return;
       } catch {
+        release?.();
         return new Response('the match server is not answering', { status: 502 });
       }
     }
@@ -488,15 +549,25 @@ export class LeagueServer {
 
       // A practice field, for whoever may open one — and, since Phase 8, one
       // that belongs to the team that opened it.
-      if (url === '/practice' || url === '/practice/claim' || url === '/practice/leave') {
+      if (
+        url === '/practice' ||
+        url === '/practice/claim' ||
+        url === '/practice/leave' ||
+        url === '/practice/run'
+      ) {
         if (!can(actor, 'field.open')) return this.refuse(req, actor, '/practice');
         if (req.method !== 'POST') {
-          return Response.json({ ok: true, fields: this.practiceFieldsFor(actor) }, { status: 200 });
+          // `run` is how the browser editor discovers that this server has
+          // fields to give. A match server on a laptop hosts workspaces but has
+          // no accounts and no ownership, so it has no Run to offer and says
+          // nothing of the kind — and the button is simply not there.
+          return Response.json({ ok: true, run: true, fields: this.practiceFieldsFor(actor) }, { status: 200 });
         }
         if (url === '/practice/leave') {
           if (actor.slug) this.tenancy.leaveQueue(actor.slug);
           return Response.json({ ok: true }, { status: 200 });
         }
+        if (url === '/practice/run') return await this.runFromWorkspace(req, actor);
         return await this.openPracticeField(actor, url === '/practice/claim');
       }
 
@@ -620,7 +691,14 @@ export class LeagueServer {
     headers: Headers,
     body?: string,
   ): Promise<Response> {
-    const release = this.arenas.trackConnection(id);
+    // A console polling from a tab nobody is looking at says `active=0`, and a
+    // poll like that keeps the arena alive for the length of the request
+    // without counting as somebody being here. Without that, one forgotten
+    // browser tab would simply take over from the forgotten laptop program
+    // this phase stops holding fields open.
+    const release = this.arenas.trackConnection(id, {
+      presence: new URL(req.url).searchParams.get('active') !== '0',
+    });
     try {
       const sending = body !== undefined ? body : req.method !== 'GET' && req.method !== 'HEAD' ? req.body : undefined;
       return await fetch(`http://127.0.0.1:${port}${rest}`, {
@@ -723,6 +801,80 @@ export class LeagueServer {
   }
 
   /**
+   * Run what this team is typing, in one press.
+   *
+   * Everything here is something a team could already do by hand — open a
+   * field, then put their workspace in a seat — and the whole value is that
+   * they do not have to, because the loop this makes possible is measured in
+   * seconds and every step between typing and watching is spent out of it.
+   *
+   * Their own field, so their robots take the violet side, and the seat that
+   * matches the robot: `violet-2` is robot 2 everywhere else on this server and
+   * changing that here would break the one answer one-robot-one-place gives.
+   * A refusal from opening a field — the queue, the per-team cap, practice
+   * being closed — is passed back exactly as `/practice` would have said it,
+   * because those are the same three answers and they are already phrased.
+   */
+  private async runFromWorkspace(req: Request, actor: Actor): Promise<Response> {
+    const slug = actor.slug;
+    if (slug === null) {
+      return Response.json({ ok: false, reason: 'only a team can run its own code' }, { status: 403 });
+    }
+    const body = await readJsonBody(req, 1024);
+    if (!body.ok) return badBody(body.reason, body.status);
+    const validated = validateBody(body.payload, RunBodySchema, '"robot" must be 1 or 2');
+    if (!validated.ok) return validated.response;
+    const { robot } = validated.value;
+
+    let arenaId = this.tenancy.fieldsOwnedBy(slug)[0] ?? null;
+    if (arenaId === null) {
+      const opened = await this.openPracticeField(actor, false);
+      // Queued, capped, or practice closed: the answer is already written for a
+      // person to read, and a second wording of it here would be a worse one.
+      if (!opened.ok) return opened;
+      arenaId = ((await opened.json()) as { field?: { id?: string } }).field?.id ?? null;
+      if (arenaId === null) {
+        return Response.json({ ok: false, reason: 'the field did not start' }, { status: 503 });
+      }
+    }
+
+    const seat = `violet-${robot}`;
+    const held = this.occupancy.inSeat(arenaId, seat);
+    if (held && held.slug !== slug) {
+      return Response.json(
+        { ok: false, reason: `${held.slug}'s robot is in the ${seat} seat; take it out first` },
+        { status: 409 },
+      );
+    }
+
+    const port = this.arenas.portOf(arenaId);
+    if (port === null) {
+      return Response.json({ ok: false, reason: 'the field is no longer there' }, { status: 503 });
+    }
+    const claim = this.occupancy.claim(slug, robot, arenaId, seat);
+    if (!claim.ok) {
+      return Response.json({ ok: false, reason: this.whereItIs(claim.held, actor) }, { status: 409 });
+    }
+
+    const seated = await fetch(`http://127.0.0.1:${port}/practice-api/seat`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ seat, fill: { kind: 'workspace', team: slug } }),
+    }).catch(() => null);
+    if (!seated || !seated.ok) {
+      // The child would not take it, so the ledger must not claim it did.
+      this.occupancy.release(arenaId, seat);
+      return Response.json({ ok: false, reason: 'the field is not answering' }, { status: 502 });
+    }
+
+    this.log(`[practice] ${slug} ran robot ${robot} on ${arenaId}`);
+    return Response.json(
+      { ok: true, field: { id: arenaId, url: `/a/${arenaId}/practice/` }, seat },
+      { status: 200 },
+    );
+  }
+
+  /**
    * A request for a practice arena, which the hub no longer simply forwards.
    *
    * Watching stays open — the viewer and its socket pass through untouched,
@@ -768,6 +920,20 @@ export class LeagueServer {
         },
         { status: 200 },
       );
+    }
+
+    // A seat's output is the one GET that is not simply passed on. Everything
+    // else a field says is said to everybody on it; a traceback is one team's
+    // half-written code failing, and it belongs to them and to whoever owns the
+    // field they are sitting on.
+    if (rest.startsWith('/practice-api/output')) {
+      const asked = new URL(req.url);
+      const refusal = this.mayTouchSeat(actor, id, asked.searchParams.get('seat') ?? '');
+      if (refusal) return refusal;
+      // `rest` is a path and nothing else — `splitArenaPath` works on
+      // `pathname` — so the query has to be put back on. This is the first
+      // thing forwarded to an arena that has one.
+      return await this.forward(id, port, `${rest}${asked.search}`, req, new Headers(req.headers));
     }
 
     if (isConsole || req.method !== 'POST') {
@@ -836,7 +1002,7 @@ export class LeagueServer {
     const number = numberOfSeat(seat);
     let sending = fill;
 
-    if (fill.kind === 'submission' || fill.kind === 'laptop') {
+    if (fill.kind === 'submission' || fill.kind === 'laptop' || fill.kind === 'workspace') {
       if (!fill.team) {
         return badBody('say which team\'s robot is taking this seat', 400);
       }
@@ -846,6 +1012,16 @@ export class LeagueServer {
       if (!can(actor, 'match.join', team)) {
         return Response.json(
           { ok: false, reason: 'you can only put your own robots in a seat' },
+          { status: 403 },
+        );
+      }
+      // Running a workspace reads code that was never pushed, so it is a
+      // workspace act as well as a seating one. An organiser who may seat
+      // anybody's robot still may not run what a team has not submitted
+      // unless they may open that team's editor.
+      if (fill.kind === 'workspace' && !can(actor, 'team.workspace.write', team)) {
+        return Response.json(
+          { ok: false, reason: 'only the team itself can run its unpushed code' },
           { status: 403 },
         );
       }
@@ -876,7 +1052,7 @@ export class LeagueServer {
     );
     if (!forwarded.ok) {
       // The child would not take it, so the ledger must not claim it did.
-      if (sending.kind === 'submission' || sending.kind === 'laptop') this.occupancy.release(id, seat);
+      if (sending.kind !== 'empty' && sending.kind !== 'built-in') this.occupancy.release(id, seat);
       return forwarded;
     }
     if (sending.kind !== 'laptop') return forwarded;
@@ -1479,6 +1655,10 @@ export class LeagueServer {
       url: `/a/${id}/practice/`,
       guests: this.tenancy.guestsOf(id),
       invited: this.tenancy.invitedTo(id),
+      // A field about to be given back. Here as well as on the field itself,
+      // because a team who has walked away from it is by definition not
+      // looking at it.
+      closingAt: this.closing.get(id) ?? null,
     }));
     const guestOf = this.tenancy
       .fieldsOpenTo(slug)

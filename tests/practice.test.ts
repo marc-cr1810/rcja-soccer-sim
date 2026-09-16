@@ -9,6 +9,10 @@
  * and a real push, and a test that mocked them would be testing the mock.
  */
 
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import { MatchServer } from '../src/server';
 import { PracticeSession } from '../src/practice';
 
@@ -155,4 +159,128 @@ describe('a practice field', () => {
     expect(session.match.world.robots.find((r) => r.id === 'violet-1')!.isGoalie).toBe(false);
     expect(session.match.world.robots.find((r) => r.id === 'violet-2')!.isGoalie).toBe(true);
   });
+});
+
+/**
+ * What a seat said, and where the field was left.
+ *
+ * The first is the only thing a student gets when their code does not parse —
+ * before this, the one symptom was a seat reading "not answering" — and the
+ * second is what makes reclaiming an idle field a lost process rather than a
+ * lost afternoon. Neither needs a real sandboxed program to be tested: the
+ * buffer is fed by the same path whatever is talking, and the arrangement is
+ * dragging and a file.
+ */
+describe('what a seat has said', () => {
+  it('is nothing at all until something says something', async () => {
+    const session = await field();
+    expect(session.outputOf('violet-1')).toEqual({ seq: 0, lines: [] });
+    expect(session.state().seats['violet-1']!.outputSeq).toBe(0);
+  });
+
+  it('says why a seat could not start, where it is read', async () => {
+    const session = await field();
+    // A server with no python/ cannot run a submission, and the old answer to
+    // that was a seat detail nobody was looking at.
+    await session.setSeat('violet-1', { kind: 'submission', team: 'Nobody' });
+
+    const state = session.state().seats['violet-1']!;
+    expect(state.detail).toContain('cannot run submissions');
+    expect(session.outputOf('violet-1').lines.map((l) => l.text)).toEqual([state.detail!]);
+    expect(state.outputSeq).toBe(1);
+  });
+
+  it('is forgotten when the seat becomes something else', async () => {
+    const session = await field();
+    await session.setSeat('violet-1', { kind: 'submission', team: 'Nobody' });
+    expect(session.outputOf('violet-1').lines).toHaveLength(1);
+
+    await session.setSeat('violet-1', { kind: 'built-in' });
+    // A traceback belongs to a program. Reading the last occupant's crash
+    // under a different robot's name is worse than reading nothing.
+    expect(session.outputOf('violet-1')).toEqual({ seq: 0, lines: [] });
+  });
+
+  it('is kept across a restart, with a line to say one happened', async () => {
+    const session = await field();
+    await session.setSeat('violet-1', { kind: 'submission', team: 'Nobody' });
+    await session.restartSeat('violet-1');
+
+    // What a student is doing here is comparing the crash with what happened
+    // next; clearing the panel takes away the half they already had.
+    const lines = session.outputOf('violet-1').lines.map((l) => l.text);
+    expect(lines).toContain('— restarted —');
+    expect(lines.filter((l) => l.includes('cannot run submissions'))).toHaveLength(2);
+  });
+
+  it('answers only what the reader has not seen', async () => {
+    const session = await field();
+    await session.setSeat('violet-1', { kind: 'submission', team: 'Nobody' });
+    const first = session.outputOf('violet-1');
+    expect(first.lines).toHaveLength(1);
+
+    await session.restartSeat('violet-1');
+    const next = session.outputOf('violet-1', first.seq);
+    expect(next.lines.map((l) => l.text)).toEqual(['— restarted —', first.lines[0]!.text]);
+    // The number comes back either way, so a reader that has fallen behind the
+    // ring buffer knows it rather than waiting for a line that was dropped.
+    expect(next.seq).toBe(3);
+  });
+});
+
+describe('a field that is given back', () => {
+  it('writes the arrangement down, and opens on it next time', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'rcja-field-'));
+    const path = join(dir, 'act-robotics', 'field.json');
+    try {
+      const server = new MatchServer({ port: 0 });
+      servers.push(server);
+      await server.listen();
+
+      const session = new PracticeSession(server, { submissionsDir: 'submissions', fieldStatePath: path });
+      session.place('violet-1', { x: -300, z: 200, heading: 1 });
+      await session.setSeat('lime-2', { kind: 'empty' });
+      session.place('ball', { x: 450, z: -120 });
+      // Debounced: a drag is a stream of these and the file only has to be
+      // right shortly after somebody stops moving things.
+      await new Promise((done) => setTimeout(done, 2_400));
+
+      const saved = JSON.parse(await readFile(path, 'utf8')) as {
+        arrangement: { robots: { id: string; x: number }[]; ball: { x: number } };
+      };
+      expect(saved.arrangement.ball.x).toBe(450);
+      expect(saved.arrangement.robots.map((r) => r.id).sort()).toEqual(['lime-1', 'violet-1', 'violet-2']);
+
+      // The process is lost. The twenty minutes somebody spent dragging is not.
+      const reopened = new PracticeSession(server, { submissionsDir: 'submissions', fieldStatePath: path });
+      const violet = reopened.match.world.robots.find((r) => r.id === 'violet-1')!;
+      expect(violet.x).toBeCloseTo(-300, 5);
+      expect(violet.z).toBeCloseTo(200, 5);
+      expect(reopened.match.world.ball.x).toBeCloseTo(450, 5);
+      expect(reopened.match.world.robots.some((r) => r.id === 'lime-2')).toBe(false);
+      reopened.close();
+      session.close();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it('opens on the defaults when the saved file is nonsense', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'rcja-field-'));
+    const path = join(dir, 'field.json');
+    try {
+      await writeFile(path, '{ half a file');
+      const server = new MatchServer({ port: 0 });
+      servers.push(server);
+      await server.listen();
+
+      // Hand-editable is the promise, so hand-broken is a case: a scratch file
+      // somebody mangled must not be why a team cannot open a field.
+      const session = new PracticeSession(server, { submissionsDir: 'submissions', fieldStatePath: path });
+      expect(session.match.world.robots).toHaveLength(4);
+      session.close();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
 });

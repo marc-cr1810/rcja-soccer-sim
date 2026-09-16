@@ -604,7 +604,14 @@ async function register(): Promise<void> {
 
 /** What a team's own dashboard is told that the public team page is not. */
 interface Yours {
-  fields: { id: string; url: string; guests: string[]; invited: string[] }[];
+  fields: {
+    id: string;
+    url: string;
+    guests: string[];
+    invited: string[];
+    /** Set when nobody has used it for a while and it is about to be given back. */
+    closingAt: string | null;
+  }[];
   guestOf: { id: string; url: string; owner: string | null }[];
   invitations: { arenaId: string; from: string }[];
   robots: {
@@ -624,8 +631,9 @@ interface Yours {
  * answer, because a robot is in one place; that is the whole reason the rule
  * is worth enforcing rather than merely counting.
  *
- * The Run button and a field that comes back on its own are Phase 10; this does
- * not pretend to them.
+ * Phase 10 adds the fourth, which is the one they ask while they are still
+ * typing: *run this*. It is one press from here and one from the editor,
+ * because a loop measured in seconds cannot afford a page in between.
  */
 async function dashboard(): Promise<void> {
   if (!me.account) return void go('/login?next=%2Fteam');
@@ -692,8 +700,14 @@ function practiceSection(yours: Yours): string {
 
   const robots = yours.robots
     .map((robot) => {
+      // Run is offered against a robot that is nowhere, because that is exactly
+      // when a team wants it: the code is written and nothing is watching it.
       if (!robot.at) {
-        return `<div class="row"><span class="grow">Robot ${robot.number}</span><span class="state">not in a seat</span></div>`;
+        return `<div class="row">
+          <span class="grow">Robot ${robot.number}</span>
+          <span class="state">not in a seat</span>
+          <button data-run="${robot.number}">Run it</button>
+        </div>`;
       }
       const whose = robot.at.owner === null ? 'a field' : `${esc(robot.at.owner)}'s field`;
       return `<div class="row">
@@ -729,6 +743,16 @@ function practiceSection(yours: Yours): string {
          <a href="${esc(field.url)}" data-full>Open</a>
          <button class="quiet" id="close-field">Close</button>
        </div>
+       ${
+         field.closingAt
+           ? `<div class="row">
+                <span class="grow">Nobody has used it for a while — it closes at
+                ${esc(new Date(field.closingAt).toLocaleTimeString())} unless you go back to it.
+                Your arrangement is kept either way.</span>
+                <a href="${esc(field.url)}" data-full>Keep it</a>
+              </div>`
+           : ''
+       }
        <div class="row">
          <span class="grow"><input id="invite-team" placeholder="invite a team by name" /></span>
          <button id="invite">Invite</button>
@@ -796,6 +820,22 @@ function wirePractice(slug: string, yours: Yours): void {
     }
     return post(`/api/fields/${yours.fields[0]!.id}/invite`, { team });
   });
+
+  for (const button of document.querySelectorAll<HTMLElement>('[data-run]')) {
+    button.addEventListener('click', () => {
+      void (async () => {
+        const res = await api<{ ok: boolean; reason?: string; field?: { url: string } }>('/practice/run', {
+          method: 'POST',
+          body: JSON.stringify({ robot: Number(button.dataset['run']) }),
+        });
+        // Straight to the field it landed on. A refusal — queued, capped,
+        // practice closed — is shown as the server phrased it.
+        if (res.ok && res.field) location.href = res.field.url;
+        else if (res.reason) alert(res.reason);
+        else await go('/team', true);
+      })();
+    });
+  }
 
   for (const button of document.querySelectorAll<HTMLElement>('[data-accept]')) {
     button.addEventListener('click', () => void post(`/api/fields/${button.dataset['accept']}/accept`));

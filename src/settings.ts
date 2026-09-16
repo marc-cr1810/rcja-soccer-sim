@@ -63,6 +63,14 @@ export interface PracticeSettings {
   /** Minutes of quiet before a field is warned. */
   idleMins: number;
   /**
+   * Minutes between the warning and the field actually closing.
+   *
+   * Warned, then closed — never silently killed. A fifteen-year-old who walked
+   * away for lunch should come back to an explanation, not an absence, and a
+   * banner they had no chance to see is not an explanation.
+   */
+  graceMins: number;
+  /**
    * Fields one team may own at once.
    *
    * The one that does the most work at a real event: a global cap of eight is
@@ -111,7 +119,7 @@ export function defaultSettings(): LeagueSettings {
       reserveCores: 1,
       concurrentFixtures: 2,
     },
-    practice: { open: true, max: null, idleMins: 20, perTeam: 1, claimSecs: 90 },
+    practice: { open: true, max: null, idleMins: 20, graceMins: 5, perTeam: 1, claimSecs: 90 },
   };
 }
 
@@ -223,6 +231,10 @@ export function loadSettings(dataDir: string, overrides: Partial<Flags> = {}): L
   const idle = readNumber(practice.idleMins, 'practice.idleMins', 20, { min: 1, max: 600 }, complaints);
   settings.practice.idleMins = idle.value;
   set('practice.idleMins', idle.used);
+
+  const grace = readNumber(practice.graceMins, 'practice.graceMins', 5, { min: 1, max: 60 }, complaints);
+  settings.practice.graceMins = grace.value;
+  set('practice.graceMins', grace.used);
 
   // 2 is the ceiling because a team has two robots, not because two felt like
   // enough - see PracticeSettings.perTeam.

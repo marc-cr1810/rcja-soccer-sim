@@ -137,3 +137,80 @@ describe('handing a workspace to the submit endpoint', () => {
     expect(decoded).toContain('@robot.tick');
   });
 });
+
+/**
+ * The copy Run takes.
+ *
+ * A snapshot rather than the folder itself is what makes typing during a run
+ * safe, and what gives "which code is that" a fixed answer — so what matters
+ * here is that it is a *copy*, that it is only the legal files, and that a
+ * folder which cannot run says why in a sentence somebody can act on.
+ */
+describe('snapshotting a workspace to run it', () => {
+  const runs: string[] = [];
+
+  async function into(): Promise<string> {
+    const root = await mkdtemp(join(tmpdir(), 'rcja-run-'));
+    runs.push(root);
+    return join(root, 'seat');
+  }
+
+  afterEach(async () => {
+    for (const root of runs.splice(0)) await rm(root, { recursive: true, force: true });
+  });
+
+  it('copies the folder as it stands, and stops following it', async () => {
+    await store.seed('ACT Robotics', 1);
+    const dest = await into();
+
+    const snapshot = await store.snapshot('ACT Robotics', 1, dest);
+    expect(snapshot.ok).toBe(true);
+    if (!snapshot.ok) return;
+    expect(snapshot.value.manifest.entry).toBe('robot.py');
+
+    const copied = await readFile(join(dest, 'robot.py'), 'utf8');
+    expect(copied).toContain('robot.tick');
+
+    // The editor carries on. The copy does not.
+    await store.write('ACT Robotics', 1, 'robot.py', 'print("changed")');
+    expect(await readFile(join(dest, 'robot.py'), 'utf8')).toBe(copied);
+  });
+
+  it('says what is wrong when the manifest does not parse', async () => {
+    await store.write('ACT Robotics', 1, 'manifest.json', '{ not json');
+    await store.write('ACT Robotics', 1, 'robot.py', 'pass');
+
+    const snapshot = await store.snapshot('ACT Robotics', 1, await into());
+    expect(snapshot.ok).toBe(false);
+    if (snapshot.ok) return;
+    expect(snapshot.reason).toContain('manifest.json');
+  });
+
+  it('says what is wrong when the entry point is not there', async () => {
+    await store.write('ACT Robotics', 1, 'manifest.json', JSON.stringify({ team: 'ACT Robotics', robot: 1, entry: 'brain.py' }));
+    await store.write('ACT Robotics', 1, 'robot.py', 'pass');
+
+    const snapshot = await store.snapshot('ACT Robotics', 1, await into());
+    expect(snapshot.ok).toBe(false);
+    if (snapshot.ok) return;
+    expect(snapshot.reason).toContain('brain.py');
+  });
+
+  it('refuses an empty workspace rather than running nothing', async () => {
+    const snapshot = await store.snapshot('ACT Robotics', 2, await into());
+    expect(snapshot.ok).toBe(false);
+    if (snapshot.ok) return;
+    expect(snapshot.reason).toContain('robot 2');
+  });
+
+  it('runs code whose manifest names somebody else, because identity is not in the file', async () => {
+    // Who this robot belongs to comes from the credential. A team that copied a
+    // manifest from a friend, or renamed itself, still gets to watch its code
+    // run — a push is where that disagreement matters.
+    await store.write('ACT Robotics', 1, 'manifest.json', JSON.stringify({ team: 'Someone Else', robot: 2, entry: 'robot.py' }));
+    await store.write('ACT Robotics', 1, 'robot.py', 'pass');
+
+    const snapshot = await store.snapshot('ACT Robotics', 1, await into());
+    expect(snapshot.ok).toBe(true);
+  });
+});

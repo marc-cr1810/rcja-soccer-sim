@@ -13,6 +13,7 @@
     "test:watch": "bun test --watch",
     "typecheck": "tsc --noEmit",
     "serve": "bun src/cli.ts",
+    "cli": "bun src/cli.ts",
     "build": "bun run build:viewer && bun run build:referee && bun run build:practice && bun run build:workspace && bun run build:site",
     "build:bin": "bun build --compile --outfile=dist/bin/rcja-soccer-sim ./src/cli.ts",
     "build:viewer": "vite build",

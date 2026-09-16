@@ -34,7 +34,8 @@ type SeatFill =
   | { kind: 'empty' }
   | { kind: 'built-in' }
   | { kind: 'laptop'; team?: string }
-  | { kind: 'submission'; team: string };
+  | { kind: 'submission'; team: string }
+  | { kind: 'workspace'; team: string };
 
 /**
  * Who is looking, when a hub is in front of this field.
@@ -56,6 +57,17 @@ interface Who {
 let who: Who | null = null;
 /** The command that puts a laptop program in a seat, once one has been minted. */
 const joinCommands = new Map<string, string>();
+/**
+ * Which seat's output is being read, and how far the reader has got.
+ *
+ * One at a time, on purpose: four scrolling panels is a wall, and the thing a
+ * student is doing is reading one traceback belonging to one robot.
+ */
+let openOutput: SeatId | null = null;
+/** Seat → the last `outputSeq` this page has actually shown. */
+const shownOutput = new Map<string, number>();
+/** Seat → the lines fetched so far, oldest first. */
+const outputLines = new Map<string, string[]>();
 
 interface SeatState {
   fill: SeatFill;
@@ -64,6 +76,8 @@ interface SeatState {
   filled: boolean;
   connected: boolean;
   detail?: string;
+  /** Moves when this seat's program has said something new. */
+  outputSeq: number;
 }
 
 interface PracticeState {
@@ -91,6 +105,7 @@ const call = document.getElementById('call')!;
 const log = document.getElementById('log')!;
 const seatsPanel = document.getElementById('seats')!;
 const notice = document.getElementById('notice')!;
+const output = document.getElementById('output')!;
 const modes = document.getElementById('modes')!;
 
 const board = {
@@ -184,14 +199,69 @@ async function act(action: string, body?: unknown, quiet = false): Promise<void>
   }
 }
 
+/**
+ * Fetch what a seat has said since we last looked.
+ *
+ * Its own request rather than part of the state everybody polls: a traceback is
+ * one person reading one seat, and the state is read once a second by everybody
+ * on the field. `seq` comes back either way, so a panel that has fallen behind
+ * the server's ring buffer knows it rather than waiting for a line that was
+ * dropped.
+ */
+async function fetchOutput(id: SeatId): Promise<void> {
+  const since = shownOutput.get(id) ?? 0;
+  try {
+    const res = await fetch(`${BASE}practice-api/output?seat=${id}&since=${since}&active=0`);
+    const payload = (await res.json()) as {
+      ok?: boolean;
+      seq?: number;
+      lines?: { seq: number; text: string }[];
+    };
+    if (!payload.ok) return;
+    // A number that has gone backwards means the seat was emptied or became
+    // something else, and the server started counting again. Whatever this page
+    // is still holding belonged to the program that was there before, which is
+    // the confusion the server's own forgetting was meant to avoid.
+    const lines = (payload.seq ?? 0) < since ? [] : (outputLines.get(id) ?? []);
+    for (const line of payload.lines ?? []) lines.push(line.text);
+    // Same ceiling the server keeps, so a long-running seat cannot grow this
+    // page without limit either.
+    while (lines.length > 200) lines.shift();
+    outputLines.set(id, lines);
+    shownOutput.set(id, payload.seq ?? since);
+    if (openOutput === id) renderOutput();
+  } catch {
+    // The field is gone or restarting; the next poll says so.
+  }
+}
+
+function renderOutput(): void {
+  if (!openOutput) {
+    output.hidden = true;
+    return;
+  }
+  output.hidden = false;
+  const lines = outputLines.get(openOutput) ?? [];
+  output.textContent = lines.length > 0 ? lines.join('\n') : 'nothing said yet';
+  output.scrollTop = output.scrollHeight;
+}
+
 async function refresh(): Promise<void> {
   try {
-    const res = await fetch(`${BASE}practice-api/state`);
+    // A tab nobody is looking at is not somebody using this field: a poll that
+    // says so keeps the page up to date without holding an arena open for a
+    // team who closed their laptop hours ago.
+    const res = await fetch(`${BASE}practice-api/state?active=${document.hidden ? '0' : '1'}`);
     const payload = (await res.json()) as { ok?: boolean; state?: PracticeState; notice?: string };
     if (payload.state) {
       state = payload.state;
       renderSeats();
       renderModes();
+      // Whatever the open seat has said since the last look, if anybody is
+      // reading one. Nothing is fetched for the other three.
+      if (openOutput && payload.state.seats[openOutput]!.outputSeq !== shownOutput.get(openOutput)) {
+        void fetchOutput(openOutput);
+      }
     }
     // Only a supervised field is ever told anything; a laptop has nobody to
     // hear from, and the banner simply never appears.
@@ -267,8 +337,9 @@ function renderSeats(): void {
   if (!state) return;
   const key = SEATS.map((id) => {
     const seat = state!.seats[id]!;
-    const team = seat.fill.kind === 'submission' || seat.fill.kind === 'laptop' ? (seat.fill.team ?? '') : '';
-    return `${id}:${seat.fill.kind}:${team}:${statusOf(seat)}:${mine(id) ? 'mine' : 'theirs'}:${joinCommands.get(id) ?? ''}`;
+    const team = seat.fill.kind === 'built-in' || seat.fill.kind === 'empty' ? '' : (seat.fill.team ?? '');
+    const said = seat.outputSeq > 0 && seat.outputSeq !== shownOutput.get(id) ? 'said' : '';
+    return `${id}:${seat.fill.kind}:${team}:${statusOf(seat)}:${mine(id) ? 'mine' : 'theirs'}:${joinCommands.get(id) ?? ''}:${openOutput === id ? 'open' : ''}:${said}`;
   }).join('|');
   if (key === seatsKey) return;
   seatsKey = key;
@@ -290,6 +361,7 @@ function renderSeats(): void {
       for (const [value, text] of [
         ['empty', 'not in it'],
         ['built-in', 'built-in robot'],
+        ['workspace', 'what I am writing'],
         ['submission', 'a pushed robot'],
         ['laptop', 'my laptop'],
       ] as const) {
@@ -303,18 +375,19 @@ function renderSeats(): void {
       const team = document.createElement('input');
       team.type = 'text';
       team.placeholder = 'team name';
-      team.value = seat.fill.kind === 'submission' ? seat.fill.team : '';
+      team.value = seat.fill.kind === 'submission' || seat.fill.kind === 'workspace' ? seat.fill.team : '';
       // On a league server you are the only team you may seat, so there is
       // nothing to type and nothing to get wrong. An organiser, who may seat
       // anybody, still gets the box.
       const fixedTeam = who && !who.anyTeam ? who.you : null;
       if (fixedTeam && !team.value) team.value = fixedTeam;
-      team.hidden = fill.value !== 'submission' || fixedTeam !== null;
+      const needsTeam = (kind: string): boolean => kind === 'submission' || kind === 'workspace';
+      team.hidden = !needsTeam(fill.value) || fixedTeam !== null;
 
       const apply = (): void => {
         const chosen = fill.value;
         const named = (fixedTeam ?? team.value).trim();
-        if ((chosen === 'submission' || (chosen === 'laptop' && who)) && !named) {
+        if ((chosen === 'submission' || chosen === 'workspace' || (chosen === 'laptop' && who)) && !named) {
           team.hidden = false;
           team.focus();
           return;
@@ -323,8 +396,8 @@ function renderSeats(): void {
         // It was once a bare string with the team beside it, which quietly
         // stopped being accepted when the endpoints grew schemas.
         const body =
-          chosen === 'submission'
-            ? { kind: 'submission', team: named }
+          chosen === 'submission' || chosen === 'workspace'
+            ? { kind: chosen, team: named }
             : chosen === 'laptop' && named
               ? { kind: 'laptop', team: named }
               : { kind: chosen };
@@ -332,8 +405,8 @@ function renderSeats(): void {
         void act('seat', { seat: id, fill: body });
       };
       fill.addEventListener('change', () => {
-        team.hidden = fill.value !== 'submission' || fixedTeam !== null;
-        if (fill.value !== 'submission' || team.value.trim()) apply();
+        team.hidden = !needsTeam(fill.value) || fixedTeam !== null;
+        if (!needsTeam(fill.value) || team.value.trim()) apply();
         else team.focus();
       });
       team.addEventListener('change', apply);
@@ -354,7 +427,25 @@ function renderSeats(): void {
       stop.textContent = 'Stop';
       stop.disabled = !seat.filled || seat.fill.kind === 'built-in';
       stop.addEventListener('click', () => void act('seat-stop', { seat: id }));
-      buttons.append(restart, stop);
+
+      // Where a traceback goes. Only for a seat that runs a program here — a
+      // built-in agent is a function call with nothing to say, and a laptop's
+      // program prints into the student's own terminal.
+      const said = document.createElement('button');
+      said.type = 'button';
+      said.className = 'output-toggle';
+      said.textContent = openOutput === id ? 'Hide output' : 'Output';
+      said.hidden = seat.fill.kind !== 'submission' && seat.fill.kind !== 'workspace';
+      // Something has been said that nobody here has read yet.
+      if (seat.outputSeq > 0 && seat.outputSeq !== shownOutput.get(id)) said.classList.add('unread');
+      said.addEventListener('click', () => {
+        openOutput = openOutput === id ? null : id;
+        seatsKey = '';
+        if (openOutput) void fetchOutput(openOutput);
+        else renderOutput();
+        renderSeats();
+      });
+      buttons.append(restart, stop, said);
 
       // Somebody else's robot: shown, never touched. The server refuses it
       // anyway — this is so nobody tries and reads a refusal instead.

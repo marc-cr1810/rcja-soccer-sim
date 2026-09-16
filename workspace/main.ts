@@ -54,6 +54,7 @@ const el = {
   robots: document.getElementById('robots')!,
   saved: document.getElementById('saved')!,
   submit: document.getElementById('submit') as HTMLButtonElement,
+  run: document.getElementById('run') as HTMLButtonElement,
   logout: document.getElementById('logout')!,
   fileList: document.getElementById('file-list')!,
   newFileForm: document.getElementById('new-file-form') as HTMLFormElement,
@@ -249,6 +250,70 @@ async function openWorkspace(
   return true;
 }
 
+/* --- running it --- */
+
+/**
+ * Open a field, put this robot on it, and go and watch.
+ *
+ * Every step of this is something a team could do by hand — open a practice
+ * field, then choose their own workspace in a seat — and the whole value is
+ * that they do not have to. The loop this makes possible is measured in
+ * seconds, and each page between typing and watching is spent out of it.
+ *
+ * Saved first, always: what runs is a copy the server takes when this request
+ * arrives, so an unsaved buffer would put the *previous* version on the field
+ * and the student would be debugging code they had already fixed.
+ */
+async function run(): Promise<void> {
+  await saveActive();
+  el.run.disabled = true;
+  el.run.textContent = 'Starting…';
+  say(`running robot ${robot}…`);
+
+  let result: { ok?: boolean; reason?: string; field?: { url?: string } };
+  try {
+    const response = await fetch(`${BASE}practice/run`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ robot }),
+    });
+    result = await response.json().catch(() => ({ ok: false, reason: 'the server said nothing' }));
+  } catch (err) {
+    result = { ok: false, reason: (err as Error).message };
+  }
+  el.run.disabled = false;
+  el.run.textContent = 'Run it';
+
+  if (!result.ok || !result.field?.url) {
+    // Queued, every field in use, practice closed: all three are already
+    // phrased for a person by the server that decided them.
+    say(result.reason ?? 'could not open a field', 'bad');
+    return;
+  }
+  location.href = result.field.url;
+}
+
+/**
+ * Only a server with fields to give has this button.
+ *
+ * A match server on a laptop hosts workspaces but has no accounts, no
+ * ownership and nothing to decide whose field is whose, so it answers 404 to
+ * this and the button simply is not there — the same way the practice console
+ * discovers it is on a laptop.
+ */
+async function offersFields(): Promise<boolean> {
+  try {
+    const response = await fetch(`${BASE}practice`, { headers: { accept: 'application/json' } });
+    if (!response.ok) return false;
+    // Said outright rather than inferred from the shape of the answer: a
+    // standalone match server also lists fields here, and it has no Run.
+    const payload = (await response.json().catch(() => ({}))) as { run?: boolean };
+    return payload.run === true;
+  } catch {
+    return false;
+  }
+}
+
 /* --- pushing to the competition --- */
 
 async function submit(): Promise<void> {
@@ -330,6 +395,11 @@ el.newFileForm.addEventListener('submit', async (event) => {
 });
 
 el.submit.addEventListener('click', () => void submit());
+el.run.addEventListener('click', () => void run());
+el.run.hidden = true;
+void offersFields().then((yes) => {
+  el.run.hidden = !yes;
+});
 el.logout.addEventListener('click', forget);
 el.clearConsole.addEventListener('click', () => el.consoleBody.replaceChildren());
 

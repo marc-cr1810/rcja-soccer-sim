@@ -32,7 +32,7 @@
 import { mkdir, readdir, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 
-import { fail, ok, slugifyTeam, type Result } from './manifest';
+import { fail, ok, parseManifest, slugifyTeam, type Manifest, type Result } from './manifest';
 
 /** Which robot of the two a folder is for. A team submits each separately. */
 export type RobotNumber = 1 | 2;
@@ -157,6 +157,49 @@ export class WorkspaceStore {
     await this.write(team, robot, 'manifest.json', starterManifest(team, robot));
     await this.write(team, robot, 'robot.py', STARTER_ROBOT);
     return this.read(team, robot);
+  }
+
+  /**
+   * A copy of the folder as it stands, somewhere a sandbox can be pointed at.
+   *
+   * Run takes a copy rather than running the folder in place, and the reason is
+   * the editor: the student is still typing while their robot plays, and
+   * `spawnSeat` respawns a program that dies up to five times. Running the live
+   * folder would mean a respawn importing whatever was half-saved a moment ago,
+   * and no fixed answer to "which code is that". A snapshot makes the thing on
+   * the field exactly the thing they pressed Run on, and makes typing during a
+   * run free.
+   *
+   * Only `entry` is taken from the manifest. **Who this robot belongs to comes
+   * from the credential, never from the file** — the rule Phase 1 put on a push
+   * and Phase 8 put on a seat — so a manifest still naming the team it was
+   * seeded with, or naming robot 1 while sitting in the robot 2 seat, runs as
+   * whoever pressed Run. A push is where that disagreement matters; this is a
+   * rehearsal.
+   */
+  async snapshot(
+    team: string,
+    robot: RobotNumber,
+    dest: string,
+  ): Promise<Result<{ dir: string; manifest: Manifest }>> {
+    const files = await this.read(team, robot);
+    if (files.length === 0) {
+      return fail(`there is nothing in robot ${robot}'s workspace to run yet`);
+    }
+
+    const manifest = files.find((f) => f.name === 'manifest.json');
+    const parsed = parseManifest(
+      manifest ? Buffer.from(manifest.content, 'utf8') : undefined,
+      new Set(files.map((f) => f.name)),
+    );
+    // Said as it will be read: this reason becomes the seat's status and the
+    // first line of the output panel, and it is the whole explanation the
+    // student gets for why nothing started.
+    if (!parsed.ok) return fail(parsed.reason);
+
+    await mkdir(dest, { recursive: true });
+    for (const file of files) await Bun.write(join(dest, file.name), file.content);
+    return ok({ dir: dest, manifest: parsed.value });
   }
 
   /**

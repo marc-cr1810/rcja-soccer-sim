@@ -11,10 +11,53 @@ plays whatever has been pushed under the names given to `--home`/`--away`,
 falling back to the reference agent for any robot nobody has pushed yet.
 
 **Documentation:** this file is the pitch — what this is and why it's built
-the way it is. For the manual, see [docs/](docs/): [writing a
-robot](docs/writing-a-robot.md), [running a server](docs/running-a-server.md),
+the way it is. For the manual, see [docs/](docs/): [running a league](docs/running-a-league.md),
+[writing a robot](docs/writing-a-robot.md), [running a match server](docs/running-a-server.md),
 [practising](docs/practising.md), and the full sensor/actuator reference in
 [python/README.md](python/README.md).
+
+## Installation & Quick Start
+
+### 1. Standalone Binary (Recommended for Venue Servers & Linux Hosts)
+
+No Bun or Node.js required. Install the single standalone binary via the canonical installer:
+
+```bash
+# Install sandboxing and Python 3
+sudo apt update && sudo apt install -y bubblewrap python3
+
+# Install rcja-soccer-sim into ~/.local/bin/rcja-soccer-sim
+curl -fsSL https://raw.githubusercontent.com/marc-cr1810/rcja-soccer-sim/main/install.sh | bash
+```
+
+Initialize your league and create teams directly from your terminal:
+```bash
+rcja-soccer-sim league-setup
+rcja-soccer-sim team create "ACT Robotics"
+```
+
+Run as a persistent systemd user service (restarts on crash, starts on boot, runs without root):
+```bash
+rcja-soccer-sim service install
+rcja-soccer-sim service status
+rcja-soccer-sim service logs
+```
+
+Update to the latest release at any time:
+```bash
+rcja-soccer-sim upgrade
+```
+
+### 2. From Source (Development with Bun)
+
+```bash
+git clone https://github.com/marc-cr1810/rcja-soccer-sim.git
+cd rcja-soccer-sim
+make install
+make build
+make league-setup
+make league                # or: make systemd-user
+```
 
 ## What this is not
 

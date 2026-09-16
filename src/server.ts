@@ -26,7 +26,7 @@ import {
   type MatchResult,
 } from './match';
 import { VIEW_HZ, type ViewMessage } from './view';
-import { SEAT_IDS } from './match';
+import { SEAT_IDS, type SeatId } from './match';
 import type { SeedInput } from './rand';
 import type { Agent } from './agent';
 import { defaultSpot } from './world';
@@ -161,6 +161,16 @@ export interface ServerOptions {
    * `MatchServer`, reached back through this one's port — see `arenas.ts`.
    */
   practiceFields?: ArenaSupervisorOptions | boolean;
+  /**
+   * A directory this server may keep working files in, made by whoever started
+   * it.
+   *
+   * An arena is stopped by having its process group killed and never gets to
+   * tidy up, so anything it made under `/tmp` outlives it — one dead Unix
+   * socket directory per arena, for the life of the machine. A supervisor hands
+   * one of these in and removes it at the ending it already hears about.
+   */
+  scratchDir?: string;
   /**
    * One extra surface, mounted before anything else this server routes.
    *
@@ -315,7 +325,10 @@ export class MatchServer {
    * pointed at port 0 and nothing could connect.
    */
   async listen(): Promise<number> {
-    this.agentScratchDir = await mkdtemp(join(tmpdir(), 'rcja-agent-socket-'));
+    // Under a supervisor, inside the directory it made for this arena — so the
+    // one process that outlives a killed arena is the one that removes it. On
+    // its own, the system temp directory, cleaned by `close()`.
+    this.agentScratchDir = await mkdtemp(join(this.opts.scratchDir ?? tmpdir(), 'rcja-agent-socket-'));
     this.agentSocketPath = join(this.agentScratchDir, 'agents.sock');
 
     // The agent Unix socket: same gateway, no path routing — this door only
@@ -536,7 +549,11 @@ export class MatchServer {
       if (port === null) return Response.json({ ok: false, reason: 'no practice field by that name' }, { status: 404 });
 
       if (isWs) {
-        const release = this.arenas.trackConnection(arenaPath.id);
+        // A robot's socket holds the arena open while it is connected but is
+        // not somebody *using* the field. A viewer's is: there is a person
+        // watching at the other end of it.
+        const presence = arenaPath.rest.split('?')[0] !== AGENT_PATH;
+        const release = this.arenas.trackConnection(arenaPath.id, { presence });
         if (!release) return Response.json({ ok: false, reason: 'no practice field by that name' }, { status: 404 });
         try {
           // Application-level WebSocket relay: connect to the arena's own WS
@@ -560,8 +577,13 @@ export class MatchServer {
         return; // undefined = upgrade handled
       }
 
-      // HTTP proxy: forward directly with fetch().
-      const release = this.arenas.trackConnection(arenaPath.id);
+      // HTTP proxy: forward directly with fetch(). A console polling from a tab
+      // nobody is looking at says so, and does not count as somebody being
+      // here — otherwise one forgotten browser tab simply replaces the
+      // forgotten laptop program this rule exists to stop.
+      const release = this.arenas.trackConnection(arenaPath.id, {
+        presence: new URL(req.url).searchParams.get('active') !== '0',
+      });
       if (!release) return Response.json({ ok: false, reason: 'no practice field by that name' }, { status: 404 });
       try {
         const upstream = await fetch(`http://127.0.0.1:${port}${arenaPath.rest}`, {
@@ -611,6 +633,22 @@ export class MatchServer {
         return Response.json({ ok: false, reason: 'this server is not a practice field' }, { status: 404 });
       }
       return Response.json({ ok: true, state: this.practice.state() });
+    }
+    // What one seat's program has said. Its own request rather than part of the
+    // state everybody polls: a traceback is read by one person on one seat, and
+    // the state is read once a second by everybody on the field.
+    if (url === '/practice-api/output' && req.method === 'GET') {
+      if (!this.practice) {
+        return Response.json({ ok: false, reason: 'this server is not a practice field' }, { status: 404 });
+      }
+      const query = new URL(req.url).searchParams;
+      const seat = query.get('seat');
+      if (!seat || !SEAT_IDS.includes(seat as SeatId)) {
+        return Response.json({ ok: false, reason: '"seat" must be a seat id' }, { status: 400 });
+      }
+      const since = Number(query.get('since') ?? 0);
+      const output = this.practice.outputOf(seat as SeatId, Number.isFinite(since) ? since : 0);
+      return Response.json({ ok: true, seat, ...output });
     }
     if (req.method === 'POST' && url.startsWith('/practice-api/')) {
       return this.handlePracticeAction(req, url.slice('/practice-api/'.length));
