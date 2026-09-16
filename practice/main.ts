@@ -333,8 +333,20 @@ function statusOf(seat: SeatState): string {
  */
 let seatsKey = '';
 
+/** Whether this seat is the kind that has a program of its own to say things. */
+function speaks(seat: SeatState): boolean {
+  return seat.fill.kind === 'submission' || seat.fill.kind === 'workspace';
+}
+
 function renderSeats(): void {
   if (!state) return;
+  // A seat that has become a built-in robot, or nothing, has no Output button
+  // any more — so an open panel belonging to it would be one nobody could
+  // close. It goes with the button.
+  if (openOutput && !speaks(state.seats[openOutput]!)) {
+    openOutput = null;
+    renderOutput();
+  }
   const key = SEATS.map((id) => {
     const seat = state!.seats[id]!;
     const team = seat.fill.kind === 'built-in' || seat.fill.kind === 'empty' ? '' : (seat.fill.team ?? '');
@@ -435,7 +447,7 @@ function renderSeats(): void {
       said.type = 'button';
       said.className = 'output-toggle';
       said.textContent = openOutput === id ? 'Hide output' : 'Output';
-      said.hidden = seat.fill.kind !== 'submission' && seat.fill.kind !== 'workspace';
+      said.hidden = !speaks(seat);
       // Something has been said that nobody here has read yet.
       if (seat.outputSeq > 0 && seat.outputSeq !== shownOutput.get(id)) said.classList.add('unread');
       said.addEventListener('click', () => {

@@ -606,7 +606,7 @@ export class PracticeSession {
           memoryLimitMb: this.opts.seatMemoryMb,
         },
         this.opts.log,
-        (text) => this.append(id, scrub(text, entry.dir)),
+        (text) => this.append(id, scrub(text, entry.dir, this.server.agentSocketUrl)),
         () => {
           // Only if nothing else has happened to the seat in the meantime: a
           // team who changed their mind mid-crash-loop should not have the
@@ -721,15 +721,16 @@ export class PracticeSession {
 }
 
 /**
- * Take the server's own directories out of what a student reads.
+ * Take the server's own plumbing out of what a student reads.
  *
- * A traceback names the file it failed in by its full path, and under a Run
- * that path is a scratch directory with a random name in it — which tells the
- * person who wrote the code nothing, and invites them to wonder what it is.
- * They wrote `robot.py`, so it should say `robot.py`.
+ * Two things leak into it. A traceback names the file it failed in by its full
+ * path, and under a Run that path is a scratch directory with a random name in
+ * it — they wrote `robot.py`, so it should say `robot.py`. And the client
+ * library announces the address it joined, which on a laptop is the URL the
+ * student typed and here is a Unix socket nobody has ever seen or could use.
  */
-function scrub(text: string, dir: string): string {
-  return text.split(`${dir}/`).join('');
+export function scrub(text: string, dir: string, socketUrl: string): string {
+  return text.split(`${dir}/`).join('').split(socketUrl).join('this field');
 }
 
 /**

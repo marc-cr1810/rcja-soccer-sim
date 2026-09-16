@@ -14,7 +14,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { MatchServer } from '../src/server';
-import { PracticeSession } from '../src/practice';
+import { PracticeSession, scrub } from '../src/practice';
 
 const servers: MatchServer[] = [];
 
@@ -171,6 +171,23 @@ describe('a practice field', () => {
  * buffer is fed by the same path whatever is talking, and the arrangement is
  * dragging and a file.
  */
+describe('scrub', () => {
+  const dir = '/tmp/run-abc123';
+  const socketUrl = 'unix:///tmp/agent.sock?path=%2Fagent';
+
+  it('takes the run directory out of a traceback path', () => {
+    expect(scrub(`File "${dir}/robot.py", line 3`, dir, socketUrl)).toBe('File "robot.py", line 3');
+  });
+
+  it('replaces the agent socket URL with something a student recognises', () => {
+    expect(scrub(`[Striker] connected to ${socketUrl}`, dir, socketUrl)).toBe('[Striker] connected to this field');
+  });
+
+  it('leaves text with neither in it alone', () => {
+    expect(scrub('SyntaxError: invalid syntax', dir, socketUrl)).toBe('SyntaxError: invalid syntax');
+  });
+});
+
 describe('what a seat has said', () => {
   it('is nothing at all until something says something', async () => {
     const session = await field();
