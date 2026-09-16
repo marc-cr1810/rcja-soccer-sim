@@ -3,7 +3,9 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#0e1013" />
     <title>RCJA Soccer Simulation</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 28 28'%3E%3Ccircle cx='14' cy='14' r='13' fill='%2316191e' stroke='%23252a33' stroke-width='1.5'/%3E%3Cpath d='M6 15C6 9.477 10.477 5 16 5c3.3 0 6.2 1.6 7.9 4' stroke='%233db166' stroke-width='2.4' stroke-linecap='round' fill='none'/%3E%3Cpath d='M22 13c0 5.523-4.477 10-10 10-3.3 0-6.2-1.6-7.9-4' stroke='%23eab308' stroke-width='2.4' stroke-linecap='round' fill='none'/%3E%3Ccircle cx='14' cy='14' r='4.2' fill='%23f3f4f6'/%3E%3Cpolygon points='14,11.8 16.1,13.3 15.3,15.8 12.7,15.8 11.9,13.3' fill='%23101216'/%3E%3C/svg%3E" />
     <link rel="stylesheet" href="/style.css" />
   </head>
   <body>
@@ -14,9 +16,17 @@
       editor are their own bundles behind their own paths; this is the site
       around them.
     -->
+    <div class="top-stripe" aria-hidden="true"></div>
     <header class="top">
       <a class="brand" href="/">
-        <span class="mark"></span>
+        <svg class="mark-icon" viewBox="0 0 28 28" width="24" height="24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <circle cx="14" cy="14" r="13" fill="#16191e" stroke="#252a33" stroke-width="1.5"/>
+          <path d="M6 15C6 9.477 10.477 5 16 5C19.3 5 22.2 6.6 23.9 9" stroke="#3db166" stroke-width="2.4" stroke-linecap="round"/>
+          <path d="M22 13C22 18.523 17.523 23 12 23C8.7 23 5.8 21.4 4.1 19" stroke="#eab308" stroke-width="2.4" stroke-linecap="round"/>
+          <circle cx="14" cy="14" r="4.2" fill="#f3f4f6"/>
+          <polygon points="14,11.8 16.1,13.3 15.3,15.8 12.7,15.8 11.9,13.3" fill="#101216"/>
+          <path d="M14 11.8V9.8M16.1 13.3L17.7 12.1M15.3 15.8L16.5 17.4M12.7 15.8L11.5 17.4M11.9 13.3L10.3 12.1" stroke="#101216" stroke-width="0.8"/>
+        </svg>
         <span>RCJA Soccer Simulation</span>
       </a>
       <nav id="nav"></nav>
@@ -28,7 +38,9 @@
     </main>
 
     <footer class="foot">
-      <span class="dim">Watching is open to anybody. Entering needs an invitation from the organiser.</span>
+      <div class="foot-inner">
+        <span class="foot-brand">RoboCupJunior Australia</span>
+      </div>
     </footer>
 
     <script type="module" src="/main.ts"></script>

@@ -306,11 +306,30 @@ async function front(): Promise<void> {
   const data = await api<Front>('/api/front');
 
   if (!data.tournament) {
+    if (!data.live.length) {
+      view.innerHTML = h(`
+        <h1>RCJA Soccer Simulation</h1>
+        <p class="dim">No tournament is loaded on this server yet.</p>
+        <div class="empty">When a draw is running, this page shows what is on now, what is next and what has been played.</div>
+      `);
+      return;
+    }
+    // A demo arena can keep the hall screen busy before any draw is running.
     view.innerHTML = h(`
       <h1>RCJA Soccer Simulation</h1>
       <p class="dim">No tournament is loaded on this server yet.</p>
-      <div class="empty">When a draw is running, this page shows what is on now, what is next and what has been played.</div>
+
+      <h2>On now</h2>
+      ${data.live
+        .map(
+          (live) => `${liveScoreline(live)}
+         <p style="margin-top:.6rem;margin-bottom:1.4rem"><a href="${esc(
+           live.url,
+         )}" data-full>Watch ${esc(live.home)} v ${esc(live.away)}</a></p>`,
+        )
+        .join('')}
     `);
+    ticking = setInterval(() => void front(), 3000);
     return;
   }
 
@@ -319,7 +338,7 @@ async function front(): Promise<void> {
   view.innerHTML = h(`
     ${denied ? `<div class="error">Your account may not open that page.</div>` : ''}
     <h1>${esc(data.tournament.name)}</h1>
-    <p class="dim">${data.tournament.fixturesTotal} fixtures. Watching is open to anybody.</p>
+    <p class="dim">${data.tournament.fixturesTotal} fixtures.</p>
 
     <h2>On now</h2>
     ${
@@ -547,7 +566,6 @@ async function login(): Promise<void> {
   const asked = new URLSearchParams(location.search).get('next');
   view.innerHTML = h(`
     <h1>Sign in</h1>
-    <p class="dim">Teams, referees and organisers. Watching needs no account.</p>
     <form class="panel" id="form">
       <label for="name">Your team or your name</label>
       <input id="name" autocomplete="username" />
