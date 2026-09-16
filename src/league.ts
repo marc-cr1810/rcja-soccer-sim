@@ -448,7 +448,7 @@ export class LeagueServer {
       }
       // The console itself lives on the arena playing the match — there is no
       // single one any more. What is here is the list of matches this person
-      // may take, which Phase 9 replaces with their actual assignments.
+      // may take, which Phase 10 replaces with their actual assignments.
       if (url === '/referee' || url.startsWith('/referee/')) {
         if (!can(actor, 'match.control')) return this.refuse(req, actor, '/referee/');
       }
@@ -580,7 +580,16 @@ export class LeagueServer {
 
     switch (action) {
       case 'register': {
-        const validated = validateBody(body.payload, RegisterBodySchema, 'an invitation code and a password are required');
+        const validated = validateBody(
+          body.payload,
+          RegisterBodySchema,
+          (path) =>
+            path === 'email'
+              ? 'email is not a valid address'
+              : path === 'password'
+                ? 'a password of at least 10 characters is required'
+                : 'a valid invitation code and a password are required',
+        );
         if (!validated.ok) return validated.response;
         const { code, password, name, email } = validated.value;
         const made = this.accounts.redeem(code, {
@@ -721,7 +730,7 @@ export class LeagueServer {
     /**
      * The matches a referee may take right now.
      *
-     * Phase 9 replaces this with their actual assignments; until then it is
+     * Phase 10 replaces this with their actual assignments; until then it is
      * every fixture in progress, which is the same list a referee at a venue
      * with two pitches is looking at anyway.
      */
@@ -786,7 +795,7 @@ export class LeagueServer {
   /**
    * Enough administration to run a venue without an ssh session.
    *
-   * Phase 10 is the real admin area — arenas, team files, draw amendments, the
+   * Phase 11 is the real admin area — arenas, team files, draw amendments, the
    * audit screen. What is here is what Phase 6 itself creates and therefore
    * has to be able to undo: accounts, invitations, and a password reset for
    * the failure most likely to happen under pressure.

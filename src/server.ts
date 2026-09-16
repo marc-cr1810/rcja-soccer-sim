@@ -22,21 +22,20 @@ import {
   CONTROL_HZ,
   KICKOFF_COUNTDOWN_SECONDS,
   PHYSICS_HZ,
-  SEAT_IDS,
   type MatchOptions,
   type MatchResult,
-  type SeatId,
 } from './match';
 import { VIEW_HZ, type ViewMessage } from './view';
 import { AGENT_PATH, AgentGateway, type RemoteTransport } from './gateway';
 import { handIssuedAuthority, type Authority } from './authority';
-import type { PracticeSession, SeatFill } from './practice';
+import type { PracticeSession } from './practice';
 import { WorkspaceStore } from './workspace';
 import { TeamApi } from './team-api';
 import { ArenaSupervisor, type ArenaSupervisorOptions } from './arenas';
 import { FidelityMeter } from './usage';
 import {
   AbandonBodySchema,
+  CorrectScoreBodySchema,
   KickoffBodySchema,
   PlaceBodySchema,
   RemoveRobotBodySchema,
@@ -44,6 +43,7 @@ import {
   ReturnRobotBodySchema,
   RosterBodySchema,
   SeatActionBodySchema,
+  SeatBodySchema,
 } from './api/schemas';
 import { readJsonBody, validateBody } from './api/validate';
 
@@ -997,11 +997,6 @@ export class MatchServer {
     const body = await readJsonBody(req, 4096);
     if (!body.ok) return Response.json({ ok: false, reason: body.reason }, { status: body.status });
 
-    const seatId = (): SeatId | null => {
-      const { seat } = body.payload;
-      return SEAT_IDS.includes(seat as SeatId) ? (seat as SeatId) : null;
-    };
-
     switch (action) {
       case 'start':
         session.start();
@@ -1047,23 +1042,18 @@ export class MatchServer {
         break;
       }
       case 'seat': {
-        const id = seatId();
-        const { fill, team } = body.payload;
-        if (!id) {
-          return Response.json({ ok: false, reason: '"seat" must be a seat id' }, { status: 400 });
-        }
-        if (fill !== 'empty' && fill !== 'built-in' && fill !== 'laptop' && fill !== 'submission') {
-          return Response.json({
-            ok: false,
-            reason: '"fill" must be "empty", "built-in", "laptop" or "submission"',
-          }, { status: 400 });
-        }
-        if (fill === 'submission' && (typeof team !== 'string' || team.trim() === '')) {
-          return Response.json({ ok: false, reason: '"team" is required for a submission' }, { status: 400 });
-        }
-        const chosen: SeatFill =
-          fill === 'submission' ? { kind: 'submission', team: team as string } : { kind: fill };
-        await session.setSeat(id, chosen);
+        const validated = validateBody(
+          body.payload,
+          SeatBodySchema,
+          (path) =>
+            path === 'seat'
+              ? '"seat" must be a seat id'
+              : path.startsWith('fill.')
+                ? '"team" is required for a submission'
+                : '"fill" must be "empty", "built-in", "laptop" or "submission"',
+        );
+        if (!validated.ok) return validated.response;
+        await session.setSeat(validated.value.seat, validated.value.fill);
         break;
       }
       case 'seat-restart': {
@@ -1159,15 +1149,17 @@ export class MatchServer {
         break;
       }
       case 'correct-score': {
-        const { team, to, reason } = body.payload;
-        if (team !== 'violet' && team !== 'lime') {
-          return Response.json({ ok: false, reason: '"team" must be "violet" or "lime"' }, { status: 400 });
-        }
-        if (typeof to !== 'number' || typeof reason !== 'string' || reason.trim() === '') {
-          return Response.json({ ok: false, reason: '"to" (number) and "reason" (string) are required' }, { status: 400 });
-        }
+        const validated = validateBody(
+          body.payload,
+          CorrectScoreBodySchema,
+          (path) =>
+            path === 'team'
+              ? '"team" must be "violet" or "lime"'
+              : '"to" (number) and "reason" (string) are required',
+        );
+        if (!validated.ok) return validated.response;
         try {
-          match.correctScore(team, to, reason);
+          match.correctScore(validated.value.team, validated.value.to, validated.value.reason);
         } catch (err) {
           return Response.json({ ok: false, reason: (err as Error).message }, { status: 400 });
         }

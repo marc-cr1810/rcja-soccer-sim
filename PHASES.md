@@ -481,7 +481,7 @@ this match, and it replaces their browser's credential with a token only it
 and the child know on the way through. That check *has* to live in the hub: a
 child can only ever see its own world, so leaving it to the children would mean
 every arena looking correct on its own while anybody holding an arena id could
-kick off a final. Phase 9 replaces the list with real assignments.
+kick off a final. Phase 10 replaces the list with real assignments.
 
 Caught by playing it rather than by testing it:
 
@@ -508,21 +508,27 @@ Caught by playing it rather than by testing it:
 
 ## Phase 8 — A field belongs to a team
 
-*Gate: a team presses Run on the code in its workspace and watches its own
-robot play; the same robot cannot be started anywhere else while it does; and a
-field the team walks away from comes back on its own, with their arrangement
-intact.*
+*Gate: a team opens a field that is theirs and invites another team onto it;
+the same robot cannot be started anywhere else while it is in a seat; and when
+a fixture falls due the hub takes that team's robots back and says so.*
+
+> This and [Phase 9](#phase-9--run-it-and-give-it-back) were one phase until
+  16 Sep 2026. Its gate had three clauses joined by "and" — press Run, *and*
+  one robot in one place, *and* a field that comes back on its own — which is
+  the shape [Phase 7 was already split out of](#phase-7--the-league-server-supervises).
+  The seam is the same one that cut 7 from 8: this phase is **whose field, and
+  whose robot**, and it is entirely the hub growing a ledger and stopping being
+  a transparent proxy. Phase 9 is what a team does with a field once it has
+  one, and both halves of it read and write the same workspace folder.
 
 Phase 4 left practice fields open to whoever had the link, on purpose, because
 the league had no accounts. Phase 6 built the accounts and Phase 7 built the
 room for several fields to exist. This is the phase where a field stops being
-anonymous — and it is also where a team finally gets the Run button
-[Phase 5 deferred](#phase-5--write-it-in-a-browser), because Run is meaningless
-until there is a field that belongs to the person pressing it.
+anonymous.
 
-- **A field belongs to somebody.** Which team owns it, what a second Run does,
-  and who may drag whose robot. A team can invite another team by name and the
-  invitation lands on their dashboard, not as a link to paste.
+- **A field belongs to somebody.** Which team owns it, what a second request
+  for one does, and who may drag whose robot. A team can invite another team by
+  name and the invitation lands on their dashboard, not as a link to paste.
 - **One robot, one place.** Not a setting — a rule: **each of a team's robots
   may be in exactly one seat, anywhere on the server, at any moment.** Nothing
   technical forces it; the sport does, because a team has two robots and two
@@ -535,43 +541,90 @@ until there is a field that belongs to the person pressing it.
 - **Ownership and occupancy are separate ledgers.** A guest spends no *field*
   allowance, so accepting an invitation never costs a team their own field; it
   does spend their own *robot* occupancy, because their robots really are in
-  seats. A laptop `AGENT_PATH` connection counts the same way — Phase 1 already
-  settled that identity comes from the token rather than the client's say-so.
+  seats.
+- **A laptop robot stops being anonymous.** Today a `laptop` seat
+  [clears the token](src/practice.ts) — "a practice field is not where identity
+  is being proved" — and a self-declared join is one the ledger cannot count.
+  The team names which of its robots is joining, the hub mints a short-lived
+  join token for that seat, and the student passes it the way `submit.py`
+  passes a key. This is Phase 1's rule arriving where it was skipped: identity
+  comes from the token, not the client's say-so.
 - **The check lives in the hub, and that is a real change.** It proxies
   `/a/<id>/` blindly today and a child can only see its own field, so seat
   requests stop being transparently forwarded. Get this wrong and every field
   looks correct on its own while a robot plays in two places.
+- **And the hub becomes the only door.** A practice arena binds every interface
+  today; only fixtures get `--host 127.0.0.1`. That leaves its `/practice-api/`
+  and its `/agent` reachable on a port the hub knows nothing about, which makes
+  the ledger advisory for anyone who can read a port number. Under a hub, a
+  practice arena binds loopback like a fixture does and everything arrives
+  through the one configured port — which is what [`arenas.ts`](src/arenas.ts)'s
+  own header already argues for. Standalone `serve practice` keeps binding
+  wide: it has no hub in front of it.
 - **A fixture pre-empts practice.** Without an explicit winner the invariant
   deadlocks at the worst moment of the day: a team whose robot is still held by
-  an abandoned field cannot be seated in their own match. At pre-game the hub
-  takes the robots back, empties whatever practice seat held them, and says so.
+  an abandoned field cannot be seated in their own match. When the fixture's
+  arena opens, the hub takes the robots back, empties whatever practice seat
+  held them, and says so on the field and on the owner's dashboard.
+- **A queue, not an error.** A team over the line is told where they are and
+  what is ahead of them. When a field frees, the team at the front is notified
+  and has a short window to claim it; unclaimed, it passes to the next team —
+  because handing a field to somebody who has gone home starts an idle clock on
+  an empty field and stalls everyone behind them for the whole quiet period.
+  Practice arenas are shed first when the budget is over, because a rehearsal
+  can wait and a scheduled match cannot.
+- **`arenas` from the terminal.** Listing what is running and stopping one is
+  on the admin screen, and also needs to work when the admin screen is the
+  thing that has gone wrong.
+- **The team's dashboard stops being a stub.** Where their field is, which of
+  their robots is in which seat, where they are in the queue, and an invitation
+  waiting to be accepted. [`dashboard()`](site/main.ts) says in its own comment
+  that this is the phase that fills it in.
+
+---
+
+## Phase 9 — Run it, and give it back
+
+*Gate: a team presses Run on the code in its workspace and watches its own
+robot play; when it crashes they read the traceback in the browser; and a field
+they walk away from comes back on its own, with their arrangement intact.*
+
+Phase 8 made a field belong to a team. This is what the team does with it — and
+the two halves belong together because they are the same folder: Run reads the
+team's code out of the workspace, and giving a field back writes the
+arrangement into it. It is also where a team finally gets the Run button
+[Phase 5 deferred](#phase-5--write-it-in-a-browser), because Run is meaningless
+until there is a field that belongs to the person pressing it.
+
+- **Run it from the workspace.** A seat kind that runs a workspace rather than
+  a submission — and mints a token to do it, because
+  [`resolveLineup`](src/lineup.ts) skips a folder without one and a team
+  watching the reference agent believing it is theirs is the worst possible
+  failure. What a second Run does, and whether it disturbs the other three
+  seats, follows Phase 4's rule that a seat starts and stops on its own.
+- **A traceback has somewhere to go.** A per-seat output buffer the browser can
+  read: [`spawnSeat`](src/lineup.ts) already captures stdout and stderr and
+  sends both to a log line nobody at a venue is watching. The student whose
+  code does not parse needs that text, and today the only symptom is a seat
+  that says "not answering".
 - **A field is given back when its team stops using it.** Configurable quiet
   time, then a warning on the field and the owner's dashboard, then closing —
   warned, never silently killed. A person present or an interaction resets the
   clock; **a connected robot does not**, which is a change from today, where
-  [`hold()`](src/arenas.ts) feeds one counter from `/agent` upgrades and viewer
-  sockets alike and one forgotten laptop program holds an arena all day.
-  Closing keeps the `Arrangement` in the team's workspace folder and restores
-  it on reopen, so reclamation costs a process rather than an afternoon's
-  setup. Pressure scales with the queue rather than a flat maximum lifetime: be
+  [`trackConnection()`](src/arenas.ts) feeds one counter from `/agent` upgrades
+  and viewer sockets alike and one forgotten laptop program holds an arena all
+  day. Pressure scales with the queue rather than a flat maximum lifetime: be
   generous when nobody is waiting, warn the longest-idle field first when
   somebody is. See [Giving a field back](END-STATE.md#giving-a-field-back).
-- **A queue, not an error.** A team over the line is told where they are and
-  what is ahead of them, and practice arenas are shed first when the budget is
-  over, because a rehearsal can wait and a scheduled match cannot.
-- **`arenas` from the terminal.** Listing what is running and stopping one is
-  on the admin screen, and also needs to work when the admin screen is the
-  thing that has gone wrong.
-- **Run it from the workspace.** A seat kind that runs a workspace rather than a
-  submission — and mints a token to do it, because `resolveLineup` skips a
-  folder without one and a team watching the reference agent believing it is
-  theirs is the worst possible failure. Plus a per-seat output buffer the
-  browser can read: `spawnSeat` already captures stderr, so the traceback a
-  student needs exists and has nowhere to go.
+- **Closing costs a process, not an afternoon.** The Phase 4 `Arrangement` is
+  saved to the team's workspace folder and restored when they open a field
+  again. An arena holds a physics loop and four CPython processes and is not
+  worth persisting; the setup somebody spent twenty minutes dragging into place
+  is.
 
 ---
 
-## Phase 9 — The referee's day
+## Phase 10 — The referee's day
 
 *Gate: a referee is assigned a fixture, takes it from pre-game through to a
 confirmed result that appears in the table, and never opens a terminal.*
@@ -601,7 +654,7 @@ the code that plays.
 
 ---
 
-## Phase 10 — Administering a venue
+## Phase 11 — Administering a venue
 
 *Gate: an admin reschedules a fixture, stops a runaway practice field, fixes a
 team's mis-uploaded file, and re-runs an abandoned game — all from a browser,
@@ -632,7 +685,7 @@ person holding this screen is the one being shouted at.
 
 ---
 
-## Phase 11 — See what your robot saw
+## Phase 12 — See what your robot saw
 
 *Gate: a team finds a real bug in their robot by scrubbing back to the tick
 where it last saw the ball — without adding a print statement.*

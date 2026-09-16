@@ -607,7 +607,7 @@ export const CorrectScoreBodySchema = z
   .object({
     team: TeamIdSchema,
     to: z.number().int().nonnegative(),
-    reason: z.string(),
+    reason: z.string().trim().min(1),
   })
   .openapi('CorrectScoreBody', { description: 'Body for POST /referee-api/correct-score' });
 export type CorrectScoreBody = z.infer<typeof CorrectScoreBodySchema>;

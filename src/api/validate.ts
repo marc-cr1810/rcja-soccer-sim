@@ -45,14 +45,29 @@ export function badBody(reason: string, status = 400): Response {
 export type Validated<T> = { ok: true; value: T } | { ok: false; response: Response };
 
 /**
+ * A message for a schema failure.
+ *
+ * Either one message for every failure — the usual case — or a function from
+ * the first failing path (e.g. `"seat"`, `"fill.team"`) to the message for it,
+ * for endpoints whose hand-written checks had a different message per field.
+ */
+export type FailureReason = string | ((path: string) => string);
+
+/**
  * Validate a parsed body against a zod schema.
  *
  * `reason` is the message the handler already used for a bad field, so the
  * response a bad request gets is unchanged — only *what counts as a bad field*
  * comes from the schema now.
  */
-export function validateBody<T>(payload: Record<string, unknown>, schema: z.ZodType<T>, reason: string): Validated<T> {
+export function validateBody<T>(
+  payload: Record<string, unknown>,
+  schema: z.ZodType<T>,
+  reason: FailureReason,
+): Validated<T> {
   const parsed = schema.safeParse(payload);
   if (parsed.success) return { ok: true, value: parsed.data };
-  return { ok: false, response: badBody(reason) };
+  const first = parsed.error.issues[0];
+  const message = typeof reason === 'string' ? reason : reason(first ? first.path.join('.') : '');
+  return { ok: false, response: badBody(message) };
 }

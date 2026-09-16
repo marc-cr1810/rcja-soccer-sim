@@ -32,10 +32,10 @@
  * replayed — which is what Phase 3 already guarantees.
  *
  * Nothing here knows whose arena is whose. Ownership — who may open one, who
- * may drag whose robot, what happens to one that is abandoned — is Phase 8's
- * whole subject; `owner` is carried through so that phase has somewhere to put
- * it. What bounds an arena meanwhile is a budget (`capacity.ts`) and a field
- * that shuts itself down once nobody is watching.
+ * may drag whose robot — is Phase 8's whole subject, and what happens to one
+ * that is abandoned is Phase 9's; `owner` is carried through so the first has
+ * somewhere to put it. What bounds an arena meanwhile is a budget
+ * (`capacity.ts`) and a field that shuts itself down once nobody is watching.
  */
 
 import type { Subprocess } from 'bun';

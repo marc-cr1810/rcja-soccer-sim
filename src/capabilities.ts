@@ -32,7 +32,7 @@ export function isRole(value: string): value is Role {
  *
  * - `own` — only things belonging to this account, matched by slug.
  * - `assigned` — only things this account has been assigned to. Nothing is
- *   assigned to anybody until Phase 9 builds referee assignments, so this
+ *   assigned to anybody until Phase 10 builds referee assignments, so this
  *   resolves to false today; it is defined now because leaving it out would
  *   mean threading a second concept through every check later.
  * - `any` — everything of that kind.
@@ -103,7 +103,7 @@ export const GUEST: Actor = { id: null, role: 'guest', slug: null, grants: [] };
  *
  * One deliberate looseness, recorded here rather than left to be discovered:
  * a referee's match capabilities are `any` rather than `assigned`, because
- * nothing assigns a referee to a fixture until Phase 9 and `any` is exactly
+ * nothing assigns a referee to a fixture until Phase 10 and `any` is exactly
  * the reach the hand-issued referee token has today. Narrowing it later moves
  * from too-permissive to correct, which is the safe direction; granting
  * `assigned` now would mean no referee could kick anything off at all.
@@ -128,7 +128,7 @@ const ROLE_CAPABILITIES: Record<Role, Partial<Record<Capability, Scope>>> = {
     'results.read': 'any',
     'field.open': 'any',
     'field.join': 'any',
-    // `any` until Phase 9 — see the note above.
+    // `any` until Phase 10 — see the note above.
     'fixture.setup': 'any',
     'match.control': 'any',
     'match.score.correct': 'any',
@@ -206,7 +206,7 @@ function satisfies(
       // No target means "anything of this kind", which `own` cannot promise.
       return target !== undefined && actor.slug !== null && target === actor.slug;
     case 'assigned':
-      // Phase 9. Nothing is assigned to anybody yet, and pretending otherwise
+      // Phase 10. Nothing is assigned to anybody yet, and pretending otherwise
       // would be a check that passes for the wrong reason.
       return false;
   }
