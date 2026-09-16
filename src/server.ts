@@ -26,6 +26,10 @@ import {
   type MatchResult,
 } from './match';
 import { VIEW_HZ, type ViewMessage } from './view';
+import { SEAT_IDS } from './match';
+import type { SeedInput } from './rand';
+import type { Agent } from './agent';
+import { defaultSpot } from './world';
 import { AGENT_PATH, AgentGateway, type RemoteTransport } from './gateway';
 import { handIssuedAuthority, type Authority } from './authority';
 import type { PracticeSession } from './practice';
@@ -904,6 +908,15 @@ export class MatchServer {
             match.step(dt);
             owed -= dt;
           }
+        } else {
+          // Stopped, but not silent. The seats are still polled so a program
+          // waiting for a referee keeps hearing from the server — ten seconds
+          // of nothing is what a client reads as a dead server, and a referee
+          // reaching the console takes longer than that. Nothing moves: the
+          // clock, the ball and every rule detector stay exactly where the
+          // whistle left them, and the commands that come back are discarded.
+          match.poll(Math.min(owed, dt * perControl));
+          owed = 0;
         }
         // Only live play counts: a referee who has paused for two minutes to
         // talk to a team has not made this machine slow.
@@ -918,6 +931,94 @@ export class MatchServer {
     }
 
     return match.result();
+  }
+
+  /**
+   * A field to look at, and to wait on, while nothing is being played.
+   *
+   * A match server used to do nothing at all between matches: `play()` built a
+   * world, and until it was called there was none — so `--agents` sat on
+   * `whenReady()` with the viewer showing an empty page, and a team starting
+   * their four programs had no way to tell which had arrived. Worse, a program
+   * that *had* connected heard nothing, and a program that hears nothing for
+   * ten seconds decides the server has gone.
+   *
+   * So there is always a world. It is staged at the kick-off marks and never
+   * stepped — no clock, no ball, no rules — and a seat with no program simply
+   * has no robot on the field. Robots appear at their marks as their programs
+   * connect, which is the one thing somebody standing at a laptop wants to
+   * know, and every seat that is connected is polled, which is what keeps it
+   * connected.
+   *
+   * Returns when `until` says so; the caller then plays a real match.
+   */
+  async lobby(opts: {
+    teams: { violet: string; lime: string };
+    seed: SeedInput;
+    until: () => boolean;
+  }): Promise<void> {
+    if (opts.until()) return;
+
+    // A seat has to have *something* in it or the constructor objects — a
+    // robot on the field with no program is an error there, and rightly. These
+    // stand in until the real programs arrive, and they are never acted on:
+    // the lobby only ever polls, and a poll discards what it collects.
+    const waiting: Record<string, Agent> = {};
+    for (const id of SEAT_IDS) waiting[id] = { name: id, tick: () => null };
+
+    const match = new Match({
+      agents: waiting,
+      teams: opts.teams,
+      halfSeconds: 300,
+      seed: opts.seed,
+      idealSensors: this.opts.idealSensors ?? false,
+    });
+    this.current = match;
+    // Nobody is serving a sanction in a lobby; there is no match to be sent
+    // off from. A program that reconnects simply takes its seat again.
+    this.agents.standDown = () => 0;
+    this.broadcast({
+      type: 'hello',
+      league: match.league,
+      teams: match.teams,
+      halfSeconds: match.halfLength,
+    });
+
+    const dt = 1 / PHYSICS_HZ;
+    const perControl = Math.max(1, Math.round(PHYSICS_HZ / CONTROL_HZ));
+    const framePeriod = 1000 / Math.max(10, Math.min(100, this.opts.viewHz ?? VIEW_HZ));
+    // Not '' — that is what "nobody is here" looks like, and the first pass
+    // has to stage even when the answer is nobody: a `Match` is born with all
+    // four robots on their marks, and until they are taken off the field shows
+    // four robots that have not arrived.
+    let seated = '\u0000';
+
+    while (!opts.until()) {
+      await sleep(framePeriod);
+
+      // Re-stage only when the answer to "who is here" changes. `kickOff` puts
+      // all four back on their marks, and whoever has no program is taken off
+      // again — so the field always shows exactly the robots that have arrived.
+      const live = this.agents.transports();
+      const here = SEAT_IDS.filter((id) => live[id]?.connected !== false && live[id]);
+      const key = here.join(',');
+      if (key !== seated) {
+        seated = key;
+        // Staged rather than taken off one at a time: `stage` sets the roster
+        // to exactly these ids and puts a robot back on the field for any that
+        // is missing, which `takeOff` on its own cannot do — it shrinks the
+        // roster, so a robot taken off never comes back.
+        for (const id of here) match.setSeat(id, live[id]!);
+        match.world.stage({
+          robots: here.map((id) => ({ ...defaultSpot(id), id, isGoalie: id.endsWith('-2') })),
+          ball: { x: 0, z: 0 },
+        });
+        match.world.running = false;
+      }
+
+      match.poll(dt * perControl);
+      this.broadcast({ type: 'frame', frame: match.snapshot() });
+    }
   }
 
   /**
@@ -972,7 +1073,11 @@ export class MatchServer {
         this.fidelity.advance(session.match.world.clock - was, wall);
       } else {
         // Stopped is stopped: a field held still for a minute while somebody
-        // arranges it must not then play that minute in one frame.
+        // arranges it must not then play that minute in one frame. But it is
+        // not silent either — a practice field spends most of its life stopped
+        // while somebody drags robots around, and a seat that hears nothing
+        // for ten seconds drops and reconnects for as long as that lasts.
+        session.match.poll(Math.min(owed, wall));
         owed = 0;
       }
       this.broadcast({ type: 'frame', frame: session.match.snapshot() });

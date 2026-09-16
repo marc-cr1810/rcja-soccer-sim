@@ -233,6 +233,16 @@ interface Slot {
   command: ActuatorFrame;
   /** Whether this slot's program was reachable at the last control cycle. */
   wasConnected: boolean;
+  /**
+   * Whether this slot's robot was off the field at the last control cycle.
+   *
+   * Two jobs. It is what makes the frame after a return carry `returned`, and
+   * it is what stops a stand-down being served twice: a program that dropped
+   * while its robot was already off is re-checked once, when the robot comes
+   * back, rather than earning a fresh thirty seconds for a disconnection
+   * nobody could have answered.
+   */
+  wasRemoved: boolean;
 }
 
 export class Match {
@@ -381,17 +391,64 @@ export class Match {
     return Math.abs(wrapAngle(Math.atan2(dz, dx) - robot.heading)) < GATE_ARC;
   }
 
-  private control(dt: number): void {
+  /**
+   * Poll every seat, and act on what comes back only if play is running.
+   *
+   * The two halves used to be one: a seat was polled because the match was
+   * stepping, and a match that was not stepping polled nobody. That is what
+   * left a robot's socket silent before kick-off, at half time, through a
+   * referee's pause and for the whole of a stand-down — long enough for the
+   * client's read timeout to decide the server had gone.
+   *
+   * `act` is what keeps the separation honest. A command collected while play
+   * is stopped must not reach the robot or the ball: a kicker fired during a
+   * stoppage would set a ball velocity that frozen physics never integrates,
+   * and the ball would leap the moment the whistle went.
+   */
+  private control(dt: number, act: boolean): void {
     const view = this.view();
     for (const slot of this.orderedSlots()) {
       const robot = this.robotFor(slot.id);
       if (!robot) continue;
       slot.kickCooldown = Math.max(0, slot.kickCooldown - dt);
+
+      /*
+       * Off the field: told so, rather than left in silence.
+       *
+       * Rule 5.7 takes a damaged robot off for thirty seconds, and for those
+       * thirty seconds it has nothing to decide — no sensors, no tick, no
+       * command. What it must not have is *nothing at all*, which is what this
+       * branch used to hand it: the seat was skipped before it was polled, its
+       * socket went quiet, and a client that waits ten seconds for a frame
+       * concluded the server had gone. It dropped; a drop during play is
+       * itself a 5.7.1 removal; and so one stand-down became an endless one,
+       * measured going round at exactly thirty seconds a lap.
+       *
+       * `wasConnected` is updated here too, and that is half the cure. It used
+       * to be left untouched by this branch, so a robot returning after a
+       * stand-down its program had dropped through was judged against a
+       * `wasConnected` from before it ever came off — still `true` — and was
+       * taken straight back off for "its program disconnected during play".
+       */
       if (robot.removed) {
         robot.motors = [0, 0, 0, 0];
         this.actuators[robot.id] = { kicker: false, dribbler: 0, kickCooldown: slot.kickCooldown };
+        slot.agent.disable({
+          type: 'disabled',
+          rule: robot.removalRule ?? '5.7',
+          reason: robot.removalReason ?? 'off the field',
+          returnsIn: Math.max(0, robot.penaltyRemaining),
+        });
+        slot.wasConnected = slot.agent.transport.connected ?? true;
+        slot.wasRemoved = true;
         continue;
       }
+
+      // The one frame that says "you have been put back". Rule 5.7.4 replaces a
+      // returning robot at a corner of its own box, so what it was chasing has
+      // moved; its program never stopped and still believes otherwise.
+      const returned = slot.wasRemoved;
+      slot.wasRemoved = false;
 
       /*
        * Rule 5.7.1: a robot that has stopped is a damaged robot.
@@ -433,9 +490,12 @@ export class Match {
         messages: this.world.commsEnabled ? this.radios[robot.team].deliver(number, this.world.clock) : [],
         attackDirection: this.world.attackingGoal(robot.team) === 'yellow' ? 1 : -1,
         dt,
+        returned,
+        frozen: !act,
       });
 
       const command = slot.agent.poll(frame);
+      if (!act) continue;
       slot.command = command;
       robot.motors = command.motors;
       this.actuators[robot.id] = {
@@ -493,7 +553,29 @@ export class Match {
     }
   }
 
+  /**
+   * The control pass alone: every seat is polled and nothing moves.
+   *
+   * What a loop calls while play is stopped but the world is still there —
+   * waiting for a referee, at half time, between matches. A robot standing on
+   * the field keeps being read and keeps hearing from the server; the physics
+   * pass, the clock and every rule detector stay exactly where they were.
+   */
+  poll(dt: number): void {
+    this.tickControl(dt, false);
+  }
+
   step(dt: number): void {
+    this.tickControl(dt, true);
+    this.dribble(dt);
+    this.world.step(dt);
+    this.recordGoals();
+    this.recordCalls();
+    this.observer?.(this);
+  }
+
+  /** Run the control pass at its own cadence, whatever the physics is doing. */
+  private tickControl(dt: number, act: boolean): void {
     this.sinceControl += dt;
     const period = 1 / CONTROL_HZ;
     if (this.sinceControl >= period) {
@@ -507,14 +589,9 @@ export class Match {
       // whose reply is most often too late, and it misses control cycles at
       // several times the rate of the first.
       this.slotOrderFlipped = !this.slotOrderFlipped;
-      this.control(this.sinceControl);
+      this.control(this.sinceControl, act);
       this.sinceControl = 0;
     }
-    this.dribble(dt);
-    this.world.step(dt);
-    this.recordGoals();
-    this.recordCalls();
-    this.observer?.(this);
   }
 
   /**
@@ -596,6 +673,7 @@ export class Match {
       kickCooldown: 0,
       command: { motors: [0, 0, 0, 0] },
       wasConnected: true,
+      wasRemoved: false,
     };
   }
 

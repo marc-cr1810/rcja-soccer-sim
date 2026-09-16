@@ -624,7 +624,7 @@ interface Yours {
  * answer, because a robot is in one place; that is the whole reason the rule
  * is worth enforcing rather than merely counting.
  *
- * The Run button and a field that comes back on its own are Phase 9; this does
+ * The Run button and a field that comes back on its own are Phase 10; this does
  * not pretend to them.
  */
 async function dashboard(): Promise<void> {
@@ -889,7 +889,7 @@ async function settings(): Promise<void> {
  * The matches a referee may take right now.
  *
  * The console itself is not here and cannot be: it lives on the arena playing
- * the match, because there is no single world any more. Phase 10 replaces this
+ * the match, because there is no single world any more. Phase 11 replaces this
  * list with a referee's actual assignments — the next game and the ones after
  * it, with times — which is the screen somebody standing in a hall needs.
  */
@@ -919,7 +919,7 @@ async function refereeList(): Promise<void> {
 /**
  * Enough administration to run a venue without an ssh session.
  *
- * Phase 11 is the real admin area. What is here is what Phase 6 itself creates
+ * Phase 12 is the real admin area. What is here is what Phase 6 itself creates
  * and therefore has to be able to undo: who exists, and who may register.
  */
 async function admin(): Promise<void> {

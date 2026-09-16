@@ -209,6 +209,7 @@ describe('perception hands over only what a sensor knows', () => {
         'messages',
         'playing',
         'range',
+        'returned',
         'robot',
         'team',
       ].sort(),

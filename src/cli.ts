@@ -306,7 +306,7 @@ async function serve(flags: Map<string, string>): Promise<void> {
 
   if (waitForAgents) {
     console.log(`  robots connect to  ws://localhost:${port}/agent`);
-    console.log(`  waiting for all four…\n`);
+    console.log(`  waiting for all four — watch them arrive at ${`http://localhost:${port}`}\n`);
   }
 
   /*
@@ -356,7 +356,17 @@ async function serve(flags: Map<string, string>): Promise<void> {
   let seed: SeedInput = seedOption(flags, matchSeed());
   for (;;) {
     if (waitForAgents) {
-      await server.agents.whenReady();
+      // Not `whenReady()` on its own any more. That returned the same answer
+      // but showed nothing while it waited — an empty page and four silent
+      // sockets — so a team starting four programs could not tell which had
+      // arrived, and a program that had arrived heard nothing for long enough
+      // to conclude the server was gone. The lobby is the same wait with a
+      // field to look at, and it keeps talking to whoever is already seated.
+      await server.lobby({
+        teams,
+        seed,
+        until: () => server.agents.ready,
+      });
       // Whoever connected gets to say who they are; the scoreboard is theirs.
       Object.assign(teams, server.agents.teamNames());
     }

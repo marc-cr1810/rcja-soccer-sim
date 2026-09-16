@@ -22,7 +22,7 @@ import type { SeedInput } from './rand';
 import type { Transport } from './agent';
 import type { LeagueId } from './leagues';
 import type { MatchServer } from './server';
-import type { Arrangement, PlacedRobot, TeamId } from './world';
+import { defaultSpot, type Arrangement, type PlacedRobot, type TeamId } from './world';
 
 /** What is driving a seat, or that nothing is. */
 export type SeatFill =
@@ -281,7 +281,7 @@ export class PracticeSession {
       return;
     }
     const known = this.arrangement.robots.find((r) => r.id === id);
-    this.place(id, known ?? defaultSpotFor(id));
+    this.place(id, known ?? defaultSpot(id));
   }
 
   /** Put the situation back out as it was arranged. */
@@ -454,12 +454,3 @@ export class PracticeSession {
   }
 }
 
-/** Somewhere sensible for a robot being put onto the field with no history. */
-function defaultSpotFor(id: SeatId): { x: number; z: number; heading: number } {
-  const side = teamOf(id) === 'violet' ? -1 : 1;
-  return {
-    x: side * (numberOf(id) === 2 ? 1500 : 600),
-    z: 0,
-    heading: side < 0 ? 0 : Math.PI,
-  };
-}

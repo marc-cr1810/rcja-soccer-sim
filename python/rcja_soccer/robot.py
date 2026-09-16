@@ -164,6 +164,9 @@ class Robot:
         self._tick: TickFunction | None = None
         self._memory = Memory()
         self._last_kickoff = False
+        #: Whether this robot is currently off the field under rule 5.7, so
+        #: that being sent off is mentioned once rather than every second.
+        self._off = False
         #: When this robot was last actually in a match. Reconnecting is
         #: measured from here, so any number of server restarts is fine as
         #: long as the robot gets back in between them.
@@ -301,13 +304,57 @@ class Robot:
             self._last_connected = time.monotonic()
             self._memory.clear()
             self._last_kickoff = False
+            self._off = False
 
             while True:
                 message = json.loads(socket.recv())
+
+                # Off the field under rule 5.7. No sensors come while this is
+                # true and the tick function does not run, because there is
+                # nothing to decide: the robot is in somebody's hands beside
+                # the pitch. Saying so once is the difference between "my robot
+                # froze" and "my robot was sent off", which is a lot of a
+                # student's afternoon.
+                #
+                # Older programs ignore this message without knowing what it
+                # is, which was always the point: it is what keeps the socket
+                # from going quiet for the whole stand-down.
+                if message.get("type") == "disabled":
+                    if not self._off:
+                        self._off = True
+                        if not quiet:
+                            seconds = message.get("returnsIn", 0)
+                            back = f"; back in {seconds:.0f}s" if seconds else ""
+                            print(
+                                f"[{self.name}/{self.number}] off the field under rule "
+                                f"{message.get('rule', '5.7')} "
+                                f"({message.get('reason', 'no reason given')}){back}",
+                                file=sys.stderr,
+                            )
+                    continue
+
                 if message.get("type") != "sensors":
                     continue
 
                 frame = message["frame"]
+
+                # Put back on, at a corner of your own penalty box (5.7.4).
+                #
+                # Your memory is NOT cleared for you, and that is a decision
+                # rather than an oversight. Both habits are real: a team that
+                # switches the robot off and on again restarts its software
+                # from scratch, and a team with a start/stop button leaves it
+                # running so it carries on with what it knew. This program was
+                # never stopped, so it is the second kind - if you want the
+                # first, call ``me.clear()`` when ``s.returned`` is true.
+                if frame.get("returned"):
+                    self._off = False
+                    if not quiet:
+                        print(
+                            f"[{self.name}/{self.number}] back on the field",
+                            file=sys.stderr,
+                        )
+
                 # A kick-off is a fresh start: whatever the robot was chasing
                 # before is no longer where it was.
                 pending = frame.get("kickoff", {}).get("pending", False)

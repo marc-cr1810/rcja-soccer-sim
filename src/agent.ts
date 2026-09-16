@@ -14,7 +14,7 @@
  * the honest simulation of a hung robot and the safe thing for the tournament.
  */
 
-import { COAST, type ActuatorFrame, type SensorFrame } from './protocol';
+import { COAST, type ActuatorFrame, type DisabledMessage, type SensorFrame } from './protocol';
 
 /** The simplest kind of program: a function, in this process. */
 export interface Agent {
@@ -59,6 +59,16 @@ export interface Transport {
    * match cannot be bisected, only counted. See `playLockstep`.
    */
   readonly answered?: boolean;
+
+  /**
+   * Tell this program it is off the field, and that it should wait.
+   *
+   * Optional, and a no-op for an in-process program: a local agent is a
+   * function call with no socket to keep alive and no timeout to outlast. For
+   * a program on a socket this is the whole of what it hears while it is off,
+   * and the thing that stops a stand-down being mistaken for a dead server.
+   */
+  disabled?(state: DisabledMessage): void;
 }
 
 /**
@@ -179,6 +189,17 @@ export class AgentSlot {
     }
     this.transport.send(frame);
     return this.last;
+  }
+
+  /**
+   * Tell this seat's program it is off the field.
+   *
+   * Not a poll: nothing is read back, nothing is remembered, and the standing
+   * command is left where it is. A robot that comes back should resume from
+   * what it was last told to do, not from a command it never gave.
+   */
+  disable(state: DisabledMessage): void {
+    this.transport.disabled?.(state);
   }
 
   /** The command standing right now, without polling. */

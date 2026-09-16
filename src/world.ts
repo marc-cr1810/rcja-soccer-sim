@@ -89,6 +89,23 @@ export interface Robot extends Body {
 }
 
 /** One robot's place on the field, as an arrangement asks for it. */
+/**
+ * Somewhere sensible for a robot being put on the field with no history.
+ *
+ * Its own half, facing the other one, robot 2 further back than robot 1. Used
+ * by a practice field putting a robot into a situation it was not part of, and
+ * by a match server showing the robots that have connected before there is a
+ * match to place them for.
+ */
+export function defaultSpot(id: string): { x: number; z: number; heading: number } {
+  const side = id.startsWith('violet') ? -1 : 1;
+  return {
+    x: side * (id.endsWith('-2') ? 1500 : 600),
+    z: 0,
+    heading: side < 0 ? 0 : Math.PI,
+  };
+}
+
 export interface PlacedRobot {
   /** One of `violet-1`, `violet-2`, `lime-1`, `lime-2`. */
   id: string;

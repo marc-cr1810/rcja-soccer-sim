@@ -701,7 +701,7 @@ than a season.
 
 ## Getting there
 
-The phases that build this are [Phase 6 through Phase 11](PHASES.md#phase-6--accounts-and-the-front-door).
+The phases that build this are [Phase 6 through Phase 12](PHASES.md#phase-6--accounts-and-the-front-door).
 The ordering is the same argument as everywhere else: identity first, because
 every other screen asks who is looking. The supervisor second, because it is
 what lets more than one thing happen at a time — and it comes before ownership

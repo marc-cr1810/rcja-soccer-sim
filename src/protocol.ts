@@ -203,6 +203,22 @@ export interface SensorFrame {
   attackDirection: 1 | -1;
   /** True when the referee has the game running; false at a kick-off or stoppage. */
   playing: boolean;
+  /**
+   * True on the first frame after this robot was put back on the field.
+   *
+   * Rule 5.7.4 replaces a returning robot at a corner of its own penalty box,
+   * so whatever it was chasing is no longer where it left it — and its program
+   * never stopped, so it still believes otherwise.
+   *
+   * The library does **not** clear your memory when this arrives, because the
+   * two habits real teams have are both legal and the simulator should not
+   * pick one. A team that switches the robot off and on again restarts its
+   * software from scratch; a team with a start/stop button leaves it running
+   * and it carries on with what it knew. A program here is the second kind by
+   * construction — it was never stopped — so if you want the first, clear your
+   * own memory when you see this.
+   */
+  returned: boolean;
   kickoff: KickoffReading;
 
   ball: BallReading | null;
@@ -215,6 +231,35 @@ export interface SensorFrame {
   camera: CameraReading;
   ballGate: BallGateReading;
   messages: TeamMessage[];
+}
+
+/**
+ * What a robot that is off the field is told, and all it is told.
+ *
+ * Rule 5.7 takes a damaged robot off for thirty seconds. Until Phase 9 the
+ * simulator expressed that as *silence* — the seat was skipped before it was
+ * polled — and silence is indistinguishable from a server that has gone away.
+ * A program with a ten-second read timeout dropped, and a drop during play is
+ * itself a 5.7.1 removal, so one stand-down became an endless one.
+ *
+ * So being off the field is something the server says, about once a second,
+ * for as long as it is true. There are no sensors in it: a robot in a
+ * student's hands beside the pitch cannot see, and a tick function has nothing
+ * to decide. It is the *stop* half of a start/stop button.
+ *
+ * Nothing needs a `PROTOCOL_VERSION` bump for this. Every robot already
+ * written ignores a message type it does not know — `robot.py`'s loop has
+ * always read `if message.get("type") != "sensors": continue` — so an old
+ * program simply keeps waiting, which is exactly the behaviour wanted.
+ */
+export interface DisabledMessage {
+  type: 'disabled';
+  /** The rule it came off under, e.g. `5.7.1`. */
+  rule: string;
+  /** Said so a person can read it. */
+  reason: string;
+  /** Seconds of stand-down left, or 0 once it is waiting on the referee. */
+  returnsIn: number;
 }
 
 export interface ActuatorFrame {

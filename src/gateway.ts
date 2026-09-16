@@ -15,7 +15,12 @@
 
 import type { ServerWebSocket } from 'bun';
 import { sanitise, type Transport } from './agent';
-import { PROTOCOL_VERSION, type ActuatorFrame, type SensorFrame } from './protocol';
+import {
+  PROTOCOL_VERSION,
+  type ActuatorFrame,
+  type DisabledMessage,
+  type SensorFrame,
+} from './protocol';
 
 /** What a program says when it connects. */
 export interface JoinMessage {
@@ -54,11 +59,20 @@ export interface CommandMessage {
   frame: ActuatorFrame;
 }
 
-export type AgentServerMessage = WelcomeMessage | RejectMessage | SensorMessage;
+export type AgentServerMessage = WelcomeMessage | RejectMessage | SensorMessage | DisabledMessage;
 export type AgentClientMessage = JoinMessage | CommandMessage;
 
 /** The path a program connects to, so viewers and agents share one port. */
 export const AGENT_PATH = '/agent';
+
+/**
+ * How often a robot that is off the field is told so.
+ *
+ * Comfortably inside the ten seconds a client waits before deciding the server
+ * has gone, and far enough apart to be nothing beside a sensor frame every
+ * twentieth of a second.
+ */
+const DISABLED_EVERY_MS = 1_000;
 
 /**
  * One connected program.
@@ -87,6 +101,8 @@ export class RemoteTransport implements Transport {
   rejected = 0;
   /** How many times this seat's program has come back after dropping out. */
   reconnects = 0;
+  /** When this seat was last told it is off the field. See `disabled`. */
+  private lastDisabled = 0;
 
   constructor(
     readonly name: string,
@@ -117,6 +133,7 @@ export class RemoteTransport implements Transport {
     this.socket = socket;
     this.pending = null;
     this.closed = false;
+    this.lastDisabled = 0;
     this.reconnects++;
   }
 
@@ -157,6 +174,26 @@ export class RemoteTransport implements Transport {
     if (this.closed) return;
     try {
       this.socket.send(JSON.stringify({ type: 'sensors', frame } satisfies SensorMessage));
+    } catch {
+      this.closed = true;
+    }
+  }
+
+  /**
+   * Tell the program it is off the field. Throttled to about once a second.
+   *
+   * Throttled against the *wall* clock rather than the match clock, because
+   * what this has to outlast is a socket read timeout, and a socket does not
+   * know the referee has paused. Once a second is far inside the ten seconds a
+   * client waits, and is nothing next to a sensor frame every twentieth.
+   */
+  disabled(state: DisabledMessage): void {
+    if (this.closed) return;
+    const now = Date.now();
+    if (now - this.lastDisabled < DISABLED_EVERY_MS) return;
+    this.lastDisabled = now;
+    try {
+      this.socket.send(JSON.stringify(state satisfies DisabledMessage));
     } catch {
       this.closed = true;
     }

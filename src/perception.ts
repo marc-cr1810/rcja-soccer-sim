@@ -58,6 +58,24 @@ export interface SenseInput {
   /** Rule 1.4/5.4: which goal this robot currently attacks. See protocol.ts. */
   attackDirection: 1 | -1;
   dt: number;
+  /** True on the one frame after this robot was put back on. See protocol.ts. */
+  returned?: boolean;
+  /**
+   * Whether play is stopped, so the sensors' *error* must not move.
+   *
+   * A robot on the field during a stoppage is still read — it can see, and the
+   * protocol has always had `playing: false` to tell it not to expect to move.
+   * But compass drift and gyro bias are random walks stepped on every read, and
+   * a robot polled through a five-minute wait for a referee would arrive at
+   * kick-off carrying a half's worth of drift. Worse, the match's result would
+   * then depend on how long the referee took, and a match has to replay as
+   * itself.
+   *
+   * So the error state is frozen while play is stopped and everything else is
+   * not: the camera keeps producing frames of a static scene at its own rate,
+   * and the encoders keep reading wheels that are not turning.
+   */
+  frozen?: boolean;
 }
 
 /**
@@ -114,10 +132,13 @@ export class Senses {
   read(input: SenseInput): SensorFrame {
     const { view, self, wheelSpeeds, omega, held, messages, attackDirection, dt } = input;
     const ideal = this.idealSensors;
+    // See `SenseInput.frozen`: the error walks stop, the rest of the sensors
+    // carry on. Nothing about a match may depend on how long it waited.
+    const errorDt = input.frozen ? 0 : dt;
 
-    this.compass.step(dt, this.compassNoise, ideal);
+    this.compass.step(errorDt, this.compassNoise, ideal);
     this.encoders.step(wheelSpeeds, dt);
-    this.gyro.step(dt, this.gyroNoise, ideal);
+    this.gyro.step(errorDt, this.gyroNoise, ideal);
     const fresh = this.camera.step(dt, ideal);
 
     // Every robot but this one can get in the way of the infrared, including
@@ -131,6 +152,7 @@ export class Senses {
       team: self.team,
       attackDirection,
       playing: view.playing,
+      returned: input.returned === true,
       kickoff: {
         pending: view.kickoff.pending,
         // The countdown belongs to whoever the restart belongs to: a robot that

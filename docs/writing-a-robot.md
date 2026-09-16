@@ -82,6 +82,45 @@ defaults to `None` and joins exactly as it always has.
 `examples/striker.py` and `examples/goalie.py` are the canonical version of
 this convention — copy from there.
 
+## Being taken off, and coming back
+
+Rule 5.7 takes a damaged robot off the field for thirty seconds. While you are
+off, **your program keeps running but stops being asked anything**: no sensor
+frames arrive, so your tick function does not run, and the server tells you why
+about once a second. You will see it on your own terminal:
+
+```
+[Violet/1] off the field under rule 5.7.1 (damaged); back in 30s
+[Violet/1] back on the field
+```
+
+There is nothing to do about it and nothing to decide — your robot is in
+somebody's hands beside the pitch. Do not treat the pause as a crash.
+
+When you are put back, rule 5.7.4 replaces you at a corner of your own penalty
+box, so whatever you were chasing has moved. The first frame after you return
+has **`s.returned`** set, and it is set on that one frame only.
+
+**Your memory is not cleared for you**, and that is deliberate. Both habits are
+real and both are legal: some teams switch the robot off and on again, so the
+software starts from scratch; others leave it running with a start/stop button,
+so it carries on with what it knew and waits for the acknowledgement. Your
+program here was never actually stopped, so it is the second kind. If you want
+the first, ask for it:
+
+```python
+@robot.tick
+def think(s, me):
+    if s.returned:
+        # Off and on again: forget everything, we have been moved.
+        me.clear()
+    ...
+```
+
+Either way, check `s.returned` if you keep a position estimate or a plan across
+ticks. A robot that comes back still believing it is where it was will drive
+confidently at a ball that is no longer there.
+
 ## Try it before you push it
 
 Nothing about pushing changes how you develop. Run your script straight
@@ -91,6 +130,10 @@ against a local server the same way you always have:
 bun run serve -- --agents            # in one terminal
 cd python && PYTHONPATH=. python3 myrobot/robot.py --team violet   # in another
 ```
+
+The server shows a field as soon as it starts, and each robot appears on it as
+its program connects — so you can see which of your four are in before anything
+kicks off.
 
 or use `examples/play.py` / `bun run bench` to run it against the reference
 team — see [python/README.md](../python/README.md#try-it) and

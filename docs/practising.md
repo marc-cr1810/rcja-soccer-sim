@@ -136,6 +136,11 @@ standing on it as an obstacle, and goes straight back on when the program
 reconnects. There is no thirty-second stand-down here; that is a match
 sanction, and restarting your own program in practice is not a sanction.
 
+A practice field spends most of its life **stopped** — that is its normal state
+while you drag things into place. A robot seated on a stopped field is still
+read and still hears from the server; it just cannot move, and its frames say
+`playing: false`. Nothing times out while you think.
+
 ## What a practice field is not
 
 It is not a match. Nothing is scored against you, no result is written, and a

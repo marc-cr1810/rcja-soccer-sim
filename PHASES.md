@@ -10,7 +10,7 @@ not when the code exists.
 > holding it was cleared. Phase 0 is history; everything after it is a plan and
 > can be argued with.
 
-[END-STATE.md](END-STATE.md) describes what Phases 6 to 10 add up to — the whole
+[END-STATE.md](END-STATE.md) describes what Phases 6 to 12 add up to — the whole
 interaction, screen by screen and role by role. This file is the order; that one
 is the destination.
 
@@ -302,7 +302,7 @@ with no hand-issued token anywhere, and `bun run serve` still creates no
 
 Phases 1, 2 and 5 each shipped a hand-issued secret and each said, in the same
 words, that Phase 6 replaces where it comes from. This is that — and only that.
-It was once a much larger phase; the rest of it is now Phases 7 to 10, because
+It was once a much larger phase; the rest of it is now Phases 7 to 12, because
 "accounts, a front page, several arenas at once, fields that belong to somebody,
 a run queue and a referee's pre-game" is six gates wearing one hat. See [END-STATE.md](END-STATE.md) for
 what the four of them add up to.
@@ -481,7 +481,7 @@ this match, and it replaces their browser's credential with a token only it
 and the child know on the way through. That check *has* to live in the hub: a
 child can only ever see its own world, so leaving it to the children would mean
 every arena looking correct on its own while anybody holding an arena id could
-kick off a final. Phase 10 replaces the list with real assignments.
+kick off a final. Phase 11 replaces the list with real assignments.
 
 Caught by playing it rather than by testing it:
 
@@ -534,13 +534,13 @@ interface and still takes a self-declared laptop join.
 
 `src/occupancy.ts` · `src/tenancy.ts` · `python/join.py`
 
-> This and [Phase 9](#phase-9--run-it-and-give-it-back) were one phase until
+> This and [Phase 10](#phase-10--run-it-and-give-it-back) were one phase until
   16 Sep 2026. Its gate had three clauses joined by "and" — press Run, *and*
   one robot in one place, *and* a field that comes back on its own — which is
   the shape [Phase 7 was already split out of](#phase-7--the-league-server-supervises).
   The seam is the same one that cut 7 from 8: this phase is **whose field, and
   whose robot**, and it is entirely the hub growing a ledger and stopping being
-  a transparent proxy. Phase 9 is what a team does with a field once it has
+  a transparent proxy. Phase 10 is what a team does with a field once it has
   one, and both halves of it read and write the same workspace folder.
 
 Phase 4 left practice fields open to whoever had the link, on purpose, because
@@ -649,7 +649,77 @@ Caught by playing it rather than by testing it:
 
 ---
 
-## Phase 9 — Run it, and give it back
+## Phase 9 — A robot waits to be played
+
+*Gate: a match server with nothing connected shows a field, robots appear on it
+as their programs join, and a robot taken off for damage comes back on when its
+thirty seconds are up — once, not over and over.*
+
+Inserted on 16 September 2026, ahead of the phase that was Phase 8's other half,
+because it is a correctness bug in scored matches and everything after it is
+built on top. Found by playing Phase 8 rather than by testing it.
+
+**A seat gets nothing on its socket whenever the match is not stepping.**
+[`control()`](src/match.ts) skips a removed robot before it polls, and the
+realtime loop only steps at all while the world is running or a kick-off counts
+down. So there is silence before kick-off, at half time, through a referee's
+pause, and for the whole of a rule 5.7 stand-down. The Python client's
+ten-second read timeout then fires, the socket drops, and the consequences
+compound:
+
+- A referee removes a healthy robot for damage. Ten seconds later its program is
+  dropped and refused once a second — *standing down under rule 5.7.2*.
+- The penalty expires and the robot is returned. The next control tick, twenty
+  milliseconds later and up to a second before the program's next retry, sees a
+  disconnected seat — and `slot.wasConnected` is still `true`, because the
+  removed branch `continue`s before it is updated. **So it removes the robot
+  again, for another thirty seconds, for a disconnection the server caused.**
+- Forever. Measured: the penalty reached zero at t=35 and immediately read 29.
+
+Every automatic 5.7.1 removal does this, in any match including a tournament
+fixture. In-process agents are immune — `connected` is undefined on a local
+transport, so `?? true` — which is exactly why the whole suite was green: it
+only ever bit a robot on a socket, which is every pushed submission in every
+real match.
+
+The fix is not a keepalive. It is that **a robot is either playing, or waiting,
+and waiting is a thing the server says rather than a silence it leaves**:
+
+- **The world is always live.** A match server holds a world between matches,
+  staged at the kick-off marks and broadcast from the moment it starts, so `/`
+  is never a blank screen. Robots appear at their marks as their programs
+  connect, and a seat with no program is simply not on the field —
+  [`World.takeOff`](src/world.ts) and the practice field's own roster already do
+  exactly this, and the renderer already hides what is not there.
+- **Polling is separated from physics.** The control pass runs whether or not
+  play does; only the physics pass is gated on running. A robot on the field
+  during a stoppage gets ordinary sensor frames with `playing: false` — a flag
+  that has been in the protocol since Phase 0 and was never once delivered.
+- **Commands are taken but not acted on while stopped.** Otherwise a kicker
+  fired during a stoppage sets a ball velocity that frozen physics never
+  integrates, and the ball leaps at the whistle.
+- **Sensor time is frozen while stopped.** Compass drift and gyro bias are random
+  walks stepped on every read; left running through a five-minute pre-game they
+  would arrive at kick-off with a half's worth of drift, and the result would
+  depend on how long the referee took. A match has to replay as itself.
+- **Off the field means disabled.** A robot serving a stand-down gets a
+  `disabled` message about once a second — the rule, the reason, the seconds
+  left — and no sensors at all. Its tick does not run. It needs no protocol
+  bump and breaks no robot anybody has already written, because the client's
+  loop has always ignored message types it does not know.
+- **Coming back is a start button, not a power cycle.** Real teams do both: some
+  switch the robot off and on again so the software restarts from scratch,
+  others leave it running with a start/stop button and it continues, memory
+  intact, waiting for the acknowledgement. The program here never actually
+  stopped, so the second is the honest default — the first frame back carries
+  `returned`, and a team that prefers a fresh start writes one line to get it.
+
+The practice field has the same disease for the same reason — a stopped field is
+its *normal* state while somebody arranges it — and is cured by the same change.
+
+---
+
+## Phase 10 — Run it, and give it back
 
 *Gate: a team presses Run on the code in its workspace and watches its own
 robot play; when it crashes they read the traceback in the browser; and a field
@@ -690,7 +760,7 @@ until there is a field that belongs to the person pressing it.
 
 ---
 
-## Phase 10 — The referee's day
+## Phase 11 — The referee's day
 
 *Gate: a referee is assigned a fixture, takes it from pre-game through to a
 confirmed result that appears in the table, and never opens a terminal.*
@@ -720,7 +790,7 @@ the code that plays.
 
 ---
 
-## Phase 11 — Administering a venue
+## Phase 12 — Administering a venue
 
 *Gate: an admin reschedules a fixture, stops a runaway practice field, fixes a
 team's mis-uploaded file, and re-runs an abandoned game — all from a browser,
@@ -751,7 +821,7 @@ person holding this screen is the one being shouted at.
 
 ---
 
-## Phase 12 — See what your robot saw
+## Phase 13 — See what your robot saw
 
 *Gate: a team finds a real bug in their robot by scrubbing back to the tick
 where it last saw the ball — without adding a print statement.*
