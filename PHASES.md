@@ -506,11 +506,33 @@ Caught by playing it rather than by testing it:
   showing nothing — the one place where "several at once" was visible to a
   spectator and the last place it was carried through.
 
-## Phase 8 — A field belongs to a team
+## Phase 8 — A field belongs to a team ✅
 
 *Gate: a team opens a field that is theirs and invites another team onto it;
 the same robot cannot be started anywhere else while it is in a seat; and when
 a fixture falls due the hub takes that team's robots back and says so.*
+
+Passed. ACT Robotics opened a field from their own page and invited NSW
+Lightning by name; the invitation arrived on NSW's page rather than as a link,
+they accepted, seated their robot 1 on it, and could not touch ACT's seats or
+start the field. ACT's attempt to seat NSW's pushed robot was refused, and NSW —
+already a guest — still opened a field of their own, because a guest spends no
+field allowance. With robot 1 seated on ACT's field, the same robot asked for a
+seat on NSW's and was told *robot 1 is already in the lime-1 seat on
+act-robotics's practice field*. A laptop seat minted a token, printed one
+command, and `python/examples/striker.py` joined through it **unedited**; the
+token never appeared in the field's state, and a stale one was refused by name.
+With two fields open on a server with room for two, a third team got a queue
+position; closing one held it for them for the claim window, passed it on when
+it lapsed, and the team that had gone home dropped out. When the second fixture
+opened, the two teams' own fields closed and ACT's guest seat on QLD Thunder's
+field emptied with a line saying why, while QLD's field played on. `arenas`
+listed all of it from a terminal with an admin key, refused a team's key, and
+stopped one. `serve --practice-fields` still opens a field to anybody with the
+link, with no `league.db` anywhere, and `serve practice` still binds every
+interface and still takes a self-declared laptop join.
+
+`src/occupancy.ts` · `src/tenancy.ts` · `python/join.py`
 
 > This and [Phase 9](#phase-9--run-it-and-give-it-back) were one phase until
   16 Sep 2026. Its gate had three clauses joined by "and" — press Run, *and*
@@ -578,8 +600,52 @@ anonymous.
   thing that has gone wrong.
 - **The team's dashboard stops being a stub.** Where their field is, which of
   their robots is in which seat, where they are in the queue, and an invitation
-  waiting to be accepted. [`dashboard()`](site/main.ts) says in its own comment
-  that this is the phase that fills it in.
+  waiting to be accepted. [`dashboard()`](site/main.ts) said in its own comment
+  that this is the phase that fills it in, and it is.
+
+**Two ledgers, and they are not the same ledger.**
+[`src/tenancy.ts`](src/tenancy.ts) is about fields — who owns one, who has been
+invited onto it, how many a team may hold, who is waiting. `src/occupancy.ts` is
+about robots. Keeping them apart is what keeps invitations alive: a guest spends
+no *field* allowance, so accepting one never costs a team their own right to
+open a field, while their robots genuinely do occupy seats and are counted
+there. Neither is persisted, for the reason arenas are not: they die with the
+hub, so the two can never disagree about what is running.
+
+**Running a field and being on one are two questions, so they are two
+capabilities.** `field.control` is drag, start, re-stage, invite, close, and a
+team holds it only over a field they opened. `field.join` is *may they be here
+at all* — and a guest holds that by invitation rather than by capability,
+because a guest list is a ledger and not a role. Each team fills the seats
+holding its own robots, owner and guest alike, which is what stops anybody's
+robot occupancy being spent by somebody else's click. One visible consequence,
+recorded because it is a change: rehearsing against another team's *pushed*
+robot is no longer something a team can do alone. That team's code is theirs;
+they can come onto the field and put it in a seat themselves.
+
+Caught by playing it rather than by testing it:
+
+- **A slot came free before the queue heard about it.** `close()` took an arena
+  out of the supervisor's map immediately, but the ledgers were emptied by the
+  child's `exited` handler a few milliseconds later — and in that window
+  capacity said yes while nothing was being held for anybody, so the next team
+  to press the button walked past everyone waiting. An arena is now declared
+  over exactly once, at whichever of the two comes first.
+- **Every join refusal reached the student as "connection is closed".**
+  `WebSocket.close()` in [`python/rcja_soccer/_ws.py`](python/rcja_soccer/_ws.py)
+  marked the socket closed *before* sending the courtesy close frame, so its own
+  guard rejected it and `close()` raised every single time — and because
+  `Robot._play` closes in a `finally`, that exception replaced whatever had
+  actually gone wrong. A bad token, a seat already taken, a protocol from last
+  season: all of them arrived as the one thing it never was. Invisible until
+  this phase, because until now nobody typed a token by hand.
+- **The practice console had stopped being able to change a seat at all.** It
+  sends `{seat, fill, team}` with `fill` as a bare string, which is what the
+  hand-written check took; when the endpoints
+  [grew schemas](src/api/schemas.ts) the shape became `{seat, fill: {kind,
+  team}}` and the console was not moved with them. The tests were, which is why
+  nothing said so. Fixed toward the nested form, because that is the shape a
+  seat already comes *back* in — the asymmetry is what hid it.
 
 ---
 

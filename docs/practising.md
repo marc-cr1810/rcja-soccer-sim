@@ -13,10 +13,27 @@ play under would be rehearsing a different sport.
 
 ## Opening one
 
-At a venue, if the organiser started the server with `--practice-fields`, open
-`/practice` on it and click **Open a practice field**. You get a link. Anyone
-who has that link can join and move things, so hand it to your team and nobody
-else — practice fields have no passwords until the league has accounts.
+At a league server, sign in and open **your team's page**. There is an **Open
+one** button under *Your practice field*. The field that appears belongs to
+your team: you run it, and nobody else can see the console or touch a seat
+unless you invite them.
+
+One field per team is the usual setting. If every field on the server is in
+use you are given a **place in the queue** instead of an error, with how many
+teams are ahead of you. When one frees up it is *held* for you for a short
+while and your team page says so — claim it and it is yours; leave it and it
+passes to the next team, so a field is never opened for somebody who has gone
+home.
+
+**Inviting another team.** Type their name under your field and press
+**Invite**. It appears on *their* team page, not as a link to paste around.
+Once they accept they can open the console and put their own robots in seats —
+but the field is still yours to drag, start, stop and close. Being a guest
+costs them nothing: they can still open a field of their own.
+
+If the organiser started a plain match server with `--practice-fields` instead,
+there are no accounts at all: `POST /practice` answers with a link, and anybody
+who has that link can join and move things.
 
 On your own machine:
 
@@ -64,20 +81,55 @@ Each of the four seats is one robot, and each can be:
 - **not in it** — the robot is not part of this situation at all. This is how
   you rehearse one robot alone, or robot 1 against robot 2: take the rest off.
 - **a built-in robot** — the reference agent, as an opponent or a teammate.
-- **a pushed robot** — your submission, by team name. It runs sandboxed,
-  exactly as it would in a match. **Restart** re-spawns it, which is what you
-  want after pushing a new version; **Stop** kills it.
-- **my laptop** — a program on your own machine, connected live. Run it with
-  the field's own agent URL:
+- **a pushed robot** — your submission. It runs sandboxed, exactly as it would
+  in a match. **Restart** re-spawns it, which is what you want after pushing a
+  new version; **Stop** kills it.
+- **my laptop** — a program on your own machine, connected live. On a plain
+  match server, run it with the field's own agent URL:
 
   ```bash
   python myrobot.py --team violet --number 1 --url ws://<host>/agent
   ```
 
-  On a venue server the field's URL prefix is part of that address:
-  `ws://<host>/f/<field id>/agent`. This is the practice loop from
-  [writing a robot](writing-a-robot.md) — no push, no validation, no waiting —
-  and a practice field is the place it was always meant to point at.
+  On a league server the seat is *yours*, so it asks for a token. Setting the
+  seat prints a whole command under it — copy it, and run it in the folder your
+  robot is in:
+
+  ```bash
+  python3 python/join.py --token <token> --url ws://<host>/a/<field id>/agent my_robot.py
+  ```
+
+  `join.py` runs **your file, unedited**. Nothing about the token or the
+  address goes into your code, so the robot you tested is the robot you push,
+  character for character. The token is for that one seat and does not last; if
+  it stops working, set the seat to *my laptop* again and copy the new command.
+
+  This is the practice loop from [writing a robot](writing-a-robot.md) — no
+  push, no validation, no waiting — and a practice field is the place it was
+  always meant to point at.
+
+**Whose robot is whose.** On a league server you fill the seats holding your
+own robots, and so does every team you invite. Seats holding somebody else's
+robot are shown but not yours to change. That also means you cannot rehearse
+against another team's pushed code unless they come onto your field and put it
+there themselves — their robot is theirs.
+
+**One robot, one place.** Each of your two robots can be in exactly one seat
+anywhere on the server at a time. Ask for a second and you are told where the
+first one already is. It is not a limit invented to save CPU: a team has two
+robots, and two robots cannot be on two fields. Your team page always says
+where each of them is.
+
+To measure a robot against many opponents at once, use
+[the bench](writing-a-robot.md) — it plays a robot over a range of seeds
+headless, on your own machine, and prints numbers, which is what "gather data
+faster" actually wants.
+
+**When your match is called.** A fixture always wins. When your fixture's arena
+opens, your own practice field is closed and any seat of yours on somebody
+else's field is emptied, with a line saying why — on the field and on your team
+page. Both your robots are about to be seated in the match, so there is nothing
+left to rehearse with anyway.
 
 A robot whose program is not answering comes **off the field** rather than
 standing on it as an obstacle, and goes straight back on when the program
@@ -87,8 +139,10 @@ sanction, and restarting your own program in practice is not a sanction.
 ## What a practice field is not
 
 It is not a match. Nothing is scored against you, no result is written, and a
-tournament will never see it. It is also not private: until the league has
-accounts, anybody with the link can open your field and move your robots.
+tournament will never see it. On a plain match server started with
+`--practice-fields` it is also not private: anybody with the link can open your
+field and move your robots. On a league server it is — the field belongs to
+your team, and a guest gets on it by invitation.
 
 And it is not the place to find out whether your robot is *good*. A staged
 situation tells you what your robot does in that situation, which is exactly

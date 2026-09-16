@@ -54,7 +54,7 @@ from .sense import (
     teammate_says,
     teleported,
 )
-from .transport import Channel, TransportError, use_transport
+from .transport import Channel, TransportError, use_join, use_transport
 
 __all__ = [
     "DEFAULT_URL",
@@ -91,6 +91,7 @@ __all__ = [
     "teammate_position",
     "teammate_says",
     "teleported",
+    "use_join",
     "use_transport",
     "wrap_angle",
 ]

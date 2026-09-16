@@ -88,6 +88,47 @@ html, body {
 }
 .call[hidden] { display: none; }
 
+/*
+ * Something the field has been told by whatever is supervising it — so far,
+ * only that a team's robots were taken back for their match. It sits at the
+ * top rather than beside the seat it emptied, because the person owed the
+ * explanation is watching the field, not the strip.
+ */
+.notice {
+  position: fixed;
+  top: 0.9rem;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: 34rem;
+  padding: 0.5rem 0.9rem;
+  background: rgba(58, 38, 8, 0.94);
+  border: 1px solid rgba(242, 188, 96, 0.5);
+  border-radius: 6px;
+  font-size: 0.82rem;
+}
+.notice[hidden] { display: none; }
+
+/*
+ * The one-line command a student copies into a terminal to put their own
+ * program in a seat. It is a whole command including a token, so it wraps and
+ * selects as one thing rather than looking like prose.
+ */
+.join {
+  margin-top: 0.35rem;
+  padding: 0.4rem 0.5rem;
+  background: rgba(8, 14, 10, 0.8);
+  border: 1px solid rgba(242, 245, 240, 0.16);
+  border-radius: 5px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.7rem;
+  line-height: 1.35;
+  word-break: break-all;
+  user-select: all;
+}
+.seat.theirs select,
+.seat.theirs input,
+.seat.theirs button { opacity: 0.55; }
+
 .panel {
   position: fixed;
   top: 0;

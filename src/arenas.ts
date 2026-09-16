@@ -87,6 +87,17 @@ export interface ArenaSupervisorOptions {
   idleMinutes?: number;
   /** Where the venue keeps pushed submissions, so an arena can load them. */
   submissionsDir?: string;
+  /**
+   * Called once an arena's process has actually gone, however it went.
+   *
+   * Swept as idle, stopped from the admin console, pre-empted by a fixture,
+   * crashed, or killed with the hub — a caller keeping a ledger about arenas
+   * needs one place to hear about all of it, and the only honest one is the
+   * child exiting. An arena that has died while a ledger still believes it
+   * holds somebody's robot deadlocks that team, so this is wired to the
+   * ending rather than to any of the ways of asking for one.
+   */
+  onArenaEnded?: (arena: { id: string; kind: ArenaKind; owner: string | null }) => void;
   /** Per-seat grants, passed to every arena so practice and finals play alike. */
   seatCpuPercent?: number;
   seatMemoryMb?: number;
@@ -134,6 +145,16 @@ interface Arena {
   lastSample: TreeSample | null;
   usage: Usage | null;
   fidelity: number | null;
+  /**
+   * Whether anybody has been told this arena is over.
+   *
+   * An arena stops being listed the moment `close()` is called, but its
+   * process takes a few milliseconds to actually go — and the ledgers a
+   * supervisor's owner keeps are about *slots*, which are free as soon as this
+   * one stops counting. Told at the map deletion rather than at the exit, and
+   * exactly once however the ending arrived.
+   */
+  ended: boolean;
 }
 
 const DEFAULT_MAX_ARENAS = 4;
@@ -262,10 +283,18 @@ export class ArenaSupervisor {
     if (this.opts.submissionsDir) args.push('--submissions', this.opts.submissionsDir);
     if (this.opts.seatCpuPercent !== undefined) args.push('--seat-cpu', String(this.opts.seatCpuPercent));
     if (this.opts.seatMemoryMb !== undefined) args.push('--seat-mem', String(this.opts.seatMemoryMb));
-    // A fixture arena is reached only through the hub. A practice arena binds
-    // every interface, because a robot on a student's laptop connects to it
-    // directly when the hub is not in front of it.
-    if (kind === 'fixture') args.push('--host', '127.0.0.1');
+    // Every supervised arena is reached only through whoever is supervising
+    // it. That used to be true of fixtures alone: a practice arena bound every
+    // interface so that a robot on a student's laptop could connect to it
+    // directly. But a supervisor is always in front of one - it is what this
+    // whole file is - and a wide-bound child leaves its `/practice-api/` and
+    // its `/agent` on a port the supervisor knows nothing about, which makes
+    // every rule the supervisor keeps advisory to anybody who can read a port
+    // number. Phase 8 puts a ledger up there, so the door closes.
+    //
+    // Standalone `serve practice` still binds wide: it builds no supervisor at
+    // all, has nothing in front of it, and is the laptop case this was for.
+    args.push('--host', '127.0.0.1');
 
     // stdin is a pipe and nothing is ever written to it: the child watches it
     // for end-of-file and exits when it comes. That is what makes
@@ -301,6 +330,7 @@ export class ArenaSupervisor {
       lastSample: null,
       usage: null,
       fidelity: null,
+      ended: false,
     };
     this.arenas.set(id, arena);
 
@@ -333,6 +363,7 @@ export class ArenaSupervisor {
     child.exited.then((code) => {
       this.arenas.delete(id);
       this.log(`[arena ${id}] ended (code ${code})`);
+      this.ended(arena);
     });
 
     try {
@@ -368,6 +399,7 @@ export class ArenaSupervisor {
     if (!arena) return false;
     stop(arena);
     this.arenas.delete(id);
+    this.ended(arena);
     return true;
   }
 
@@ -375,7 +407,29 @@ export class ArenaSupervisor {
     clearInterval(this.sweep);
     clearInterval(this.sampler);
     for (const arena of this.arenas.values()) stop(arena);
+    const all = [...this.arenas.values()];
     this.arenas.clear();
+    for (const arena of all) this.ended(arena);
+  }
+
+  /**
+   * Say, once, that an arena is over.
+   *
+   * Once matters. The two ways an arena ends — asked to stop, or its process
+   * going — both arrive here, and the second always follows the first. A
+   * second notification would look to the caller like a second slot coming
+   * free, which is one more field handed out than the machine has.
+   */
+  private ended(arena: Arena): void {
+    if (arena.ended) return;
+    arena.ended = true;
+    try {
+      this.opts.onArenaEnded?.({ id: arena.id, kind: arena.kind, owner: arena.owner });
+    } catch (err) {
+      // A ledger that throws on the way down must not stop an arena being
+      // forgotten here, or the count never comes back.
+      this.log(`[arena ${arena.id}] ${(err as Error).message}`);
+    }
   }
 
   private describe(arena: Arena): ArenaInfo {

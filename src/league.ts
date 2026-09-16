@@ -41,6 +41,9 @@ import { extname, join, normalize, resolve } from 'node:path';
 
 import { splitArenaPath, type ServerOptions } from './server';
 import { ArenaSupervisor } from './arenas';
+import { Occupancy, numberOfSeat, type Placement } from './occupancy';
+import { Tenancy } from './tenancy';
+import { randomBytes } from 'node:crypto';
 import { TeamApi } from './team-api';
 import { WorkspaceStore } from './workspace';
 import type { PlayRequest, PlayedMatch, ArenaState } from './arena';
@@ -66,10 +69,13 @@ import {
   CreateKeyBodySchema,
   LoginBodySchema,
   RegisterBodySchema,
+  InviteTeamBodySchema,
   ResetPasswordBodySchema,
+  SeatActionBodySchema,
+  SeatBodySchema,
   SetDisabledBodySchema,
 } from './api/schemas';
-import { readJsonBody, validateBody } from './api/validate';
+import { badBody, readJsonBody, validateBody } from './api/validate';
 
 const SESSION_COOKIE = 'rcja_session';
 
@@ -161,6 +167,20 @@ export class LeagueServer {
   readonly accounts: Accounts;
   /** Every world this venue is running. The hub itself runs none. */
   readonly arenas: ArenaSupervisor;
+  /**
+   * Whose field is whose: ownership, invitations, the per-team cap, the queue.
+   */
+  readonly tenancy: Tenancy;
+  /**
+   * One robot, one place — the invariant, held server-wide.
+   *
+   * It has to live up here. A child arena can only ever see its own world, so
+   * a rule about *every* world is one the children cannot keep between them;
+   * left to them, every field would look correct on its own while a team's
+   * robot played in two of them. That is why the hub stops being a transparent
+   * proxy for exactly one action, in `toPracticeArena` below.
+   */
+  readonly occupancy: Occupancy;
 
   private bunServer: Server<LeagueWsData> | null = null;
   private readonly siteRoot: string | null;
@@ -174,6 +194,15 @@ export class LeagueServer {
   readonly budget: Budget;
   /** Fixtures in progress, by fixture id. Set by whoever is running the draw. */
   private readonly liveFixtures = new Map<string, LiveArena>();
+  /**
+   * Something a field needs to be told, by arena id.
+   *
+   * Only one thing goes in here so far — *your robots have been taken back for
+   * your match* — and it matters that it is said on the field rather than only
+   * on a dashboard: the person watching a seat go empty is the person owed the
+   * explanation, and they are looking at the field.
+   */
+  private readonly fieldNotices = new Map<string, string>();
 
   constructor(private readonly opts: LeagueOptions) {
     this.log = opts.log ?? (() => {});
@@ -190,6 +219,11 @@ export class LeagueServer {
       submissionsDir: resolve(opts.world.submissionsDir ?? 'submissions'),
       pythonLibDir: opts.world.pythonLibDir ? resolve(opts.world.pythonLibDir) : null,
     });
+    this.tenancy = new Tenancy({
+      perTeam: this.settings.practice.perTeam,
+      claimSeconds: this.settings.practice.claimSecs,
+    });
+    this.occupancy = new Occupancy();
     this.arenas = new ArenaSupervisor({
       submissionsDir: resolve(opts.world.submissionsDir ?? 'submissions'),
       maxArenas: this.budget.max,
@@ -198,7 +232,65 @@ export class LeagueServer {
       seatMemoryMb: this.settings.arenas.seatMemoryMb,
       idleMinutes: this.settings.practice.idleMins,
       log: (line) => this.log(line),
+      onArenaEnded: (arena) => this.arenaEnded(arena),
     });
+  }
+
+  /**
+   * Take one team's robots back, because they are due on the pitch.
+   *
+   * A field they *own* closes outright: it frees a slot at exactly the moment
+   * the hall wants one, and there is nobody left to rehearse with anyway —
+   * both their robots are about to be seated in the match. A field they are
+   * merely a guest on lives on, because it is somebody else's rehearsal and
+   * losing it would punish the team who did the inviting; only the seat goes.
+   */
+  private async preempt(slug: string, fixture: string): Promise<void> {
+    for (const arenaId of this.tenancy.fieldsOwnedBy(slug)) {
+      this.log(`[practice] closing ${arenaId}: ${slug} is due to play ${fixture}`);
+      this.arenas.close(arenaId);
+    }
+    for (const { at } of this.occupancy.forTeam(slug)) {
+      if (at === null) continue;
+      const port = this.arenas.portOf(at.arenaId);
+      if (port !== null) {
+        try {
+          await fetch(`http://127.0.0.1:${port}/practice-api/seat`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ seat: at.seatId, fill: { kind: 'empty' } }),
+          });
+        } catch {
+          // The field is gone or not answering, which is the same outcome: the
+          // robot is free. Releasing it below is what actually matters.
+        }
+        this.fieldNotices.set(
+          at.arenaId,
+          `${slug} has been called away to play ${fixture}; their robot ${at.number} has left the ${at.seatId} seat.`,
+        );
+      }
+      this.occupancy.release(at.arenaId, at.seatId);
+      this.tenancy.removeGuest(at.arenaId, slug);
+    }
+  }
+
+  /**
+   * An arena's process has gone — swept, stopped, pre-empted or crashed.
+   *
+   * Both ledgers are emptied of it here rather than at each of the places that
+   * can end one, because the ways an arena ends are not a closed set and a
+   * ledger still holding a robot in a field that no longer exists deadlocks
+   * the team that owns that robot. Only then is the freed slot offered on.
+   */
+  private arenaEnded(arena: { id: string; kind: string; owner: string | null }): void {
+    this.occupancy.releaseArena(arena.id);
+    this.tenancy.forget(arena.id);
+    this.fieldNotices.delete(arena.id);
+    if (arena.kind !== 'practice') return;
+    const offer = this.tenancy.slotFreed();
+    if (offer) {
+      this.log(`[practice] a field is held for ${offer.offeredTo} until ${offer.until}`);
+    }
   }
 
   async listen(): Promise<number> {
@@ -258,6 +350,13 @@ export class LeagueServer {
    * and is simply replayed — which is what Phase 3 already guarantees.
    */
   async openFixture(fixture: Fixture): Promise<string> {
+    // A fixture pre-empts practice, and it has to: without an explicit winner
+    // the one-robot-one-place invariant deadlocks at the worst moment of the
+    // day, when a team whose robot is still held by a field they walked away
+    // from an hour ago cannot be seated in their own match.
+    for (const team of [fixture.home, fixture.away]) {
+      await this.preempt(slugifyTeam(team), `${fixture.home} v ${fixture.away}`);
+    }
     const arena = await this.arenas.create({ kind: 'fixture' });
     this.liveFixtures.set(fixture.id, { fixture, arenaId: arena.id, state: null });
     this.log(`[fixture ${fixture.id}] ${fixture.home} v ${fixture.away} in arena ${arena.id}`);
@@ -387,34 +486,18 @@ export class LeagueServer {
       const forArena = splitArenaPath(url);
       if (forArena) return this.toArena(req, forArena.id, forArena.rest, actor);
 
-      // A practice field, for whoever may open one.
-      //
-      // Who a field *belongs* to — who may drag whose robot, what a second Run
-      // does, what happens to one that is abandoned — is Phase 8's whole
-      // subject. What is settled here is only the capability that already
-      // exists: a guest may not open one, and everybody with an account may.
-      if (url === '/practice') {
+      // A practice field, for whoever may open one — and, since Phase 8, one
+      // that belongs to the team that opened it.
+      if (url === '/practice' || url === '/practice/claim' || url === '/practice/leave') {
         if (!can(actor, 'field.open')) return this.refuse(req, actor, '/practice');
-        if (req.method === 'POST') {
-          if (!this.settings.practice.open) {
-            return Response.json(
-              { ok: false, reason: 'practice is closed on this server' },
-              { status: 503 },
-            );
-          }
-          try {
-            const field = await this.arenas.create({ kind: 'practice', owner: actor.slug });
-            return Response.json({ ok: true, field }, { status: 201 });
-          } catch (err) {
-            // A venue at its ceiling says so rather than quietly slowing to a
-            // crawl. Phase 8 turns this into a queue position.
-            return Response.json({ ok: false, reason: (err as Error).message }, { status: 503 });
-          }
+        if (req.method !== 'POST') {
+          return Response.json({ ok: true, fields: this.practiceFieldsFor(actor) }, { status: 200 });
         }
-        return Response.json(
-          { ok: true, fields: this.arenas.list().filter((one) => one.kind === 'practice') },
-          { status: 200 },
-        );
+        if (url === '/practice/leave') {
+          if (actor.slug) this.tenancy.leaveQueue(actor.slug);
+          return Response.json({ ok: true }, { status: 200 });
+        }
+        return await this.openPracticeField(actor, url === '/practice/claim');
       }
 
       // `/live` used to be the one world's viewer. There can be several now,
@@ -506,6 +589,10 @@ export class LeagueServer {
     const port = this.arenas.portOf(id);
     if (port === null) return new Response('no arena by that name', { status: 404 });
 
+    if (this.arenas.info(id)?.kind === 'practice') {
+      return await this.toPracticeArena(req, id, rest, actor, port);
+    }
+
     const headers = new Headers(req.headers);
     if (rest === '/referee' || rest.startsWith('/referee/') || rest.startsWith('/referee-api/')) {
       if (!can(actor, 'match.control')) return this.refuse(req, actor, `/a/${id}/referee/`);
@@ -513,17 +600,33 @@ export class LeagueServer {
       if (token) headers.set('authorization', `Bearer ${token}`);
     }
 
+    return await this.forward(id, port, rest, req, headers);
+  }
+
+  /**
+   * One request, handed to an arena.
+   *
+   * `redirect: 'manual'` is not a detail. A child's redirect is advice to the
+   * *browser* about where it is; following it here would leave the browser on
+   * the address it asked for, and a console served at `/a/<id>/referee`
+   * resolves its relative assets one directory too high, arriving with the
+   * viewer's stylesheet and no explanation.
+   */
+  private async forward(
+    id: string,
+    port: number,
+    rest: string,
+    req: Request,
+    headers: Headers,
+    body?: string,
+  ): Promise<Response> {
     const release = this.arenas.trackConnection(id);
     try {
+      const sending = body !== undefined ? body : req.method !== 'GET' && req.method !== 'HEAD' ? req.body : undefined;
       return await fetch(`http://127.0.0.1:${port}${rest}`, {
         method: req.method,
         headers,
-        body: req.method !== 'GET' && req.method !== 'HEAD' ? req.body : undefined,
-        // Relayed, not followed. A child's redirect is advice to the *browser*
-        // about where it is — following it here would leave the browser on the
-        // address it asked for, and a console served at `/a/<id>/referee`
-        // resolves its relative assets one directory too high, arriving with
-        // the viewer's stylesheet and no explanation.
+        body: sending,
         redirect: 'manual',
       });
     } catch {
@@ -531,6 +634,323 @@ export class LeagueServer {
     } finally {
       release?.();
     }
+  }
+
+  // ------------------------------------------------------------ practice fields
+
+  /** Every practice field this person may actually be on. */
+  private practiceFieldsFor(actor: Actor): unknown[] {
+    return this.arenas
+      .list()
+      .filter((one) => one.kind === 'practice')
+      .filter((one) => this.mayBeOnField(actor, one.id))
+      .map((one) => ({
+        ...one,
+        guests: this.tenancy.guestsOf(one.id),
+        robots: this.occupancy.all().filter((r) => r.arenaId === one.id),
+      }));
+  }
+
+  /** May this person open the console on this field — see it, read its state? */
+  private mayBeOnField(actor: Actor, arenaId: string): boolean {
+    const owner = this.tenancy.ownerOf(arenaId) ?? undefined;
+    if (can(actor, 'field.join', owner)) return true;
+    return this.tenancy.mayBeOnField(actor.slug, arenaId);
+  }
+
+  /** May this person run the field — drag, start, stop, re-stage, invite, close? */
+  private mayRunField(actor: Actor, arenaId: string): boolean {
+    return can(actor, 'field.control', this.tenancy.ownerOf(arenaId) ?? undefined);
+  }
+
+  /**
+   * Open a practice field for this team, or tell them where they are in line.
+   *
+   * Three different refusals, and they are different on purpose: *practice is
+   * closed* is the organiser's decision, *you already have one* is the team's
+   * own doing and fixable in one click, and *the machine is full* is nobody's
+   * fault and turns into a place in a queue rather than an error.
+   */
+  private async openPracticeField(actor: Actor, claiming: boolean): Promise<Response> {
+    const slug = actor.slug;
+    if (slug === null) {
+      return Response.json({ ok: false, reason: 'only a team can open a practice field' }, { status: 403 });
+    }
+    if (!this.settings.practice.open) {
+      return Response.json({ ok: false, reason: 'practice is closed on this server' }, { status: 503 });
+    }
+
+    const mine = this.tenancy.perTeamRefusal(slug);
+    if (mine) return Response.json({ ok: false, reason: mine }, { status: 409 });
+
+    // A held field belongs to whoever it is held for, and to nobody else while
+    // the hold stands — otherwise the hold means nothing and the queue is a
+    // list of teams watching other people take their turn.
+    const held = this.tenancy.offeredTo(slug) ? 0 : this.tenancy.reserved();
+    const running = this.arenas.countOf('practice');
+    if (running + held >= this.budget.practice) {
+      if (claiming) {
+        return Response.json(
+          { ok: false, reason: 'the field you were offered has already gone; you are back in the queue' },
+          { status: 409 },
+        );
+      }
+      const place = this.tenancy.enqueue(slug);
+      return Response.json(
+        {
+          ok: false,
+          queued: true,
+          place,
+          reason:
+            place.ahead === 0
+              ? 'every practice field is in use; you are next'
+              : `every practice field is in use; there ${place.ahead === 1 ? 'is 1 team' : `are ${place.ahead} teams`} ahead of you`,
+        },
+        { status: 202 },
+      );
+    }
+
+    try {
+      const field = await this.arenas.create({ kind: 'practice', owner: slug });
+      this.tenancy.own(field.id, slug);
+      // Only now: a field that failed to start must not consume anybody's turn.
+      this.tenancy.claimed(slug);
+      this.log(`[practice] ${slug} opened ${field.id}`);
+      return Response.json({ ok: true, field }, { status: 201 });
+    } catch (err) {
+      return Response.json({ ok: false, reason: (err as Error).message }, { status: 503 });
+    }
+  }
+
+  /**
+   * A request for a practice arena, which the hub no longer simply forwards.
+   *
+   * Watching stays open — the viewer and its socket pass through untouched,
+   * because a practice match is football and Phase 4's position on watching has
+   * not changed. What is gated is the *console*: the thing that drags robots
+   * around and decides what is in a seat. And one action is more than gated,
+   * because the answer to it depends on every other field on this server.
+   */
+  private async toPracticeArena(
+    req: Request,
+    id: string,
+    rest: string,
+    actor: Actor,
+    port: number,
+  ): Promise<Response> {
+    const isConsole = rest === '/practice' || rest.startsWith('/practice/');
+    const isApi = rest.startsWith('/practice-api/');
+    if (!isConsole && !isApi) return await this.forward(id, port, rest, req, new Headers(req.headers));
+
+    if (!this.mayBeOnField(actor, id)) return this.refuse(req, actor, `/a/${id}/practice/`);
+
+    // Who the console is talking to, answered here and never forwarded: a
+    // child arena has never heard of an account and never will. A standalone
+    // practice field answers 404 to this, which is how the same console knows
+    // it is on a laptop and shows every seat to whoever opened the page.
+    if (rest === '/practice-api/who') {
+      const owner = this.tenancy.ownerOf(id);
+      return Response.json(
+        {
+          ok: true,
+          you: actor.slug,
+          owner,
+          guests: this.tenancy.guestsOf(id),
+          invited: this.tenancy.invitedTo(id),
+          mayRun: this.mayRunField(actor, id),
+          anyTeam: can(actor, 'match.join'),
+          seats: Object.fromEntries(
+            this.occupancy
+              .all()
+              .filter((r) => r.arenaId === id)
+              .map((r) => [r.seatId, { team: r.slug, number: r.number }]),
+          ),
+        },
+        { status: 200 },
+      );
+    }
+
+    if (isConsole || req.method !== 'POST') {
+      const answer = await this.forward(id, port, rest, req, new Headers(req.headers));
+      return rest === '/practice-api/state' ? await this.withNotice(id, answer) : answer;
+    }
+
+    const action = rest.slice('/practice-api/'.length);
+    if (action === 'seat' || action === 'seat-restart' || action === 'seat-stop') {
+      return await this.practiceSeat(req, id, rest, action, actor, port);
+    }
+    // Everything else on a field — dragging a robot, starting, stopping,
+    // re-staging — belongs to whoever opened it.
+    if (!this.mayRunField(actor, id)) {
+      return Response.json(
+        { ok: false, reason: 'this field belongs to another team; you can fill your own seats on it' },
+        { status: 403 },
+      );
+    }
+    return await this.forward(id, port, rest, req, new Headers(req.headers));
+  }
+
+  /**
+   * The one action the hub answers for itself before forwarding.
+   *
+   * Reading the body consumes it, so the request is re-issued with the text
+   * that was read — and for a laptop seat the fill that goes on to the child is
+   * not quite the one the browser sent, because the hub adds a token to it.
+   */
+  private async practiceSeat(
+    req: Request,
+    id: string,
+    rest: string,
+    action: string,
+    actor: Actor,
+    port: number,
+  ): Promise<Response> {
+    const body = await readJsonBody(req, 4096);
+    if (!body.ok) return badBody(body.reason, body.status);
+
+    const headers = new Headers(req.headers);
+    headers.delete('content-length');
+
+    if (action !== 'seat') {
+      const validated = validateBody(body.payload, SeatActionBodySchema, '"seat" must be a seat id');
+      if (!validated.ok) return validated.response;
+      // Restarting or stopping a seat's program does not change what is in the
+      // seat, so it changes no occupancy either: the seat still names that
+      // robot and pressing Start brings it back. Occupancy follows the fill,
+      // not the process.
+      const refusal = this.mayTouchSeat(actor, id, validated.value.seat);
+      if (refusal) return refusal;
+      return await this.forward(id, port, rest, req, headers, JSON.stringify(validated.value));
+    }
+
+    const validated = validateBody(body.payload, SeatBodySchema, (path) =>
+      path === 'seat'
+        ? '"seat" must be a seat id'
+        : path.startsWith('fill.')
+          ? '"team" is required for a submission'
+          : '"fill" must be "empty", "built-in", "laptop" or "submission"',
+    );
+    if (!validated.ok) return validated.response;
+
+    const { seat, fill } = validated.value;
+    const number = numberOfSeat(seat);
+    let sending = fill;
+
+    if (fill.kind === 'submission' || fill.kind === 'laptop') {
+      if (!fill.team) {
+        return badBody('say which team\'s robot is taking this seat', 400);
+      }
+      const team = slugifyTeam(fill.team);
+      // The team comes from the credential, never from the body — Phase 1's
+      // rule, and the reason a person cannot seat somebody else's robot here.
+      if (!can(actor, 'match.join', team)) {
+        return Response.json(
+          { ok: false, reason: 'you can only put your own robots in a seat' },
+          { status: 403 },
+        );
+      }
+      const claim = this.occupancy.claim(team, number, id, seat);
+      if (!claim.ok) {
+        return Response.json({ ok: false, reason: this.whereItIs(claim.held, actor) }, { status: 409 });
+      }
+      if (fill.kind === 'laptop') {
+        // Short-lived, this seat only, and never shown in the field's state:
+        // the console is told it once, in the answer to this request.
+        sending = { ...fill, team, token: randomBytes(18).toString('base64url') };
+      } else {
+        sending = { ...fill, team };
+      }
+    } else {
+      const refusal = this.mayTouchSeat(actor, id, seat);
+      if (refusal) return refusal;
+      this.occupancy.release(id, seat);
+    }
+
+    const forwarded = await this.forward(
+      id,
+      port,
+      rest,
+      req,
+      headers,
+      JSON.stringify({ seat, fill: sending }),
+    );
+    if (!forwarded.ok) {
+      // The child would not take it, so the ledger must not claim it did.
+      if (sending.kind === 'submission' || sending.kind === 'laptop') this.occupancy.release(id, seat);
+      return forwarded;
+    }
+    if (sending.kind !== 'laptop') return forwarded;
+
+    // The one thing the hub adds to an arena's answer: how to actually join.
+    const state = await forwarded.json().catch(() => ({}));
+    return Response.json(
+      {
+        ...(state as object),
+        join: {
+          seat,
+          token: sending.token,
+          url: this.agentUrl(req, id),
+          command: `python3 python/join.py --token ${sending.token} --url ${this.agentUrl(req, id)} my_robot.py`,
+        },
+      },
+      { status: forwarded.status },
+    );
+  }
+
+  /**
+   * Whether this person may empty, restart or stop this seat.
+   *
+   * A seat holding somebody's robot is that team's seat while it does — but the
+   * field's owner may always clear one, because a guest who has gone home
+   * otherwise holds a seat on a field that is not theirs until it closes.
+   */
+  private mayTouchSeat(actor: Actor, arenaId: string, seatId: string): Response | null {
+    if (this.mayRunField(actor, arenaId)) return null;
+    const held = this.occupancy.inSeat(arenaId, seatId);
+    if (held === null || can(actor, 'match.join', held.slug)) return null;
+    return Response.json(
+      { ok: false, reason: 'that seat has another team\'s robot in it' },
+      { status: 403 },
+    );
+  }
+
+  /** Where a robot already is, said so a fifteen-year-old can act on it. */
+  private whereItIs(held: Placement, actor: Actor): string {
+    const owner = this.tenancy.ownerOf(held.arenaId);
+    const whose =
+      owner === null
+        ? 'another field'
+        : owner === actor.slug
+          ? 'your own practice field'
+          : `${owner}'s practice field`;
+    return (
+      `robot ${held.number} is already in the ${held.seatId} seat on ${whose}. ` +
+      `Take it out of that seat first — each of your two robots can only be in one place at a time.`
+    );
+  }
+
+  /**
+   * Add whatever the hub has to say to the state the console is polling.
+   *
+   * A child arena knows nothing about fixtures or about the team whose robots
+   * just left it, so the explanation can only come from up here — and it has to
+   * ride along with something the console already asks for, or it is a line
+   * nobody ever sees.
+   */
+  private async withNotice(id: string, answer: Response): Promise<Response> {
+    const notice = this.fieldNotices.get(id);
+    if (!notice || !answer.ok) return answer;
+    const state = await answer.json().catch(() => null);
+    if (state === null || typeof state !== 'object') return answer;
+    return Response.json({ ...(state as object), notice }, { status: answer.status });
+  }
+
+  /** Where a robot on somebody's laptop connects to reach this arena. */
+  private agentUrl(req: Request, id: string): string {
+    const url = new URL(req.url);
+    const proto = req.headers.get('x-forwarded-proto') ?? url.protocol.replace(':', '');
+    const host = req.headers.get('host') ?? url.host;
+    return `${proto === 'https' ? 'wss' : 'ws'}://${host}/a/${id}/agent`;
   }
 
   /** One of the built bundles this hub serves itself. */
@@ -669,7 +1089,16 @@ export class LeagueServer {
       return Response.json(await this.matchRecord(path.slice('/match/'.length)), { status: 200 });
     }
     if (path.startsWith('/team/') && req.method === 'GET') {
-      return Response.json(await this.teamPage(path.slice('/team/'.length)), { status: 200 });
+      return Response.json(await this.teamPage(path.slice('/team/'.length), actor), { status: 200 });
+    }
+
+    // A team's field: who is on it, who has been asked, and giving it back.
+    // Under the hub's own namespace rather than under `/a/<id>/`, because none
+    // of it is anything a child arena has ever heard of.
+    if (path.startsWith('/fields/') && req.method === 'POST') {
+      const [, , id, verb] = path.split('/');
+      if (!id || !verb) return badBody('no field at that address', 404);
+      return await this.handleField(req, id, verb, actor);
     }
 
     /**
@@ -971,11 +1400,118 @@ export class LeagueServer {
     };
   }
 
-  private async teamPage(slug: string): Promise<unknown> {
+  /**
+   * One field, acted on by name: invite, accept, decline, close.
+   *
+   * Every one of these is a sentence about people rather than about football,
+   * which is why none of them is forwarded to the arena. The arena is told
+   * only the consequences, and mostly there are none — a guest list is not
+   * something a physics loop can act on.
+   */
+  private async handleField(req: Request, id: string, verb: string, actor: Actor): Promise<Response> {
+    const owner = this.tenancy.ownerOf(id);
+    if (owner === null && this.arenas.info(id)?.kind !== 'practice') {
+      return Response.json({ ok: false, reason: 'no practice field at that address' }, { status: 404 });
+    }
+
+    if (verb === 'invite') {
+      if (!can(actor, 'field.invite', owner ?? undefined)) return this.refuse(req, actor, '/team');
+      const body = await readJsonBody(req, 4096);
+      if (!body.ok) return badBody(body.reason, body.status);
+      const validated = validateBody(body.payload, InviteTeamBodySchema, '"team" must be a team name');
+      if (!validated.ok) return validated.response;
+      const to = slugifyTeam(validated.value.team);
+      // A team that does not exist can never accept, and the owner would sit
+      // waiting for somebody who was never asked.
+      if (!this.accounts.bySlug(to)) {
+        return Response.json({ ok: false, reason: `no team here called "${validated.value.team}"` }, { status: 404 });
+      }
+      const invited = this.tenancy.invite(id, to);
+      if (!invited.ok) return Response.json(invited, { status: 409 });
+      this.log(`[practice] ${owner ?? 'somebody'} invited ${to} onto ${id}`);
+      return Response.json({ ok: true, invited: to }, { status: 200 });
+    }
+
+    if (verb === 'accept' || verb === 'decline') {
+      const slug = actor.slug;
+      if (slug === null) return this.refuse(req, actor, '/team');
+      if (verb === 'decline') {
+        this.tenancy.decline(id, slug);
+        return Response.json({ ok: true }, { status: 200 });
+      }
+      const accepted = this.tenancy.accept(id, slug);
+      if (!accepted.ok) return Response.json(accepted, { status: 403 });
+      return Response.json({ ok: true, field: `/a/${id}/practice/` }, { status: 200 });
+    }
+
+    if (verb === 'close') {
+      if (!this.mayRunField(actor, id)) return this.refuse(req, actor, '/team');
+      this.arenas.close(id);
+      return Response.json({ ok: true }, { status: 200 });
+    }
+
+    if (verb === 'leave') {
+      // A guest giving a field back, which frees their robots without
+      // troubling the team who invited them.
+      const slug = actor.slug;
+      if (slug === null) return this.refuse(req, actor, '/team');
+      for (const { at } of this.occupancy.forTeam(slug)) {
+        if (at?.arenaId === id) this.occupancy.release(id, at.seatId);
+      }
+      this.tenancy.removeGuest(id, slug);
+      return Response.json({ ok: true }, { status: 200 });
+    }
+
+    return Response.json({ ok: false, reason: 'no such action on a field' }, { status: 404 });
+  }
+
+  /**
+   * What this team's own dashboard needs that the public page must not show.
+   *
+   * Where their field is, where each of their two robots is, who they have
+   * invited and who has invited them, and their place in the queue. It is
+   * gated on `field.control` at the team's own slug, so a visitor reading the
+   * public team page gets none of it.
+   */
+  private yoursOnly(slug: string): unknown {
+    const fields = this.tenancy.fieldsOwnedBy(slug).map((id) => ({
+      id,
+      url: `/a/${id}/practice/`,
+      guests: this.tenancy.guestsOf(id),
+      invited: this.tenancy.invitedTo(id),
+    }));
+    const guestOf = this.tenancy
+      .fieldsOpenTo(slug)
+      .filter((id) => this.tenancy.ownerOf(id) !== slug)
+      .map((id) => ({ id, url: `/a/${id}/practice/`, owner: this.tenancy.ownerOf(id) }));
+    return {
+      fields,
+      guestOf,
+      invitations: this.tenancy.invitationsFor(slug),
+      robots: this.occupancy.forTeam(slug).map(({ number, at }) => ({
+        number,
+        at: at && {
+          ...at,
+          owner: this.tenancy.ownerOf(at.arenaId),
+          url: `/a/${at.arenaId}/practice/`,
+        },
+      })),
+      queue: this.tenancy.placeOf(slug),
+      perTeam: this.settings.practice.perTeam,
+    };
+  }
+
+  private async teamPage(slug: string, actor: Actor = GUEST): Promise<unknown> {
     const loaded = await this.tournament();
     const account = this.accounts.bySlug(slug);
     if (!loaded) {
-      return { ok: true, team: account && publicAccount(account), fixtures: [], table: null };
+      return {
+        ok: true,
+        team: account && publicAccount(account),
+        fixtures: [],
+        table: null,
+        ...(can(actor, 'field.control', slug) ? { yours: this.yoursOnly(slug) } : {}),
+      };
     }
     const { draw, results } = loaded;
     const name = draw.entrants.find((e) => slugifyTeam(e) === slug);
@@ -1002,6 +1538,7 @@ export class LeagueServer {
       tournament: summary(draw),
       fixtures,
       table: deriveTable(draw, results).find((row) => slugifyTeam(row.name) === slug) ?? null,
+      ...(can(actor, 'field.control', slug) ? { yours: this.yoursOnly(slug) } : {}),
     };
   }
 

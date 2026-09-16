@@ -198,14 +198,27 @@ class WebSocket:
         self._send_frame(_OP_TEXT, text.encode("utf-8"))
 
     def close(self) -> None:
+        """Say goodbye if we still can, and never raise for trying.
+
+        The order matters, and getting it wrong was invisible for a long time.
+        Marking the socket closed *before* sending the courtesy close frame
+        makes :meth:`_send_frame` refuse it — so ``close()`` raised
+        ``WebSocketError`` every single time, and because ``Robot._play``
+        closes in a ``finally``, that exception replaced whatever had actually
+        gone wrong. Every refusal a server can give a joining robot — a bad
+        token, a seat already taken, a protocol from last season — reached the
+        student as "connection is closed", which is the one thing it never
+        was.
+        """
         if self._closed:
             return
-        self._closed = True
         try:
             self._send_frame(_OP_CLOSE, b"")
-        except OSError:
+        except (OSError, WebSocketError):
+            # The peer has already gone, which is the normal way a match ends.
             pass
         finally:
+            self._closed = True
             self._sock.close()
 
     def __enter__(self) -> "WebSocket":

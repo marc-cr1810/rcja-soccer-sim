@@ -77,6 +77,51 @@ def use_transport(factory: Connect | None) -> None:
     _override = factory
 
 
+#: Credentials a *host* has installed for the robots in this interpreter:
+#: which seat they are joining as and where. See :func:`use_join`.
+_join_token: str | None = None
+_join_url: str | None = None
+
+
+def use_join(token: str | None = None, url: str | None = None) -> None:
+    """Join as this seat, at this address, without editing the program.
+
+    The same seam as :func:`use_transport`, and for the same reason. A team's
+    field on a league server is at an address nobody can guess and a seat on it
+    wants a token that was minted a minute ago — neither of which belongs in a
+    file a student wrote and is about to push. ``join.py`` sets both here and
+    then runs the file untouched.
+
+    What is set here is only ever a *fallback*: a program that names its own
+    token or its own url still wins, because a program saying something
+    explicitly should never be quietly overruled by its launcher.
+
+    Pass ``None`` for either to clear it.
+    """
+    global _join_token, _join_url
+    if token is not None:
+        _join_token = token
+    if url is not None:
+        _join_url = url
+
+
+def clear_join() -> None:
+    """Forget any installed credentials. Mostly for tests."""
+    global _join_token, _join_url
+    _join_token = None
+    _join_url = None
+
+
+def join_token() -> str | None:
+    """The token a robot that did not name one should present, if any."""
+    return _join_token
+
+
+def join_url() -> str | None:
+    """The address a robot that did not name one should connect to, if any."""
+    return _join_url
+
+
 def current_transport() -> Connect:
     """Whatever :meth:`Robot.run` should open its connection with."""
     if _override is not None:

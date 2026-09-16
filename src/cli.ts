@@ -36,6 +36,14 @@ import {
 interface Args {
   command: string;
   flags: Map<string, string>;
+  /**
+   * Words after the command and before the first flag — `arenas stop <id>`.
+   *
+   * Only the leading run of them, because everything further along is already
+   * spoken for: a bare word after a `--flag` is that flag's value, and has
+   * been since the first command took one.
+   */
+  words: string[];
 }
 
 function parse(argv: string[]): Args {
@@ -44,6 +52,8 @@ function parse(argv: string[]): Args {
   if (rest.length > 0 && !rest[0]!.startsWith('--')) {
     command = rest.shift()!;
   }
+  const words: string[] = [];
+  while (rest.length > 0 && !rest[0]!.startsWith('--')) words.push(rest.shift()!);
   const flags = new Map<string, string>();
   for (let i = 0; i < rest.length; i++) {
     const token = rest[i]!;
@@ -62,7 +72,7 @@ function parse(argv: string[]): Args {
       }
     }
   }
-  return { command, flags };
+  return { command, flags, words };
 }
 
 function num(flags: Map<string, string>, name: string, fallback: number): number {
@@ -1189,6 +1199,72 @@ async function capacity(flags: Map<string, string>): Promise<void> {
   console.log(formatCapacity(machine, settings, budget, sources, measured));
 }
 
+/**
+ * What is running on a league server, and stopping one of it.
+ *
+ * Over HTTP rather than over the data directory, because an arena is a child
+ * process in the hub's memory and nothing on disk knows about it. And as its
+ * own command rather than only a page on `/admin`, because the day this gets
+ * asked in earnest is the day `/admin` is the thing that has gone wrong.
+ *
+ * The key is an ordinary admin API key from `/team/settings` — an API key
+ * works anywhere a session does, which is what lets a script do what a person
+ * can without inventing a second way in.
+ */
+async function arenasCommand(flags: Map<string, string>, args: string[]): Promise<void> {
+  const base = (flags.get('url') ?? 'http://localhost:8080').replace(/\/$/, '');
+  const key = flags.get('key');
+  const headers: Record<string, string> = key ? { authorization: `Bearer ${key}` } : {};
+
+  const ask = async (path: string, init?: RequestInit): Promise<any> => {
+    let res: Response;
+    try {
+      res = await fetch(`${base}${path}`, { ...init, headers: { ...headers, ...(init?.headers ?? {}) } });
+    } catch (err) {
+      console.error(`\n  no league server answering at ${base} (${(err as Error).message})\n`);
+      process.exit(1);
+    }
+    if (res.status === 401 || res.status === 403) {
+      console.error(`\n  that key cannot do this. Make one at /team/settings on an admin account, then pass --key\n`);
+      process.exit(1);
+    }
+    return await res.json().catch(() => ({}));
+  };
+
+  const stopping = args[0] === 'stop' ? args[1] : null;
+  if (args[0] === 'stop') {
+    if (!stopping) {
+      console.error(`\n  which one? try:  bun run serve -- arenas\n`);
+      process.exit(1);
+    }
+    const answer = await ask(`/api/admin/arenas/${encodeURIComponent(stopping)}/stop`, { method: 'POST' });
+    console.log(answer.ok ? `\n  stopped ${stopping}\n` : `\n  ${answer.reason ?? 'that did not work'}\n`);
+    return;
+  }
+
+  const answer = await ask('/api/admin/arenas');
+  const arenas: any[] = answer.arenas ?? [];
+  const fields: any[] = (await ask('/practice')).fields ?? [];
+  const guests = new Map<string, string[]>(fields.map((f: any) => [f.id, f.guests ?? []]));
+  const robots = new Map<string, any[]>(fields.map((f: any) => [f.id, f.robots ?? []]));
+
+  if (arenas.length === 0) {
+    console.log(`\n  nothing running on ${base}\n`);
+    return;
+  }
+  console.log('');
+  for (const arena of arenas) {
+    const age = Math.round((Date.now() - Date.parse(arena.createdAt)) / 60000);
+    const seated = (robots.get(arena.id) ?? []).map((r: any) => `${r.slug}/${r.number} in ${r.seatId}`);
+    console.log(`  ${arena.id}  ${arena.kind.padEnd(8)} ${arena.owner ?? '—'}  ${age}m`);
+    if ((guests.get(arena.id) ?? []).length > 0) {
+      console.log(`      guests: ${(guests.get(arena.id) ?? []).join(', ')}`);
+    }
+    for (const line of seated) console.log(`      ${line}`);
+  }
+  console.log(`\n  ${arenas.length} running, of ${answer.budget?.max ?? '?'}\n`);
+}
+
 /** Budget settings given on the command line, for this run only. */
 function budgetFlags(flags: Map<string, string>): Record<string, number> {
   const out: Record<string, number> = {};
@@ -1251,6 +1327,7 @@ function usage(): void {
 
     league    run the venue: a front page, accounts, and a draw  [--name --port --data --headless]
     capacity  what this machine can run, and what an arena costs  [--measure --data]
+    arenas    list what a league server is running, or stop one     [stop <id> --url --key]
     account   make or repair an account                          [--create --passwd --list --role --name --data]
     invite    issue a single-use registration code               [--role --team --list --data]
 
@@ -1350,7 +1427,7 @@ where the folders are kept (default ./workspaces). Needs bun run
 `);
 }
 
-const { command, flags } = parse(process.argv.slice(2));
+const { command, flags, words } = parse(process.argv.slice(2));
 switch (command) {
   case 'serve':
     await serve(flags);
@@ -1381,6 +1458,9 @@ switch (command) {
     break;
   case 'capacity':
     await capacity(flags);
+    break;
+  case 'arenas':
+    await arenasCommand(flags, words);
     break;
   case 'league':
     await league(flags);

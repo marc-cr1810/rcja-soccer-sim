@@ -53,6 +53,7 @@ export type Capability =
   | 'team.workspace.write'
   | 'team.submit'
   | 'field.open'
+  | 'field.control'
   | 'field.invite'
   | 'field.join'
   | 'fixture.setup'
@@ -120,6 +121,11 @@ const ROLE_CAPABILITIES: Record<Role, Partial<Record<Capability, Scope>>> = {
     'team.workspace.write': 'own',
     'team.submit': 'own',
     'field.open': 'any',
+    // Targeted by the field's *owner*, so `own` means "a field of mine". A
+    // guest is on a field by invitation rather than by capability — the two
+    // ledgers in `tenancy.ts` — which is why running one and being on one are
+    // separate questions.
+    'field.control': 'own',
     'field.invite': 'own',
     'field.join': 'own',
   },
@@ -141,6 +147,7 @@ const ROLE_CAPABILITIES: Record<Role, Partial<Record<Capability, Scope>>> = {
     'team.workspace.write': 'any',
     'team.submit': 'any',
     'field.open': 'any',
+    'field.control': 'any',
     'field.invite': 'any',
     'field.join': 'any',
     'fixture.setup': 'any',

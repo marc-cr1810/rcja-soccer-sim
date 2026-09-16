@@ -7,9 +7,14 @@
  * and no import of anything under `viewer/` or `referee/`. It watches the
  * field over the same unauthenticated socket every spectator uses, and acts
  * through `POST /practice-api/*` — which exists only on a server that is a
- * practice field, and asks for no credential, because a practice field is
- * open to whoever has the link. Accounts exist, but a field that belongs to a
- * team is Phase 8's subject rather than this one's.
+ * practice field.
+ *
+ * **The same console, in two worlds.** On a laptop there are no accounts, the
+ * field is open to whoever has the link, and every seat is yours because there
+ * is nobody else. On a league server the field belongs to a team, and the hub
+ * in front of it answers `practice-api/who` with who you are and which seats
+ * hold whose robots. A 404 to that question *is* the laptop case — the console
+ * asks once and shapes itself around the answer, rather than being built twice.
  *
  * The one genuinely new thing here is dragging. Everything else a team can do
  * to a field — start it, stop it, put the situation back, swap what is
@@ -28,8 +33,29 @@ const SEATS: SeatId[] = ['violet-1', 'violet-2', 'lime-1', 'lime-2'];
 type SeatFill =
   | { kind: 'empty' }
   | { kind: 'built-in' }
-  | { kind: 'laptop' }
+  | { kind: 'laptop'; team?: string }
   | { kind: 'submission'; team: string };
+
+/**
+ * Who is looking, when a hub is in front of this field.
+ *
+ * `null` means nobody asked — a standalone practice field, where the console
+ * behaves exactly as it did in Phase 4.
+ */
+interface Who {
+  you: string | null;
+  owner: string | null;
+  guests: string[];
+  mayRun: boolean;
+  /** An organiser, who may seat anybody's robot. */
+  anyTeam: boolean;
+  /** Seat id → whose robot is in it. */
+  seats: Record<string, { team: string; number: number } | undefined>;
+}
+
+let who: Who | null = null;
+/** The command that puts a laptop program in a seat, once one has been minted. */
+const joinCommands = new Map<string, string>();
 
 interface SeatState {
   fill: SeatFill;
@@ -64,6 +90,7 @@ const canvas = document.getElementById('field') as HTMLCanvasElement;
 const call = document.getElementById('call')!;
 const log = document.getElementById('log')!;
 const seatsPanel = document.getElementById('seats')!;
+const notice = document.getElementById('notice')!;
 const modes = document.getElementById('modes')!;
 
 const board = {
@@ -129,14 +156,26 @@ async function act(action: string, body?: unknown, quiet = false): Promise<void>
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body ?? {}),
     });
-    const payload = (await res.json().catch(() => ({}))) as { ok?: boolean; reason?: string; state?: PracticeState };
+    const payload = (await res.json().catch(() => ({}))) as {
+      ok?: boolean;
+      reason?: string;
+      state?: PracticeState;
+      join?: { seat: string; command: string };
+    };
     if (!res.ok || !payload.ok) {
       logLine(`${action} refused: ${payload.reason ?? res.status}`);
       return;
     }
     if (!quiet) logLine(action);
+    // A token is shown once, in the answer to the request that minted it, and
+    // never appears in the field's state — which everybody on the field reads.
+    if (payload.join) {
+      joinCommands.set(payload.join.seat, payload.join.command);
+      logLine('copy the command under that seat and run it in a terminal');
+    }
     if (payload.state) {
       state = payload.state;
+      seatsKey = '';
       renderSeats();
       renderModes();
     }
@@ -148,15 +187,48 @@ async function act(action: string, body?: unknown, quiet = false): Promise<void>
 async function refresh(): Promise<void> {
   try {
     const res = await fetch(`${BASE}practice-api/state`);
-    const payload = (await res.json()) as { ok?: boolean; state?: PracticeState };
+    const payload = (await res.json()) as { ok?: boolean; state?: PracticeState; notice?: string };
     if (payload.state) {
       state = payload.state;
       renderSeats();
       renderModes();
     }
+    // Only a supervised field is ever told anything; a laptop has nobody to
+    // hear from, and the banner simply never appears.
+    notice.textContent = payload.notice ?? '';
+    notice.hidden = !payload.notice;
   } catch {
     // The field is gone or restarting; the socket's own retry will say so.
   }
+}
+
+/**
+ * Ask who is looking, once, before anything is drawn.
+ *
+ * A 404 is the answer on a laptop — there is no hub in front of this field and
+ * no accounts anywhere — and it leaves `who` null, which is what every check
+ * below reads as "every seat is yours".
+ */
+async function askWho(): Promise<void> {
+  try {
+    const res = await fetch(`${BASE}practice-api/who`);
+    if (!res.ok) return;
+    const payload = (await res.json()) as Who & { ok?: boolean };
+    if (payload.ok) who = payload;
+  } catch {
+    // Same as a 404: nobody is asking.
+  }
+}
+
+/** Whether this seat is one the person looking may fill. */
+function mine(id: SeatId): boolean {
+  if (!who) return true;
+  if (who.anyTeam) return true;
+  const held = who.seats[id];
+  if (held) return held.team === who.you;
+  // An empty seat on a field is fillable by anybody who is on the field: the
+  // owner, and any team they invited.
+  return true;
 }
 
 /* --- the panel --- */
@@ -195,8 +267,8 @@ function renderSeats(): void {
   if (!state) return;
   const key = SEATS.map((id) => {
     const seat = state!.seats[id]!;
-    const team = seat.fill.kind === 'submission' ? seat.fill.team : '';
-    return `${id}:${seat.fill.kind}:${team}:${statusOf(seat)}`;
+    const team = seat.fill.kind === 'submission' || seat.fill.kind === 'laptop' ? (seat.fill.team ?? '') : '';
+    return `${id}:${seat.fill.kind}:${team}:${statusOf(seat)}:${mine(id) ? 'mine' : 'theirs'}:${joinCommands.get(id) ?? ''}`;
   }).join('|');
   if (key === seatsKey) return;
   seatsKey = key;
@@ -205,11 +277,14 @@ function renderSeats(): void {
     ...SEATS.map((id) => {
       const seat = state!.seats[id]!;
       const row = document.createElement('div');
-      row.className = `seat ${id.startsWith('violet') ? 'violet' : 'lime'}`;
+      const yours = mine(id);
+      row.className = `seat ${id.startsWith('violet') ? 'violet' : 'lime'}${yours ? '' : ' theirs'}`;
 
-      const who = document.createElement('span');
-      who.className = 'who';
-      who.textContent = labelFor(id);
+      const label = document.createElement('span');
+      label.className = 'who';
+      label.textContent = labelFor(id);
+      const held = who?.seats[id];
+      if (held && held.team !== who?.you) label.title = `${held.team}'s robot ${held.number}`;
 
       const fill = document.createElement('select');
       for (const [value, text] of [
@@ -229,19 +304,35 @@ function renderSeats(): void {
       team.type = 'text';
       team.placeholder = 'team name';
       team.value = seat.fill.kind === 'submission' ? seat.fill.team : '';
-      team.hidden = fill.value !== 'submission';
+      // On a league server you are the only team you may seat, so there is
+      // nothing to type and nothing to get wrong. An organiser, who may seat
+      // anybody, still gets the box.
+      const fixedTeam = who && !who.anyTeam ? who.you : null;
+      if (fixedTeam && !team.value) team.value = fixedTeam;
+      team.hidden = fill.value !== 'submission' || fixedTeam !== null;
 
       const apply = (): void => {
         const chosen = fill.value;
-        if (chosen === 'submission' && !team.value.trim()) {
+        const named = (fixedTeam ?? team.value).trim();
+        if ((chosen === 'submission' || (chosen === 'laptop' && who)) && !named) {
           team.hidden = false;
           team.focus();
           return;
         }
-        void act('seat', { seat: id, fill: chosen, team: team.value.trim() });
+        // `fill` is an object on the wire, the same shape it comes back in.
+        // It was once a bare string with the team beside it, which quietly
+        // stopped being accepted when the endpoints grew schemas.
+        const body =
+          chosen === 'submission'
+            ? { kind: 'submission', team: named }
+            : chosen === 'laptop' && named
+              ? { kind: 'laptop', team: named }
+              : { kind: chosen };
+        joinCommands.delete(id);
+        void act('seat', { seat: id, fill: body });
       };
       fill.addEventListener('change', () => {
-        team.hidden = fill.value !== 'submission';
+        team.hidden = fill.value !== 'submission' || fixedTeam !== null;
         if (fill.value !== 'submission' || team.value.trim()) apply();
         else team.focus();
       });
@@ -265,7 +356,25 @@ function renderSeats(): void {
       stop.addEventListener('click', () => void act('seat-stop', { seat: id }));
       buttons.append(restart, stop);
 
-      row.append(who, fill, team, status, buttons);
+      // Somebody else's robot: shown, never touched. The server refuses it
+      // anyway — this is so nobody tries and reads a refusal instead.
+      if (!yours) {
+        fill.disabled = true;
+        team.disabled = true;
+        restart.disabled = true;
+        stop.disabled = true;
+      }
+
+      row.append(label, fill, team, status, buttons);
+
+      const command = joinCommands.get(id);
+      if (command) {
+        const box = document.createElement('div');
+        box.className = 'join';
+        box.textContent = command;
+        box.title = 'run this in a terminal, in the folder with your robot';
+        row.append(box);
+      }
       return row;
     }),
   );
@@ -405,7 +514,12 @@ modes.querySelectorAll<HTMLButtonElement>('button[data-mode]').forEach((button) 
 
 connect();
 draw();
-void refresh();
+// Who is looking decides what the seat strip is allowed to offer, so it is
+// asked before the first render rather than filled in underneath one.
+void askWho().then(() => {
+  seatsKey = '';
+  return refresh();
+});
 // The seat strip is answered by every action, but a program connecting or
 // dropping out is nobody's action — so ask, rarely, for the things nothing
 // told us about.

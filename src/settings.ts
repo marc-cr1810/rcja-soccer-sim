@@ -62,6 +62,24 @@ export interface PracticeSettings {
   max: number | null;
   /** Minutes of quiet before a field is warned. */
   idleMins: number;
+  /**
+   * Fields one team may own at once.
+   *
+   * The one that does the most work at a real event: a global cap of eight is
+   * no protection at all if one team opens eight. Its ceiling of **2** is not
+   * a guess — it is how many robots a team has, and under one-robot-one-place
+   * a second field is reachable only by splitting robot 1 onto one and robot 2
+   * onto another. Three is not discouraged, it is unreachable.
+   */
+  perTeam: number;
+  /**
+   * How long a field freeing up is held for the team at the front of the queue.
+   *
+   * A queue that opened the field for them instead would start an idle clock
+   * on an empty field belonging to somebody who has gone home, and stall
+   * everyone behind them for the whole quiet period.
+   */
+  claimSecs: number;
 }
 
 export interface LeagueSettings {
@@ -93,7 +111,7 @@ export function defaultSettings(): LeagueSettings {
       reserveCores: 1,
       concurrentFixtures: 2,
     },
-    practice: { open: true, max: null, idleMins: 20 },
+    practice: { open: true, max: null, idleMins: 20, perTeam: 1, claimSecs: 90 },
   };
 }
 
@@ -206,6 +224,16 @@ export function loadSettings(dataDir: string, overrides: Partial<Flags> = {}): L
   settings.practice.idleMins = idle.value;
   set('practice.idleMins', idle.used);
 
+  // 2 is the ceiling because a team has two robots, not because two felt like
+  // enough - see PracticeSettings.perTeam.
+  const perTeam = readNumber(practice.perTeam, 'practice.perTeam', 1, { min: 1, max: 2 }, complaints);
+  settings.practice.perTeam = Math.round(perTeam.value);
+  set('practice.perTeam', perTeam.used);
+
+  const claim = readNumber(practice.claimSecs, 'practice.claimSecs', 90, { min: 10, max: 3600 }, complaints);
+  settings.practice.claimSecs = Math.round(claim.value);
+  set('practice.claimSecs', claim.used);
+
   applyFlags(settings, sources, overrides);
   return { settings, sources, file, complaints };
 }
@@ -218,6 +246,7 @@ export interface Flags {
   seatMemoryMb: number;
   practiceMax: number;
   idleMins: number;
+  perTeam: number;
 }
 
 function applyFlags(
@@ -237,6 +266,7 @@ function applyFlags(
   take(flags.seatMemoryMb, 'arenas.seatMemoryMb', (v) => (settings.arenas.seatMemoryMb = v));
   take(flags.practiceMax, 'practice.max', (v) => (settings.practice.max = v));
   take(flags.idleMins, 'practice.idleMins', (v) => (settings.practice.idleMins = v));
+  take(flags.perTeam, 'practice.perTeam', (v) => (settings.practice.perTeam = v));
 }
 
 /**

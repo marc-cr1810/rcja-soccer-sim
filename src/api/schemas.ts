@@ -271,7 +271,19 @@ export const SeatFillSchema = z
   .discriminatedUnion('kind', [
     z.object({ kind: z.literal('empty') }),
     z.object({ kind: z.literal('built-in') }),
-    z.object({ kind: z.literal('laptop') }),
+    z.object({
+      kind: z.literal('laptop'),
+      team: z
+        .string()
+        .trim()
+        .min(1)
+        .optional()
+        .openapi({ description: 'Whose robot is joining. Required on a league server; absent on a laptop, where nobody is asking.' }),
+      token: z
+        .string()
+        .optional()
+        .openapi({ description: 'Minted by the hub for this one seat and injected on the way through. A browser never sends this.' }),
+    }),
     z.object({ kind: z.literal('submission'), team: z.string().trim().min(1) }),
   ])
   .openapi('SeatFill', { description: 'What is driving a seat, or that nothing is' });
@@ -565,6 +577,17 @@ export const ResolveBodySchema = z
   .object({ mode: z.enum(['restage', 'play-on', 'freeze']) })
   .openapi('ResolveBody', { description: 'Body for POST /practice-api/resolve' });
 export type ResolveBody = z.infer<typeof ResolveBodySchema>;
+
+export const InviteTeamBodySchema = z
+  .object({
+    team: z
+      .string()
+      .trim()
+      .min(1)
+      .openapi({ description: 'The team to invite onto this practice field, by name or slug' }),
+  })
+  .openapi('InviteTeamBody', { description: 'Body for POST /api/fields/{id}/invite' });
+export type InviteTeamBody = z.infer<typeof InviteTeamBodySchema>;
 
 export const SeatBodySchema = z
   .object({

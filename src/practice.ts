@@ -28,7 +28,24 @@ import type { Arrangement, PlacedRobot, TeamId } from './world';
 export type SeatFill =
   | { kind: 'empty' }
   | { kind: 'built-in' }
-  | { kind: 'laptop' }
+  | {
+      kind: 'laptop';
+      /**
+       * Whose robot this is. A league server fills it in; a laptop leaves it
+       * out, because there is nobody there to be.
+       */
+      team?: string;
+      /**
+       * What a join claiming this seat must present.
+       *
+       * Minted per seat by whatever is supervising this field and handed to
+       * the student the way `submit.py` hands them a push key. Without one
+       * the seat is back to a self-declared join, which is exactly right on a
+       * laptop with no accounts and exactly wrong on a league server, where a
+       * seat nobody can attribute is a seat no ledger can count.
+       */
+      token?: string;
+    }
   | { kind: 'submission'; team: string };
 
 /**
@@ -168,7 +185,10 @@ export class PracticeSession {
     for (const id of SEAT_IDS) {
       const seat = this.seats.get(id)!;
       seats[id] = {
-        fill: seat.fill,
+        // Redacted, not omitted: state is read by everybody on the field, and
+        // a join token is for one student's terminal. The console is told the
+        // token once, in the answer to the request that minted it.
+        fill: seat.fill.kind === 'laptop' ? { ...seat.fill, token: undefined } : seat.fill,
         onField: this.match.world.robots.some((r) => r.id === id),
         removed: this.match.world.robots.some((r) => r.id === id && r.removed),
         filled: this.match.hasSeat(id),
@@ -317,9 +337,13 @@ export class PracticeSession {
     }
 
     if (fill.kind === 'laptop') {
-      // Back to a self-declared join: a student's laptop has no server-issued
-      // token, and a practice field is not where identity is being proved.
-      this.server.agents.clearToken(id);
+      // With a token, this seat is somebody in particular: Phase 1's rule —
+      // identity comes from the credential, never from the client's say-so —
+      // arriving where Phase 4 deliberately skipped it. Without one, a
+      // self-declared join, which is what a match server on a classroom
+      // laptop has always wanted and still gets.
+      if (fill.token) this.server.agents.expectToken(id, fill.token);
+      else this.server.agents.clearToken(id);
       this.match.clearSeat(id);
       this.seats.set(id, { fill, detail: 'waiting for a program to connect' });
       return;

@@ -26,7 +26,13 @@ import time
 from typing import Any, Callable
 
 from .drive import coast as _coast
-from .transport import Connect, TransportError, current_transport
+from .transport import (
+    Connect,
+    TransportError,
+    current_transport,
+    join_token,
+    join_url,
+)
 
 #: The wire contract this library speaks. The server refuses a mismatch, which
 #: is a season boundary rather than a typo: the frame shape changed and this
@@ -146,11 +152,15 @@ class Robot:
         self.number = number
         self.name = name or team.capitalize()
         self.motor_count = motors
-        #: Server-issued when this robot was pushed and validated. A robot
-        #: run without one (any --agents/local-dev use) joins exactly as it
-        #: always has — a seat only requires a token if the server was told
+        #: Server-issued when this robot was pushed and validated, or minted
+        #: for one seat on a practice field and installed by ``join.py``. A
+        #: robot run without one (any --agents/local-dev use) joins exactly as
+        #: it always has — a seat only requires a token if the server was told
         #: to expect one for it.
-        self.token = token
+        #:
+        #: An explicit token always wins over an installed one: a program that
+        #: says something should not be quietly overruled by its launcher.
+        self.token = token if token is not None else join_token()
         self._tick: TickFunction | None = None
         self._memory = Memory()
         self._last_kickoff = False
@@ -235,6 +245,12 @@ class Robot:
             )
 
         opener = connect or current_transport()
+        # The same fallback rule as the token, and the same reason: a program
+        # that passed its own url meant it. ``DEFAULT_URL`` is not a choice —
+        # it is what every starter file and every example carries because
+        # nobody has told them where the match is.
+        if url == DEFAULT_URL:
+            url = join_url() or url
         self._last_connected = time.monotonic()
         while True:
             try:

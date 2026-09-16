@@ -289,7 +289,7 @@ function fixtureRow(card: Card): string {
  */
 async function front(): Promise<void> {
   interface Front {
-    tournament: { name: string; fixtures: number } | null;
+    tournament: { name: string; fixturesTotal: number } | null;
     live: Live[];
     next: Card | null;
     upcoming: Card[];
@@ -312,7 +312,7 @@ async function front(): Promise<void> {
   view.innerHTML = h(`
     ${denied ? `<div class="error">Your account may not open that page.</div>` : ''}
     <h1>${esc(data.tournament.name)}</h1>
-    <p class="dim">${data.tournament.fixtures} fixtures. Watching is open to anybody.</p>
+    <p class="dim">${data.tournament.fixturesTotal} fixtures. Watching is open to anybody.</p>
 
     <h2>On now</h2>
     ${
@@ -602,18 +602,35 @@ async function register(): Promise<void> {
   });
 }
 
+/** What a team's own dashboard is told that the public team page is not. */
+interface Yours {
+  fields: { id: string; url: string; guests: string[]; invited: string[] }[];
+  guestOf: { id: string; url: string; owner: string | null }[];
+  invitations: { arenaId: string; from: string }[];
+  robots: {
+    number: number;
+    at: { seatId: string; arenaId: string; owner: string | null; url: string } | null;
+  }[];
+  queue: { position: number; ahead: number; offer: { until: string } | null } | null;
+  perTeam: number;
+}
+
 /**
  * A team's one screen.
  *
- * Phase 6's version answers the two questions a team has today — where is my
- * code, and when do I play. The changing "what do I do now" state, the Run
- * button and a field of their own are Phases 8 and 9; this does not pretend to
- * them.
+ * Phase 6's version answered the two questions a team had then — where is my
+ * code, and when do I play. Phase 8 adds the third, which is the one they ask
+ * all day at a venue: *where is my robot right now*. It has exactly one
+ * answer, because a robot is in one place; that is the whole reason the rule
+ * is worth enforcing rather than merely counting.
+ *
+ * The Run button and a field that comes back on its own are Phase 9; this does
+ * not pretend to them.
  */
 async function dashboard(): Promise<void> {
   if (!me.account) return void go('/login?next=%2Fteam');
   const mine = me.account;
-  const data = await api<{ fixtures: Card[]; table: Standing | null }>(
+  const data = await api<{ fixtures: Card[]; table: Standing | null; yours?: Yours }>(
     `/api/team/${encodeURIComponent(mine.slug)}`,
   );
 
@@ -652,9 +669,143 @@ async function dashboard(): Promise<void> {
       </div>
     </div>
 
+    ${data.yours ? practiceSection(data.yours) : ''}
+
     <h2>Your fixtures</h2>
     ${data.fixtures.length ? `<div class="rows">${data.fixtures.map(fixtureRow).join('')}</div>` : `<div class="empty">You are not in the current draw.</div>`}
   `);
+
+  if (data.yours) wirePractice(mine.slug, data.yours);
+}
+
+/**
+ * The practice half of a team's screen.
+ *
+ * Three questions in the order they get asked at a venue: have I got a field,
+ * where are my two robots, and is anybody waiting on me. Each robot gets a row
+ * whether or not it is anywhere — an empty row is an answer, and a robot
+ * missing from a list is not.
+ */
+function practiceSection(yours: Yours): string {
+  const field = yours.fields[0];
+  const offered = yours.queue?.offer ?? null;
+
+  const robots = yours.robots
+    .map((robot) => {
+      if (!robot.at) {
+        return `<div class="row"><span class="grow">Robot ${robot.number}</span><span class="state">not in a seat</span></div>`;
+      }
+      const whose = robot.at.owner === null ? 'a field' : `${esc(robot.at.owner)}'s field`;
+      return `<div class="row">
+        <span class="grow">Robot ${robot.number} — in ${esc(robot.at.seatId)} on ${whose}</span>
+        <a href="${esc(robot.at.url)}" data-full>Open</a>
+      </div>`;
+    })
+    .join('');
+
+  const guest = yours.guestOf
+    .map(
+      (one) => `<div class="row">
+        <span class="grow">A guest on ${esc(one.owner ?? 'another team')}'s field</span>
+        <a href="${esc(one.url)}" data-full>Open</a>
+        <button class="quiet" data-leave="${esc(one.id)}">Leave</button>
+      </div>`,
+    )
+    .join('');
+
+  const invitations = yours.invitations
+    .map(
+      (one) => `<div class="row">
+        <span class="grow">${esc(one.from)} has invited you onto their practice field</span>
+        <button data-accept="${esc(one.arenaId)}">Accept</button>
+        <button class="quiet" data-decline="${esc(one.arenaId)}">No thanks</button>
+      </div>`,
+    )
+    .join('');
+
+  const yourField = field
+    ? `<div class="row">
+         <span class="grow">Your practice field${field.guests.length ? ` — with ${field.guests.map(esc).join(', ')}` : ''}</span>
+         <a href="${esc(field.url)}" data-full>Open</a>
+         <button class="quiet" id="close-field">Close</button>
+       </div>
+       <div class="row">
+         <span class="grow"><input id="invite-team" placeholder="invite a team by name" /></span>
+         <button id="invite">Invite</button>
+       </div>
+       ${field.invited.length ? `<div class="row"><span class="grow dim">Waiting on ${field.invited.map(esc).join(', ')}</span></div>` : ''}`
+    : offered
+      ? `<div class="row">
+           <span class="grow">A field is being held for you until ${esc(new Date(offered.until).toLocaleTimeString())}</span>
+           <button id="claim-field">Claim it</button>
+         </div>`
+      : yours.queue
+        ? `<div class="row">
+             <span class="grow">You are number ${yours.queue.position} in the queue for a field${yours.queue.ahead ? ` — ${yours.queue.ahead} ahead of you` : ''}</span>
+             <button class="quiet" id="leave-queue">Give up my place</button>
+           </div>`
+        : `<div class="row">
+             <span class="grow">You have no practice field open</span>
+             <button id="open-field">Open one</button>
+           </div>`;
+
+  return `
+    <h2>Your practice field</h2>
+    <div class="rows">${yourField}${guest}</div>
+    ${invitations ? `<h2>Invitations</h2><div class="rows">${invitations}</div>` : ''}
+
+    <h2>Your robots</h2>
+    <div class="rows">${robots}</div>
+    <p class="dim">Each of your two robots can be in one seat at a time, anywhere on this server.</p>
+  `;
+}
+
+/**
+ * The buttons under the practice section.
+ *
+ * Every one of them ends in `go('/team', true)`, because the answer to all of
+ * them is a changed dashboard and re-asking the server is cheaper than keeping
+ * a second copy of the truth in the page. A refusal is shown as it came — the
+ * server writes these to be read by a fifteen-year-old, and rewording them
+ * here would be a second voice saying a worse version of it.
+ */
+function wirePractice(slug: string, yours: Yours): void {
+  const post = async (path: string, body?: unknown): Promise<void> => {
+    const res = await api<{ ok: boolean; reason?: string }>(path, {
+      method: 'POST',
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+    if (!res.ok && res.reason) alert(res.reason);
+    await go('/team', true);
+  };
+
+  const on = (selector: string, run: () => Promise<void>): void => {
+    document.querySelector(selector)?.addEventListener('click', () => void run());
+  };
+
+  on('#open-field', () => post('/practice'));
+  on('#claim-field', () => post('/practice/claim'));
+  on('#leave-queue', () => post('/practice/leave'));
+  on('#close-field', () => post(`/api/fields/${yours.fields[0]!.id}/close`));
+  on('#invite', () => {
+    const input = document.querySelector<HTMLInputElement>('#invite-team');
+    const team = input?.value.trim();
+    if (!team) {
+      input?.focus();
+      return Promise.resolve();
+    }
+    return post(`/api/fields/${yours.fields[0]!.id}/invite`, { team });
+  });
+
+  for (const button of document.querySelectorAll<HTMLElement>('[data-accept]')) {
+    button.addEventListener('click', () => void post(`/api/fields/${button.dataset['accept']}/accept`));
+  }
+  for (const button of document.querySelectorAll<HTMLElement>('[data-decline]')) {
+    button.addEventListener('click', () => void post(`/api/fields/${button.dataset['decline']}/decline`));
+  }
+  for (const button of document.querySelectorAll<HTMLElement>('[data-leave]')) {
+    button.addEventListener('click', () => void post(`/api/fields/${button.dataset['leave']}/leave`));
+  }
 }
 
 /**

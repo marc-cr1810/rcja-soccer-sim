@@ -179,7 +179,13 @@ ordinary file, editable by hand:
     "reserveCores": 1,
     "concurrentFixtures": 2
   },
-  "practice": { "open": true, "max": null, "idleMins": 20 }
+  "practice": {
+    "open": true,
+    "max": null,
+    "idleMins": 20,
+    "perTeam": 1,
+    "claimSecs": 90
+  }
 }
 ```
 
@@ -200,6 +206,18 @@ Two things follow from the numbers and are not settings you can turn:
   a rehearsal of a different sport. Lowering `seatCpuPercent` lowers it
   everywhere, and it is recorded in every match result as a condition of play.
 
+`practice.perTeam` is the setting that does the most work at a real event: a
+global cap of eight is no protection at all if one team opens eight. One field
+per team is the default and **2** is the ceiling — not a preference, but how
+many robots a team has. A team reaches two fields only by putting robot 1 on
+one and robot 2 on the other, because each robot may be in one seat anywhere on
+the server at a time.
+
+`practice.claimSecs` is how long a freed field is *held* for the team at the
+front of the queue before it passes to the next. It is held rather than opened
+because opening a field for a team who has gone home starts an idle clock on an
+empty field and stalls everyone behind them for the whole quiet period.
+
 A broken `league.json` does not stop the server. It starts on the defaults and
 prints what it ignored, because an organiser with a stray comma twenty minutes
 before a match needs a server that comes up.
@@ -212,6 +230,33 @@ nothing to paste. The hub decides from the session and the referee's capability
 whether to let them in, so a spectator never downloads match-control code at
 all.
 
+## Whose field is whose
+
+A practice field belongs to the team that opened it. They run it — drag, start,
+stop, invite, close — and every team on it fills the seats holding *their own*
+robots and nobody else's. A team invites another by name and it lands on that
+team's page rather than as a link to paste; being a guest costs them nothing,
+so they can still open a field of their own.
+
+Underneath sits a rule rather than a setting: **each of a team's robots may be
+in exactly one seat, anywhere on this server, at any moment.** It makes "what is
+my robot doing right now" answerable, and it removes the fixture conflict
+without a second rule — during their match both robots are seated, so there is
+nothing left to rehearse with. The check lives in the hub, because a child arena
+can only ever see its own world.
+
+**A fixture pre-empts practice.** When a fixture's arena opens, each team's own
+practice field is closed and any seat of theirs on another team's field is
+emptied, said on the field and on their team page. Without an explicit winner
+the rule above would deadlock at the worst moment of the day, when a team whose
+robot is still held by a field they walked away from cannot be seated in their
+own match.
+
+**Everything goes through the one port.** A practice arena binds loopback under
+a league server exactly as a fixture does, so every one of these checks is on
+the only road in. On a plain `serve practice` it still binds wide: there is no
+hub in front of it and no accounts to check.
+
 ## Watching the machine
 
 `/admin` shows three numbers rather than one — what you set, what the hardware
@@ -221,10 +266,24 @@ match is managing to play, and a button to stop it. A venue's real failure mode
 is four things running that should not be and nobody knowing which machine they
 are on.
 
+## From a terminal
+
+`arenas` lists what a league server is running, and stops one — over HTTP, with
+an ordinary API key from an admin account's `/team/settings`, because an arena
+lives in the running server's memory and nothing on disk knows about it:
+
+```bash
+bun run serve -- arenas --url http://localhost:8080 --key rcja_…
+bun run serve -- arenas stop <id> --url http://localhost:8080 --key rcja_…
+```
+
+Both are on `/admin` as well. They are here too because the day this gets asked
+in earnest is the day `/admin` is the thing that has gone wrong.
+
 ## What this is not yet
 
-Practice fields that belong to a team, a Run button, a queue, a referee's
-pre-game and lineup lock, and the full administration screen are the phases
-after this one — see [PHASES.md](../PHASES.md). Today a practice field is open
-to whoever has the link, as it has been since Phase 4; who may *open* one is an
-account, and who it belongs to once open is Phase 8.
+A Run button in the browser workspace, a field that gives itself back when a
+team walks away, a referee's pre-game and lineup lock, and the full
+administration screen are the phases after this one — see
+[PHASES.md](../PHASES.md). Today a field stays open until its team closes it or
+its team is called to a match.

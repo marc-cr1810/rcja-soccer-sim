@@ -165,6 +165,7 @@ assigned to**, not every match.
 | `team.workspace.write` | | own | | any |
 | `team.submit` | | own | | any |
 | `field.open` | | ✓ | ✓ | ✓ |
+| `field.control` | | own | | any |
 | `field.invite` | | own | | any |
 | `field.join` | | invited | ✓ | ✓ |
 | `fixture.setup` | | | assigned | any |
@@ -176,6 +177,13 @@ assigned to**, not every match.
 | `referee.assign` | | | | ✓ |
 | `account.manage` | | | | ✓ |
 | `capability.grant` | | | | ✓ |
+
+`field.control` and `field.join` answer two different questions about the same
+field, which is why both exist: *may they run it* — drag, start, re-stage,
+invite, close — and *may they be on it at all*. A team holds the first only over
+a field they opened; a guest holds the second by invitation rather than by
+capability, because a guest list is a ledger and not a role. Both are targeted
+by the field's **owner**, so `own` means "a field of mine".
 
 **Guests need no account at all.** Watching is open, and the viewer stream stays
 untrusted by design — that is [Phase 2's stated position](PHASES.md#phase-2--a-referee-runs-the-match)
