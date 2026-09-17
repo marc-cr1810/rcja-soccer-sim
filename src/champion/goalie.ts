@@ -217,9 +217,15 @@ export class ChampionGoalie {
     }
 
     // 6. Loose Ball in Box Smother (Rule 5.8.2 / 5.8.3 Forward Motion Requirement)
+    //
+    // Deliberately narrow: only go get a ball that is already on the goal
+    // mouth. Charging a slower ball that is merely reachable in the box used to
+    // commit the keeper away from the line, and an attacker dribbling it could
+    // then push it past the stranded keeper — a poke-through goal that just
+    // gets scored into the net the keeper has left.
     const distToBall = Math.hypot(bx - meX, bz - meZ);
     const reachable = distToBall < 520.0;
-    if (inBox && reachable && (ball.speed() < 350 || depth < 150)) {
+    if (inBox && reachable && depth < 150) {
       const chaseX = OWN_LINE + clamp(depth, 0.0, PENALTY_DEPTH);
       const chaseZ = clamp(bz, -420.0, 420.0);
       const travel = steerClearOfEdges(

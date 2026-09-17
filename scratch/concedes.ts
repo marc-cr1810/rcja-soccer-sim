@@ -1,10 +1,10 @@
 import { Match, type MatchAgents } from '../src/match';
 import { championTeam } from '../src/champion';
+import { HALF_LENGTH, HALF_GOAL_WIDTH } from '../src/field';
 
-type Snap = { clock: number; kx: number; kz: number; sx: number; sz: number; bx: number; bz: number; bvx: number; bvz: number };
-let prev: Snap | null = null;
-let lastV = 0, lastL = 0;
-const concedes: { seed: number; snap: Snap; vGoal: boolean }[] = [];
+let prev: { clock: number; kx: number; kz: number; bx: number; bz: number; bvx: number; bvz: number; bsx: number; bsz: number } | null = null;
+let wasOver = false;
+const conceded: { seed: number; clock: number; side: number; snap: typeof prev; ballV: number; keeperGuardLine: number }[] = [];
 
 for (let seed = 1; seed <= 30; seed++) {
   const agents = { ...championTeam('violet'), ...championTeam('lime') } as unknown as MatchAgents;
@@ -13,35 +13,49 @@ for (let seed = 1; seed <= 30; seed++) {
     observe: (match) => {
       const w = match.world;
       const ball = w.ball;
-      const vel = Math.hypot(ball.vx, ball.vz);
       const k = w.robots.find((r) => r.id === 'violet-2');
       const s = w.robots.find((r) => r.id === 'lime-1');
-      prev = { clock: w.clock, kx: k.x, kz: k.z, sx: s.x, sz: s.z, bx: ball.x, bz: ball.z, bvx: ball.vx, bvz: ball.vz };
-      if (match.world.score.violet > lastV || match.world.score.lime > lastL) {
-        const vScored = match.world.score.violet > lastV;
-        if (vScored && prev) concedes.push({ seed, snap: prev, vGoal: true });
-        if (!vScored && prev) concedes.push({ seed, snap: prev, vGoal: false });
-        lastV = match.world.score.violet; lastL = match.world.score.lime;
+      const kx = k && !k.removed ? k.x : NaN;
+      const kz = k && !k.removed ? k.z : NaN;
+      const over = Math.abs(ball.x) > HALF_LENGTH - 10 && Math.abs(ball.z) < HALF_GOAL_WIDTH;
+      if (over && !wasOver && prev) {
+        // violet concedes if the ball crossed the goal behind the violet keeper
+        const keeperSign = Math.sign(kx);
+        const ballSign = Math.sign(ball.x);
+        if (keeperSign === ballSign && keeperSign !== 0) {
+          conceded.push({
+            seed, clock: prev.clock, side: ballSign, snap: prev,
+            ballV: Math.hypot(prev.bvx, prev.bvz),
+            keeperGuardLine: Math.abs(prev.kx) - (HALF_LENGTH - 175),
+          });
+        }
       }
+      wasOver = over;
+      prev = { clock: w.clock, kx, kz, bx: ball.x, bz: ball.z, bvx: ball.vx, bvz: ball.vz, bsx: s.x, bsz: s.z };
     },
   });
   m.run();
-  lastV = 0; lastL = 0;
 }
 
-const myCons = concedes.filter((c) => c.vGoal);
-const theirCons = concedes.filter((c) => !c.vGoal);
-console.log(`violet conceded ${myCons.length}; lime conceded ${theirCons.length}`);
-console.log('\nsample violet-concedes (keeper pose, striker pose, ball at concede):');
-myCons.slice(0, 12).forEach((c) => {
-  const s = c.snap;
-  console.log(`t=${s.clock.toFixed(0)}  keeper(${s.kx.toFixed(0)},${s.kz.toFixed(0)})  striker(${s.sx.toFixed(0)},${s.sz.toFixed(0)})  ball(${s.bx.toFixed(0)},${s.bz.toFixed(0)}) v=${Math.hypot(s.bvx, s.bvz).toFixed(0)}`);
-});
+console.log(`violet conceded ${conceded.length} (30 mirror matches)`);
+console.log(`\nkeeper x offset from guard line at concede (negative = behind/on line, positive = too far up):`);
+const offs = conceded.map((c) => c.keeperGuardLine);
+const avg = offs.reduce((a, b) => a + b, 0) / offs.length;
+console.log(`  mean ${avg.toFixed(0)}  min ${Math.min(...offs).toFixed(0)}  max ${Math.max(...offs).toFixed(0)}`);
 
-const offLine = myCons.filter((c) => Math.abs(c.snap.kx) < 915 - 175 - 40);
-console.log(`\nviolet concedes while keeper >40mm off the guard line (i.e. smothering/caught upfield): ${offLine.length}/${myCons.length}`);
-const keeperOffSide = myCons.filter((c) => {
-  const kz = c.snap.kz, bz = c.snap.bz;
-  return Math.abs(kz - bz) > 120;
+const farUp = conceded.filter((c) => c.keeperGuardLine > 40);
+console.log(`concedes with keeper >40mm off the line (smothering/upfield): ${farUp.length}/${conceded.length}`);
+
+const slow = conceded.filter((c) => c.ballV < 350);
+console.log(`concedes where ball at crossing <350mm/s (dribble/roll-in): ${slow.length}/${conceded.length}`);
+
+const fast = conceded.filter((c) => c.ballV >= 350);
+const zErr = fast.map((c) => Math.abs(c.snap!.kz - c.snap!.bz));
+const avgZ = zErr.reduce((a, b) => a + b, 0) / Math.max(1, zErr.length);
+console.log(`fast concedes (${fast.length}): avg |keeperZ - ballZ| at concede ${avgZ.toFixed(0)}mm`);
+
+console.log('\nsample fast concedes:');
+fast.slice(0, 12).forEach((c) => {
+  const s = c.snap!;
+  console.log(`seed ${c.seed} t=${c.clock.toFixed(0)} keeper(${s.kx.toFixed(0)},${s.kz.toFixed(0)}) ball(${s.bx.toFixed(0)},${s.bz.toFixed(0)}) v=${c.ballV.toFixed(0)} striker(${s.bsx.toFixed(0)},${s.bsz.toFixed(0)})`);
 });
-console.log(`violet concedes where keeper z was >120mm from ball z: ${keeperOffSide.length}/${myCons.length}`);

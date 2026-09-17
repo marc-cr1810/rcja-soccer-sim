@@ -106,9 +106,18 @@ class GoalFrame:
         # goal is the nearer of the two. Reaching for the sighting named after
         # the team would be wrong in one half — team colours stay at fixed
         # places while, rule 1.4/5.4, which end each team defends swaps.
+        #
+        # `d_mine` and `d_theirs` reduce algebraically to `mine.range ** 2` and
+        # `theirs.range ** 2`, so this is purely comparing the two camera range
+        # readings. Near the centre circle both ranges are similar, and a small
+        # amount of sensor noise can make the opponent's goal measure as the
+        # nearer one, flipping the whole frame and sending the striker at its
+        # own net. Require a clear margin (> ~5% shorter range, i.e. 0.81x in
+        # the squared domain) so ambiguous near-equal readings are left as-is
+        # rather than swapped on noise.
         d_mine = (my_x - me_x) ** 2 + (my_z - me_z) ** 2
         d_theirs = (their_x - me_x) ** 2 + (their_z - me_z) ** 2
-        if d_theirs < d_mine:
+        if d_theirs < d_mine * 0.81:
             my_x, my_z, their_x, their_z = their_x, their_z, my_x, my_z
 
         dx = their_x - my_x
