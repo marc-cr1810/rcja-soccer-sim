@@ -114,6 +114,10 @@ export interface DemoSettings {
   home: string;
   /** The lime side. */
   away: string;
+  /** Per-team bot selection for the violet/home side. */
+  homeBots?: string;
+  /** Per-team bot selection for the lime/away side. */
+  awayBots?: string;
   /** Simulated seconds in a half. */
   halfSeconds: number;
   /** Which rule set; `null` means the default league. */
@@ -153,7 +157,7 @@ export function defaultSettings(): LeagueSettings {
       concurrentFixtures: 2,
     },
     practice: { open: true, max: null, idleMins: 20, graceMins: 5, perTeam: 1, claimSecs: 90 },
-    demo: { on: false, bots: 'reference', home: 'Violet', away: 'Lime', halfSeconds: 300, league: null, gapSeconds: 3 },
+    demo: { on: false, bots: 'reference', home: 'Violet', away: 'Lime', halfSeconds: 300, league: null, gapSeconds: 10 },
   };
 }
 
@@ -313,25 +317,65 @@ export function loadSettings(dataDir: string, overrides: Partial<Flags> = {}): L
   if (typeof demo.bots === 'string' && demo.bots !== '') {
     settings.demo.bots = demo.bots;
     set('demo.bots', true);
+  } else if (typeof demo.bots === 'object' && demo.bots !== null && !Array.isArray(demo.bots)) {
+    const b = demo.bots as Record<string, unknown>;
+    if (typeof b.home === 'string' && b.home !== '') settings.demo.homeBots = b.home;
+    if (typeof b.away === 'string' && b.away !== '') settings.demo.awayBots = b.away;
+    set('demo.bots', true);
   } else {
-    if (demo.bots !== undefined) complaints.push('demo.bots must be a string; using "reference"');
+    if (demo.bots !== undefined) complaints.push('demo.bots must be a string or object; using "reference"');
     set('demo.bots', false);
   }
 
-  if (typeof demo.home === 'string' && demo.home !== '') {
+  // Support home as an object ({ name?: string, bots?: string }) or string.
+  if (typeof demo.home === 'object' && demo.home !== null && !Array.isArray(demo.home)) {
+    const h = demo.home as Record<string, unknown>;
+    if (typeof h.name === 'string' && h.name !== '') {
+      settings.demo.home = h.name;
+      set('demo.home', true);
+    } else {
+      set('demo.home', false);
+    }
+    if (typeof h.bots === 'string' && h.bots !== '') {
+      settings.demo.homeBots = h.bots;
+      set('demo.homeBots', true);
+    }
+  } else if (typeof demo.home === 'string' && demo.home !== '') {
     settings.demo.home = demo.home;
     set('demo.home', true);
   } else {
-    if (demo.home !== undefined) complaints.push('demo.home must be a string; using "Violet"');
+    if (demo.home !== undefined) complaints.push('demo.home must be a string or object; using "Violet"');
     set('demo.home', false);
   }
 
-  if (typeof demo.away === 'string' && demo.away !== '') {
+  // Support away as an object ({ name?: string, bots?: string }) or string.
+  if (typeof demo.away === 'object' && demo.away !== null && !Array.isArray(demo.away)) {
+    const a = demo.away as Record<string, unknown>;
+    if (typeof a.name === 'string' && a.name !== '') {
+      settings.demo.away = a.name;
+      set('demo.away', true);
+    } else {
+      set('demo.away', false);
+    }
+    if (typeof a.bots === 'string' && a.bots !== '') {
+      settings.demo.awayBots = a.bots;
+      set('demo.awayBots', true);
+    }
+  } else if (typeof demo.away === 'string' && demo.away !== '') {
     settings.demo.away = demo.away;
     set('demo.away', true);
   } else {
-    if (demo.away !== undefined) complaints.push('demo.away must be a string; using "Lime"');
+    if (demo.away !== undefined) complaints.push('demo.away must be a string or object; using "Lime"');
     set('demo.away', false);
+  }
+
+  if (typeof demo.homeBots === 'string' && demo.homeBots !== '') {
+    settings.demo.homeBots = demo.homeBots;
+    set('demo.homeBots', true);
+  }
+  if (typeof demo.awayBots === 'string' && demo.awayBots !== '') {
+    settings.demo.awayBots = demo.awayBots;
+    set('demo.awayBots', true);
   }
 
   const demoHalf = readNumber(demo.halfSeconds, 'demo.halfSeconds', 300, { min: 30, max: 1800 }, complaints);
@@ -353,7 +397,7 @@ export function loadSettings(dataDir: string, overrides: Partial<Flags> = {}): L
     set('demo.league', false);
   }
 
-  const demoGap = readNumber(demo.gapSeconds, 'demo.gapSeconds', 3, { min: 0, max: 60 }, complaints);
+  const demoGap = readNumber(demo.gapSeconds, 'demo.gapSeconds', 10, { min: 0, max: 60 }, complaints);
   settings.demo.gapSeconds = Math.round(demoGap.value);
   set('demo.gapSeconds', demoGap.used);
 
@@ -374,6 +418,8 @@ export interface Flags {
   demoBots: string;
   demoHome: string;
   demoAway: string;
+  demoHomeBots: string;
+  demoAwayBots: string;
   demoHalf: number;
   demoLeague: LeagueId | null;
   demoGap: number;
@@ -401,6 +447,8 @@ function applyFlags(
   take(flags.demoBots, 'demo.bots', (v) => (settings.demo.bots = v));
   take(flags.demoHome, 'demo.home', (v) => (settings.demo.home = v));
   take(flags.demoAway, 'demo.away', (v) => (settings.demo.away = v));
+  take(flags.demoHomeBots, 'demo.homeBots', (v) => (settings.demo.homeBots = v));
+  take(flags.demoAwayBots, 'demo.awayBots', (v) => (settings.demo.awayBots = v));
   take(flags.demoHalf, 'demo.halfSeconds', (v) => (settings.demo.halfSeconds = v));
   take(flags.demoLeague, 'demo.league', (v) => (settings.demo.league = v));
   take(flags.demoGap, 'demo.gapSeconds', (v) => (settings.demo.gapSeconds = v));

@@ -636,4 +636,22 @@ describe('staged matches (Phase 4)', () => {
     const lime = m.world.robots.find((r) => r.id === 'lime-1')!;
     expect(Math.hypot(lime.x - before.x, lime.z - before.z)).toBeGreaterThan(100);
   });
+
+  it('tracks robot performance stats (goals, saves, shots, penalties) per robot', () => {
+    const m = new Match({
+      agents: teams(),
+      halfSeconds: 5,
+      seed: 1,
+    });
+    const res = m.run();
+    expect(res.robotStats).toBeDefined();
+    for (const seat of ['violet-1', 'violet-2', 'lime-1', 'lime-2']) {
+      const stats = res.robotStats![seat];
+      expect(stats).toBeDefined();
+      expect(typeof stats!.goals).toBe('number');
+      expect(typeof stats!.saves).toBe('number');
+      expect(typeof stats!.shots).toBe('number');
+      expect(typeof stats!.penalties).toBe('number');
+    }
+  });
 });

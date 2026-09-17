@@ -148,9 +148,18 @@ export function wanderer(seed: number): Agent {
   };
 }
 
+import { championTeam } from './champion';
+
 /** Every bot above, paired into two-robot teams for a ladder. */
 export function botRoster(): { name: string; make: (team: 'violet' | 'lime') => Agent[] }[] {
   return [
+    {
+      name: 'champion',
+      make: (t) => {
+        const team = championTeam(t);
+        return [team[`${t}-1`]!, team[`${t}-2`]!];
+      },
+    },
     { name: 'naive-chaser', make: () => [naiveChaser, naiveChaser] },
     { name: 'shover', make: () => [shover, shover] },
     { name: 'chaser+camper', make: (t) => [naiveChaser, camper(t)] },

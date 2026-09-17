@@ -14,12 +14,40 @@
 import { FieldRenderer } from '../src/renderer';
 import type { League } from '../src/leagues';
 import type { ViewFrame, ViewMessage } from '../src/view';
+import type { MatchResult } from '../src/match';
 
 const canvas = document.getElementById('field') as HTMLCanvasElement;
 const status = document.getElementById('status')!;
 const call = document.getElementById('call')!;
 const standdown = document.getElementById('standdown')!;
 const cameras = document.getElementById('cameras')!;
+
+const summaryModal = document.getElementById('match-summary')!;
+const summaryCloseBtn = document.getElementById('summary-close')!;
+const summaryDismissBtn = document.getElementById('summary-dismiss')!;
+const summaryTitle = document.getElementById('summary-title')!;
+const sumVioletName = document.getElementById('sum-violet-name')!;
+const sumLimeName = document.getElementById('sum-lime-name')!;
+const sumVioletScore = document.getElementById('sum-violet-score')!;
+const sumLimeScore = document.getElementById('sum-lime-score')!;
+const summarySpotlights = document.getElementById('summary-spotlights')!;
+const summaryTeams = document.getElementById('summary-teams')!;
+const summaryRobotsBody = document.getElementById('summary-robots-body')!;
+const summaryStatusPill = document.getElementById('summary-status-pill');
+
+let currentSummaryData: MatchResult | null = null;
+let currentNextMatchIn: number | undefined;
+let summaryShown = false;
+let matchFinished = false;
+let summaryButton: HTMLButtonElement | null = null;
+let nextMatchCountdownTimer: ReturnType<typeof setInterval> | null = null;
+
+function clearNextMatchTimer(): void {
+  if (nextMatchCountdownTimer !== null) {
+    clearInterval(nextMatchCountdownTimer);
+    nextMatchCountdownTimer = null;
+  }
+}
 
 const board = {
   element: document.getElementById('board')!,
@@ -204,13 +232,16 @@ function updateBoard(frame: ViewFrame): void {
   board.violetScore.textContent = String(frame.score.violet);
   board.limeScore.textContent = String(frame.score.lime);
   board.clock.textContent = formatClock(frame.clock, frame.half);
-  board.half.textContent = frame.running
-    ? frame.half === 1
-      ? '1st half'
-      : '2nd half'
-    : frame.clock === 0
-      ? 'pre-match'
-      : 'stopped';
+  const isFinished = frame.half === 2 && !frame.running && frame.clock >= 2 * halfSeconds - 0.5;
+  board.half.textContent = isFinished
+    ? 'full time'
+    : frame.running
+      ? frame.half === 1
+        ? '1st half'
+        : '2nd half'
+      : frame.clock === 0
+        ? 'pre-match'
+        : 'stopped';
 
   const last = frame.events[frame.events.length - 1];
   if (last) {
@@ -249,8 +280,15 @@ function draw(): void {
 
 function receive(message: ViewMessage): void {
   if (message.type === 'hello') {
+    clearNextMatchTimer();
     league = message.league;
     halfSeconds = message.halfSeconds;
+    currentSummaryData = null;
+    currentNextMatchIn = undefined;
+    summaryShown = false;
+    matchFinished = false;
+    summaryModal.hidden = true;
+    updateSummaryButton();
     if (!renderer) {
       renderer = new FieldRenderer(canvas, league);
       // A hall screen wants the broadcast angle, not the referee's overhead
@@ -276,15 +314,50 @@ function receive(message: ViewMessage): void {
       new ResizeObserver(() => renderer?.resize()).observe(canvas);
       window.addEventListener('keydown', cycleCamera);
       buildCameraPicker();
+      wireSummaryInteractions();
     } else {
       renderer.setLeague(league);
     }
     return;
   }
-  previous = latest;
-  previousAt = latestAt;
-  latest = message.frame;
-  latestAt = performance.now();
+
+  if (message.type === 'summary') {
+    currentSummaryData = message.result;
+    currentNextMatchIn = message.nextMatchIn;
+    matchFinished = true;
+    updateSummaryButton();
+    if (!summaryShown) {
+      showSummary({ ...message.result, nextMatchIn: message.nextMatchIn });
+    }
+    return;
+  }
+
+  if (message.type === 'frame') {
+    previous = latest;
+    previousAt = latestAt;
+    latest = message.frame;
+    latestAt = performance.now();
+
+    // If a new match has started (or pre-match of half 1), ensure summary modal is hidden
+    if (!summaryModal.hidden && latest.half === 1 && (latest.running || latest.clock < 1)) {
+      clearNextMatchTimer();
+      summaryModal.hidden = true;
+      summaryShown = false;
+    }
+
+    const isFullTime = latest.half === 2 && !latest.running && latest.clock >= 2 * halfSeconds - 0.5;
+    if (isFullTime && !matchFinished) {
+      matchFinished = true;
+      updateSummaryButton();
+      if (!summaryShown) {
+        showSummary(currentSummaryData ? { ...currentSummaryData, nextMatchIn: currentNextMatchIn } : {
+          score: latest.score,
+          events: latest.events,
+          nextMatchIn: currentNextMatchIn,
+        });
+      }
+    }
+  }
 }
 
 /**
@@ -333,7 +406,330 @@ function buildCameraPicker(): void {
 
 function cycleCamera(event: KeyboardEvent): void {
   if (event.key !== 'c' && event.key !== 'C') return;
+  if (!summaryModal.hidden) return;
   setCamera(cameraIndex + 1);
+}
+
+function updateSummaryButton(): void {
+  if (!matchFinished) {
+    if (summaryButton) summaryButton.hidden = true;
+    return;
+  }
+  if (!summaryButton) {
+    summaryButton = document.createElement('button');
+    summaryButton.type = 'button';
+    summaryButton.textContent = 'Summary';
+    summaryButton.title = 'View full-time match summary';
+    summaryButton.addEventListener('click', () => {
+      if (currentSummaryData) {
+        showSummary({ ...currentSummaryData, nextMatchIn: currentNextMatchIn });
+      } else if (latest) {
+        showSummary({ score: latest.score, events: latest.events, nextMatchIn: currentNextMatchIn });
+      }
+    });
+    cameras.append(summaryButton);
+  }
+  summaryButton.hidden = false;
+}
+
+function wireSummaryInteractions(): void {
+  summaryCloseBtn.addEventListener('click', () => {
+    clearNextMatchTimer();
+    summaryModal.hidden = true;
+  });
+  summaryDismissBtn.addEventListener('click', () => {
+    clearNextMatchTimer();
+    summaryModal.hidden = true;
+  });
+  summaryModal.addEventListener('click', (event) => {
+    if (event.target === summaryModal) {
+      clearNextMatchTimer();
+      summaryModal.hidden = true;
+    }
+  });
+  window.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && !summaryModal.hidden) {
+      clearNextMatchTimer();
+      summaryModal.hidden = true;
+    }
+  });
+  board.element.addEventListener('click', () => {
+    if (matchFinished) {
+      if (currentSummaryData) {
+        showSummary({ ...currentSummaryData, nextMatchIn: currentNextMatchIn });
+      } else if (latest) {
+        showSummary({ score: latest.score, events: latest.events, nextMatchIn: currentNextMatchIn });
+      }
+    }
+  });
+}
+
+function showSummary(data: {
+  score: { violet: number; lime: number };
+  robotStats?: Record<string, { goals: number; saves: number; shots: number; penalties: number }>;
+  goals?: { team: 'violet' | 'lime'; at: number; robotId?: string }[];
+  events?: { kind: string; at: number; team?: 'violet' | 'lime'; robotId?: string }[];
+  nextMatchIn?: number;
+}): void {
+  summaryShown = true;
+  summaryModal.hidden = false;
+
+  clearNextMatchTimer();
+  if (typeof data.nextMatchIn === 'number' && data.nextMatchIn > 0) {
+    let remaining = Math.round(data.nextMatchIn);
+    const updatePill = () => {
+      if (summaryStatusPill) {
+        summaryStatusPill.textContent = `Full Time • Next match in ${remaining}s`;
+      }
+    };
+    updatePill();
+    nextMatchCountdownTimer = setInterval(() => {
+      remaining--;
+      if (remaining <= 0) {
+        clearNextMatchTimer();
+        if (summaryStatusPill) {
+          summaryStatusPill.textContent = 'Next match starting…';
+        }
+      } else {
+        updatePill();
+      }
+    }, 1000);
+  } else if (summaryStatusPill) {
+    summaryStatusPill.textContent = 'Full Time Summary';
+  }
+
+  const violetTeam = latest?.teams.violet ?? 'Violet';
+  const limeTeam = latest?.teams.lime ?? 'Lime';
+  const vScore = data.score.violet;
+  const lScore = data.score.lime;
+
+  let verdict = 'Match Drawn';
+  if (vScore > lScore) verdict = `🏆 ${violetTeam} Victory!`;
+  else if (lScore > vScore) verdict = `🏆 ${limeTeam} Victory!`;
+
+  summaryTitle.textContent = verdict;
+  sumVioletName.textContent = violetTeam;
+  sumLimeName.textContent = limeTeam;
+  sumVioletScore.textContent = String(vScore);
+  sumLimeScore.textContent = String(lScore);
+
+  interface RobotEntry {
+    id: string;
+    number: number;
+    team: 'violet' | 'lime';
+    teamName: string;
+    role: 'Goalie' | 'Striker';
+    goals: number;
+    saves: number;
+    shots: number;
+    penalties: number;
+  }
+
+  const isGoalie = (id: string, defaultGoalie: boolean): boolean => {
+    const r = latest?.robots.find((bot) => bot.id === id);
+    return r ? r.isGoalie : defaultGoalie;
+  };
+
+  const robots: Record<string, RobotEntry> = {
+    'violet-1': {
+      id: 'violet-1',
+      number: 1,
+      team: 'violet',
+      teamName: violetTeam,
+      role: isGoalie('violet-1', false) ? 'Goalie' : 'Striker',
+      goals: 0,
+      saves: 0,
+      shots: 0,
+      penalties: 0,
+    },
+    'violet-2': {
+      id: 'violet-2',
+      number: 2,
+      team: 'violet',
+      teamName: violetTeam,
+      role: isGoalie('violet-2', true) ? 'Goalie' : 'Striker',
+      goals: 0,
+      saves: 0,
+      shots: 0,
+      penalties: 0,
+    },
+    'lime-1': {
+      id: 'lime-1',
+      number: 1,
+      team: 'lime',
+      teamName: limeTeam,
+      role: isGoalie('lime-1', false) ? 'Goalie' : 'Striker',
+      goals: 0,
+      saves: 0,
+      shots: 0,
+      penalties: 0,
+    },
+    'lime-2': {
+      id: 'lime-2',
+      number: 2,
+      team: 'lime',
+      teamName: limeTeam,
+      role: isGoalie('lime-2', true) ? 'Goalie' : 'Striker',
+      goals: 0,
+      saves: 0,
+      shots: 0,
+      penalties: 0,
+    },
+  };
+
+  if (data.robotStats) {
+    for (const [id, s] of Object.entries(data.robotStats)) {
+      if (robots[id]) {
+        robots[id].goals += s.goals ?? 0;
+        robots[id].saves += s.saves ?? 0;
+        robots[id].shots += s.shots ?? 0;
+        robots[id].penalties += s.penalties ?? 0;
+      }
+    }
+  } else {
+    if (data.goals) {
+      for (const g of data.goals) {
+        const id = g.robotId ?? (g.team === 'violet' ? 'violet-1' : 'lime-1');
+        const target = robots[id];
+        if (target) target.goals++;
+      }
+    }
+    if (data.events) {
+      for (const e of data.events) {
+        if (e.kind === 'goal' && !data.goals) {
+          const id = e.robotId ?? (e.team === 'violet' ? 'violet-1' : 'lime-1');
+          const target = robots[id];
+          if (target) target.goals++;
+        }
+        if (e.kind === 'possible-damaged' || e.kind === 'illegal-kickoff') {
+          const target = e.robotId ? robots[e.robotId] : undefined;
+          if (target) target.penalties++;
+        }
+      }
+    }
+  }
+
+  const robotList = Object.values(robots);
+
+  const topScorer = [...robotList].sort((a, b) => b.goals - a.goals)[0];
+  const goalies = robotList.filter((r) => r.role === 'Goalie');
+  const topKeeper = [...goalies].sort((a, b) => b.saves - a.saves)[0] ?? goalies[0];
+  const topShooter = [...robotList].sort((a, b) => b.shots - a.shots)[0];
+
+  const spotlights: string[] = [];
+
+  if (topScorer && topScorer.goals > 0) {
+    spotlights.push(`
+      <div class="summary-spotlight-card ${topScorer.team}">
+        <div class="spotlight-icon">⚽</div>
+        <div class="spotlight-details">
+          <div class="spotlight-label">Top Scorer</div>
+          <div class="spotlight-robot">${topScorer.teamName} ${topScorer.number}</div>
+          <div class="spotlight-team ${topScorer.team}">${topScorer.role} &bull; ${topScorer.teamName}</div>
+        </div>
+        <div class="spotlight-count">${topScorer.goals}</div>
+      </div>
+    `);
+  } else {
+    spotlights.push(`
+      <div class="summary-spotlight-card">
+        <div class="spotlight-icon">⚽</div>
+        <div class="spotlight-details">
+          <div class="spotlight-label">Top Scorer</div>
+          <div class="spotlight-robot">None</div>
+          <div class="spotlight-team">No goals scored</div>
+        </div>
+        <div class="spotlight-count">0</div>
+      </div>
+    `);
+  }
+
+  if (topKeeper) {
+    spotlights.push(`
+      <div class="summary-spotlight-card ${topKeeper.team}">
+        <div class="spotlight-icon">🧤</div>
+        <div class="spotlight-details">
+          <div class="spotlight-label">Top Goalie</div>
+          <div class="spotlight-robot">${topKeeper.teamName} ${topKeeper.number}</div>
+          <div class="spotlight-team ${topKeeper.team}">${topKeeper.role} &bull; ${topKeeper.teamName}</div>
+        </div>
+        <div class="spotlight-count">${topKeeper.saves}</div>
+      </div>
+    `);
+  }
+
+  if (topShooter && topShooter.shots > 0) {
+    spotlights.push(`
+      <div class="summary-spotlight-card ${topShooter.team}">
+        <div class="spotlight-icon">🎯</div>
+        <div class="spotlight-details">
+          <div class="spotlight-label">Most Shots</div>
+          <div class="spotlight-robot">${topShooter.teamName} ${topShooter.number}</div>
+          <div class="spotlight-team ${topShooter.team}">${topShooter.role} &bull; ${topShooter.teamName}</div>
+        </div>
+        <div class="spotlight-count">${topShooter.shots}</div>
+      </div>
+    `);
+  }
+
+  summarySpotlights.innerHTML = spotlights.join('');
+
+  const vSaves = robots['violet-1']!.saves + robots['violet-2']!.saves;
+  const lSaves = robots['lime-1']!.saves + robots['lime-2']!.saves;
+  const vShots = robots['violet-1']!.shots + robots['violet-2']!.shots;
+  const lShots = robots['lime-1']!.shots + robots['lime-2']!.shots;
+  const vCards = robots['violet-1']!.penalties + robots['violet-2']!.penalties;
+  const lCards = robots['lime-1']!.penalties + robots['lime-2']!.penalties;
+
+  function renderCompRow(label: string, vVal: number, lVal: number): string {
+    const total = vVal + lVal;
+    const vPct = total > 0 ? (vVal / total) * 100 : 50;
+    const lPct = total > 0 ? (lVal / total) * 100 : 50;
+    return `
+      <div class="comparison-row">
+        <div class="comparison-header">
+          <span class="comp-num violet">${vVal}</span>
+          <span class="comp-label">${label}</span>
+          <span class="comp-num lime">${lVal}</span>
+        </div>
+        <div class="comp-bar">
+          <div class="comp-bar-fill violet" style="width: ${vPct}%"></div>
+          <div class="comp-bar-fill lime" style="width: ${lPct}%"></div>
+        </div>
+      </div>
+    `;
+  }
+
+  summaryTeams.innerHTML = [
+    renderCompRow('Goals', vScore, lScore),
+    renderCompRow('Saves', vSaves, lSaves),
+    renderCompRow('Shots', vShots, lShots),
+    renderCompRow('Penalties & Cards', vCards, lCards),
+  ].join('');
+
+  summaryRobotsBody.innerHTML = robotList
+    .map((r) => {
+      const isViolet = r.team === 'violet';
+      return `
+        <tr>
+          <td>
+            <div class="robot-cell">
+              <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${
+                isViolet ? 'var(--violet)' : 'var(--lime)'
+              }"></span>
+              ${r.teamName} ${r.number}
+            </div>
+          </td>
+          <td style="color:${isViolet ? 'var(--violet)' : 'var(--lime)'}; font-weight:600;">${r.teamName}</td>
+          <td><span class="role-pill ${r.role.toLowerCase()}">${r.role}</span></td>
+          <td style="font-weight:${r.goals > 0 ? '700' : '400'}; color:${r.goals > 0 ? '#4ade80' : 'inherit'};">${r.goals}</td>
+          <td style="font-weight:${r.saves > 0 ? '700' : '400'};">${r.saves}</td>
+          <td>${r.shots}</td>
+          <td style="color:${r.penalties > 0 ? '#f87171' : 'inherit'};">${r.penalties}</td>
+        </tr>
+      `;
+    })
+    .join('');
 }
 
 /**

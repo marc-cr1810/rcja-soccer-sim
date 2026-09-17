@@ -1016,7 +1016,13 @@ def approach_point(
     )
 
 
-def push_keeps_ball_in(ball_x: float, ball_z: float, push: float, reach: float = 320.0) -> bool:
+def push_keeps_ball_in(
+    ball_x: float,
+    ball_z: float,
+    push: float,
+    reach: float = 320.0,
+    attack_x: float | None = None,
+) -> bool:
     """Whether shoving the ball this way keeps it on the field for a bit.
 
     The ball leaving the playing area is rule 5.9's business and it costs a
@@ -1031,27 +1037,55 @@ def push_keeps_ball_in(ball_x: float, ball_z: float, push: float, reach: float =
     centre, so a push that parks the ball exactly on the line has not kept it
     in play, it has put it out by a rounding error - and the ball is still
     rolling when it gets there.
+
+    ``attack_x`` is the goal line being attacked, and passing it changes the
+    answer for exactly one family of pushes: the ones that score. The playing
+    area ends at |x| = 894, so a shot taken from closer in than ``reach``
+    tests as leaving it, and :func:`steer_ball_inside` then bends the only
+    push that was going to work off into the corner - from the one part of the
+    field where scoring is easiest. A ball that crosses the line between the
+    posts has not gone out under rule 5.9, it has gone in under 5.10.
+
+    Which goal is which has to be said rather than guessed, because the same
+    geometry at the other end is a push into our own net. Only ``attack_x`` is
+    ever tested, so the goal this robot defends is never exempt.
     """
+    if attack_x is not None:
+        dx = math.cos(push)
+        # Pointing at that goal line at all, and reaching it between the posts.
+        if (attack_x - ball_x) * dx > 0:
+            hit_z = ball_z + math.sin(push) * (attack_x - ball_x) / dx
+            if abs(hit_z) <= HALF_GOAL_WIDTH - BALL_RADIUS:
+                # The segment cannot have crossed a touchline on the way: z
+                # runs monotonically along a straight push, so the widest it
+                # gets is at one end or the other, and both are inside.
+                return True
     return (
         abs(ball_x + math.cos(push) * reach) <= HALF_LENGTH - BALL_RADIUS
         and abs(ball_z + math.sin(push) * reach) <= HALF_WIDTH - BALL_RADIUS
     )
 
 
-def steer_ball_inside(ball_x: float, ball_z: float, push: float) -> float:
+def steer_ball_inside(
+    ball_x: float, ball_z: float, push: float, attack_x: float | None = None
+) -> float:
     """Bend a push away from the nearest edge, by as little as will do.
 
     Returns the push unchanged when the ball is not near an edge, so it costs
     nothing in open play. Near one it rotates the push towards the middle of
     the field until the ball would survive the next third of a metre.
+
+    Pass ``attack_x`` - the goal line you are attacking - and a push that goes
+    in between the posts is left alone instead of being bent off the shot. See
+    :func:`push_keeps_ball_in`.
     """
-    if push_keeps_ball_in(ball_x, ball_z, push):
+    if push_keeps_ball_in(ball_x, ball_z, push, attack_x=attack_x):
         return push
     for step in range(1, 13):
         bend = step * math.pi / 12
         for side in (1.0, -1.0):
             candidate = wrap_angle(push + side * bend)
-            if push_keeps_ball_in(ball_x, ball_z, candidate):
+            if push_keeps_ball_in(ball_x, ball_z, candidate, attack_x=attack_x):
                 return candidate
     # Nowhere within reach is inside, which means the ball is already out.
     # Towards the middle is the only sensible answer left.

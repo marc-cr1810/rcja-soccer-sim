@@ -22,6 +22,21 @@
  * Nothing about resumability changes. A result is still written whole, once
  * every leg of a fixture has been played, so a hub killed with two fixtures in
  * flight writes neither and both are replayed as themselves.
+ *
+ * **And once somebody agrees it.** `confirmResult` sits between the last leg and
+ * the write, so at a venue a result is a decision rather than the side effect of
+ * a clock running out. Three things now leave a fixture unwritten and therefore
+ * replayable, and they are deliberately different: a referee abandoning it, a
+ * referee declining it at full time (replayed in this run), and the run dying
+ * (replayed on the next one).
+ *
+ * **And only once somebody opens it.** `openPregame` sits the other side of the
+ * match, before anything is spawned, so a pitch comes up when a referee is
+ * standing at it rather than when the loop gets round to it. That forces a
+ * distinction this file did not used to make: being **eligible** — your turn has
+ * come, your teams are free — is not the same as **occupying a slot**. A fixture
+ * waiting for a referee costs a venue nothing, and a venue with three pitches
+ * runs three of them however slow one referee is.
  */
 
 import type { MatchResult } from './match';
@@ -40,13 +55,45 @@ export interface PlayedLeg {
   submissions: Record<string, string>;
 }
 
+/** A referee's answer at full time: write this down, or play it again. */
+export type Confirmation = 'confirmed' | 'replay';
+
 export interface RunOptions {
   /** Play one leg of a fixture. Home is violet, away is lime. */
   playLeg: (fixture: Fixture, seed: SeedInput, leg: number) => Promise<PlayedLeg>;
-  /** Called before a fixture's first leg, for logging. */
+  /**
+   * Agreed by a human before it counts.
+   *
+   * Nothing is on disk until this resolves with `confirmed`, which is what makes
+   * a result a decision rather than a consequence of a clock running out. Left
+   * out — a batch `tournament`, every test that does not care — a fixture still
+   * commits itself the moment its last leg ends, exactly as before.
+   *
+   * `replay` writes nothing and hands the fixture back to the loop, which plays
+   * it again in this same run. Throwing leaves it unwritten too, but as a
+   * failure: not retried here, replayed on the next run.
+   */
+  confirmResult?: (fixture: Fixture, result: FixtureResult) => Promise<Confirmation>;
+  /**
+   * Opened by a human before anything is spawned.
+   *
+   * The mirror of `confirmResult`, at the other end of the match: nothing
+   * exists until this resolves — no arena, no child process, no sandboxed
+   * interpreters — so a fixture whose referee has not arrived costs the venue
+   * nothing at all. Left out, a fixture is played the moment its turn comes,
+   * exactly as before, which is what a batch `tournament` and every test want.
+   *
+   * Throwing leaves the fixture unwritten and unplayed, as a failure.
+   */
+  openPregame?: (fixture: Fixture) => Promise<void>;
+  /** Called when a fixture's turn has come and it is waiting to be opened. */
+  onFixtureDue?: (fixture: Fixture) => void;
+  /** Called once a fixture has a pitch and is about to play its first leg. */
   onFixtureStart?: (fixture: Fixture, played: number, total: number) => void;
   /** Called once a fixture's result is safely on disk. */
   onFixtureDone?: (fixture: Fixture, result: FixtureResult) => void;
+  /** Called when a played fixture was sent back to be played again. */
+  onFixtureReplay?: (fixture: Fixture) => void;
   /** Called when a fixture could not be played. It stays unwritten and replays. */
   onFixtureFailed?: (fixture: Fixture, error: Error) => void;
   /**
@@ -116,7 +163,32 @@ export async function runDraw(
     );
   };
 
-  const play = async (fixture: Fixture): Promise<void> => {
+  /**
+   * The pitches, handed straight from one fixture to the next.
+   *
+   * A slot used to be taken by the scheduler the instant a fixture started,
+   * which was the same moment it was spawned and so cost nothing to conflate.
+   * With a referee in front of the spawn they are different moments, and a
+   * fixture that is merely waiting to be opened must not be holding a pitch —
+   * otherwise one slow referee closes a field. Hand-off rather than a counter,
+   * so the fixture whose referee pressed first gets the next free pitch.
+   */
+  const queue: (() => void)[] = [];
+  let onPitch = 0;
+  const takeSlot = async (): Promise<void> => {
+    if (onPitch < slots) {
+      onPitch += 1;
+      return;
+    }
+    await new Promise<void>((go) => queue.push(go));
+  };
+  const releaseSlot = (): void => {
+    const next = queue.shift();
+    if (next) next();
+    else onPitch -= 1;
+  };
+
+  const playOut = async (fixture: Fixture): Promise<void> => {
     opts.onFixtureStart?.(fixture, results.length, draw.fixtures.length);
 
     const legs: LegRecord[] = [];
@@ -128,6 +200,15 @@ export async function runDraw(
 
     for (const [leg, seed] of fixture.seeds.entries()) {
       const played = await opts.playLeg(fixture, seed!, leg);
+      // An abandoned leg is not a leg. A referee who calls a match off has said
+      // it did not happen, and until now the scoreline on the board at that
+      // moment was written down and counted like any other — nothing outside
+      // `match.ts` ever read this flag. Failing here is what leaves the fixture
+      // unwritten, which is exactly what an abandoned fixture should look like.
+      if (played.result.abandoned) {
+        const why = played.result.abandonReason ?? 'no reason given';
+        throw new Error(`the match was abandoned (${why})`);
+      }
       legs.push({ seed: seed!, result: played.result });
       submissions = played.submissions;
     }
@@ -142,6 +223,22 @@ export async function runDraw(
       ...(opts.conditions ? { conditions: opts.conditions } : {}),
     };
 
+    // Agreed by a human before it counts. A clock running out is not a result;
+    // somebody saying so is. Whoever is asked holds the fixture — and its slot,
+    // and its arena — until they answer, which is the honest cost of the rule.
+    if (opts.confirmResult) {
+      const verdict = await opts.confirmResult(fixture, result);
+      if (verdict === 'replay') {
+        // Nothing written and nothing failed, so `startable()` finds this
+        // fixture again on the loop's next pass — it has no result, it is no
+        // longer in flight, and it was never added to `failed`. That is the
+        // whole of "play it again": the match is re-run this afternoon rather
+        // than noted for the next boot.
+        opts.onFixtureReplay?.(fixture);
+        return;
+      }
+    }
+
     // On disk before it counts. Everything above this line is replayable;
     // nothing below it is reached twice.
     await saveResult(root, draw, result);
@@ -149,8 +246,32 @@ export async function runDraw(
     opts.onFixtureDone?.(fixture, result);
   };
 
+  const play = async (fixture: Fixture): Promise<void> => {
+    // Nobody is on this pitch until somebody says so. Deliberately before the
+    // slot is taken: what a venue is short of is arenas, and a fixture waiting
+    // for its referee is not running one.
+    if (opts.openPregame) {
+      opts.onFixtureDue?.(fixture);
+      await opts.openPregame(fixture);
+    }
+
+    await takeSlot();
+    try {
+      await playOut(fixture);
+    } finally {
+      releaseSlot();
+    }
+  };
+
+  // Everything eligible is offered; how many of them are *played* at once is
+  // the slot semaphore's business. Without a referee in front of the spawn the
+  // two are the same thing, and bounding the offer by `slots` keeps a batch
+  // `tournament` behaving exactly as it always has rather than merely
+  // equivalently.
+  const offerLimit = opts.openPregame ? Number.POSITIVE_INFINITY : slots;
+
   for (;;) {
-    while (playing.size < slots) {
+    while (playing.size < offerLimit) {
       const fixture = startable();
       if (!fixture) break;
       busy.add(fixture.home);
@@ -174,6 +295,9 @@ export async function runDraw(
     if (playing.size === 0) break;
     // Whichever finishes first frees its teams and its slot, so the next
     // fixture can start without waiting for the other one still playing.
+    // Blocking here forever is the right answer, not a hang: if everything
+    // eligible has been offered and no referee has opened any of it, there is
+    // nothing this loop could usefully do instead.
     await Promise.race(playing.values());
   }
 

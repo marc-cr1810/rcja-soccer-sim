@@ -16,14 +16,28 @@
 
 import { MOUNT_RADIUS, mixOmni, openDrive, wrapAngle, type DriveSpec } from './drive';
 import { WHEEL_RADIUS } from './sensors';
-import { HALF_LENGTH, HALF_WIDTH, WALL_X, WALL_Z } from './field';
+import { HALF_LENGTH, HALF_WIDTH, PENALTY_DEPTH, PENALTY_WIDTH, WALL_X, WALL_Z } from './field';
 import { IR_REFERENCE_RANGE } from './sensors';
-import type { ActuatorFrame, SensorFrame } from './protocol';
+import type { ActuatorFrame, Blob, SensorFrame, TeamMessage } from './protocol';
 import type { Agent } from './agent';
+import { GoalFrame } from './frame';
 import { botRoster } from './bots';
 import type { MatchAgents } from './match';
 
 const ROBOT_RADIUS = 110;
+
+/*
+ * The field, as this agent works in it: `+x` is the goal being attacked.
+ *
+ * `GoalFrame` (src/frame.ts) turns the world so that is true in both halves,
+ * which is why these are constants rather than a sign on HALF_LENGTH. Rule
+ * 1.4/5.4 swaps ends at half-time and the code below does not change, because
+ * there is no attack direction in scope for it to change WITH - so there is
+ * none to forget. Every `defendX + upfield * d` this agent used to carry is
+ * now just a number.
+ */
+const GOAL_LINE = HALF_LENGTH;
+const OWN_LINE = -HALF_LENGTH;
 
 export type Role = 'striker' | 'goalie';
 
@@ -250,9 +264,44 @@ const SPIN_KD = 0.5;
  * gets taken forward, because a push with no component away from the wall just
  * scrapes the ball along it.
  */
-const EDGE_MARGIN = 260;
+const EDGE_MARGIN = 400;
 /** How hard a close wall bends the aim. Tuned on out-of-play counts. */
 const WALL_REPULSION = 1.4;
+
+/**
+ * How wide an unoccluded arc of the goal mouth has to be before a kick is
+ * admissible, radians. Below this the camera could be resolving noise on the
+ * blob edge. A keeper standing in the mouth splits one wide blob into two thin
+ * ones, which is exactly what a shot gate has to refuse.
+ */
+const BLOB_WIDTH_FLOOR = 0.03;
+
+/**
+ * How fresh a camera frame has to be before aiming or a shot gate trusts it.
+ * The camera runs at 30 FPS (~33 ms between frames), so two periods is the
+ * longest a reading can lag while still being the most recent one the sensor
+ * has — a robot cannot do better and should not do worse.
+ */
+const CAMERA_RECENT = 1 / 15;
+
+/** How long a radio message is live. Matches perception.ts's `MESSAGE_TTL`. */
+const MESSAGE_TTL = 0.4;
+
+/**
+ * What a robot tells its team mate over the radio, as JSON.
+ *
+ * Always carries where this robot is, and carries a ball sighting in this
+ * robot's own frame (bearing and range) when it has one it trusts. Everything
+ * is sent in the sender's frame because that is the frame the receiver can
+ * combine with its own heading: the two robots' one shared absolute is the
+ * compass, not a position either of them could trust.
+ */
+interface ReferenceMsg {
+  role: 'striker' | 'goalie';
+  x: number;
+  z: number;
+  ball: { bearing: number; range: number };
+}
 
 function clamp(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, v));
@@ -293,7 +342,9 @@ export interface ReferenceOptions {
   /**
    * Identity only - radio, name, scoreboard. NOT which goal to shoot at: ends
    * swap at half-time (rule 1.4/5.4), so attack direction is read fresh from
-   * `frame.attackDirection` every tick instead.
+   * `frame.attackDirection` every tick, by the `GoalFrame` this agent steers
+   * every coordinate through. Nothing below that transform is told which team
+   * this is, and nothing below it needs to be.
    */
   team: 'violet' | 'lime';
   number: 1 | 2;
@@ -315,8 +366,17 @@ export class ReferenceAgent implements Agent {
   private lastClock = 0;
   private thinkCredit = 0;
   private lastCommand: ActuatorFrame = { motors: [0, 0, 0, 0] };
-  /** Refreshed every tick from the frame; see `attackX`. */
-  private attackDirection: 1 | -1 = 1;
+  /**
+   * Which way this robot is playing, and the coordinates that follow from it.
+   *
+   * Refreshed every tick: ends swap at half-time, and everything below the
+   * transform in `decide` is written as though they never do.
+   */
+  private readonly goalFrame = new GoalFrame();
+  /** When the last camera frame was seen, so aiming is gated on freshness. */
+  private sinceCamera = Infinity;
+  /** How many consecutive ticks the ball has been held in the gate. */
+  private heldTicks = 0;
 
   constructor(opts: ReferenceOptions) {
     this.drive = opts.drive ?? openDrive();
@@ -332,6 +392,8 @@ export class ReferenceAgent implements Agent {
     this.lastClock = 0;
     this.thinkCredit = 0;
     this.lastCommand = { motors: [0, 0, 0, 0] };
+    this.sinceCamera = Infinity;
+    this.heldTicks = 0;
   }
 
   /**
@@ -346,21 +408,53 @@ export class ReferenceAgent implements Agent {
     return clamp(error * SPIN_KP - this.yawRate * SPIN_KD, -1, 1);
   }
 
-  /** Which way is the opponent's goal, in field radians. */
-  private get attackX(): number {
-    return this.attackDirection > 0 ? HALF_LENGTH : -HALF_LENGTH;
+
+  /** How long since the camera actually produced a frame. */
+  private get cameraRecent(): boolean {
+    return this.sinceCamera < CAMERA_RECENT;
   }
 
-  private get defendX(): number {
-    return -this.attackX;
+  /**
+   * You should have told me.
+   *
+   * A robot's best sensor is the other robot. This reads everything it heard,
+   * keeping only what survives the packet's short life. The message body is
+   * untrusted, so every field is checked before anything acts on it.
+   */
+  private relay(frame: SensorFrame): ReferenceMsg | null {
+    let best: TeamMessage | null = null;
+    for (const m of frame.messages) {
+      if (best === null || m.age < best.age) best = m;
+    }
+    if (!best || best.age > MESSAGE_TTL) return null;
+    const body = best.body as Record<string, unknown>;
+    if (!body || typeof body !== 'object') return null;
+    const ball = body.ball as Record<string, unknown> | null | undefined;
+    if (!ball || typeof ball !== 'object') return null;
+    if (!Number.isFinite(ball.bearing) || !Number.isFinite(ball.range)) {
+      return null;
+    }
+    const role = body.role === 'goalie' ? 'goalie' : 'striker';
+    return {
+      role,
+      x: Number(body.x) || 0,
+      z: Number(body.z) || 0,
+      ball: { bearing: ball.bearing as number, range: ball.range as number },
+    };
   }
 
   tick(frame: SensorFrame): ActuatorFrame {
-    this.attackDirection = frame.attackDirection;
+    this.goalFrame.update(frame);
     const dt = Math.max(1e-3, frame.clock - this.lastClock);
     this.lastClock = frame.clock;
     this.ball.update(frame, dt);
+    this.sinceCamera = frame.camera?.fresh ? 0 : this.sinceCamera + dt;
     this.yawRate = this.yaw.update(frame.encoders, dt);
+    if (frame.ballGate?.held) {
+      this.heldTicks++;
+    } else {
+      this.heldTicks = 0;
+    }
 
     /*
      * A weaker opponent thinks less often, as well as moving more slowly.
@@ -426,7 +520,7 @@ export class ReferenceAgent implements Agent {
      * rule allows; carrying is not.
      */
     if (frame.kickoff.pending && frame.kickoff.ours) {
-      if (frame.ballGate.held) {
+      if (frame.ballGate?.held) {
         return { motors: [0, 0, 0, 0], dribbler: 1, kicker: true };
       }
       if (frame.ball) {
@@ -446,25 +540,52 @@ export class ReferenceAgent implements Agent {
       return { motors: mixOmni(this.drive, escape, 1, 0), dribbler: 1 };
     }
 
-    const me = locate(frame);
+    /*
+     * The line between the two halves of this agent.
+     *
+     * `locate` answers in the field's own coordinates, because that is where
+     * the sensors put it - the compass zero faces the yellow goal all match
+     * and the walls do not move. Past here, `+x` is whichever goal this robot
+     * is attacking, and the second half is the first half again.
+     *
+     * The motor command needs no inverse on the way back out: every mixer call
+     * below is handed `something - heading`, and both were shifted by the same
+     * angle, so the difference is untouched.
+     */
+    const fix = locate(frame);
+    const [meX, meZ] = this.goalFrame.toFrame(fix.x, fix.z);
+    const me: Estimate = { x: meX, z: meZ, confidence: fix.confidence };
+    const heading = this.goalFrame.heading(frame.compass.heading);
     const seen = this.ball.seen(frame);
 
-    if (!seen) return this.hunt(frame);
-    return this.role === 'goalie' ? this.keep(frame, me, seen) : this.strike(frame, me, seen);
+    if (!seen) return this.hunt(frame, heading);
+    return this.role === 'goalie'
+      ? this.keep(frame, me, seen, heading)
+      : this.strike(frame, me, seen, heading);
   }
 
   /**
-   * Lost the ball: turn on the spot and look for it.
+   * Lost the ball: turn and look for it.
    *
    * Turning rather than driving is deliberate. The ring covers every direction,
    * so a robot that cannot see the ball is almost always being blocked rather
    * than facing the wrong way, and driving blind is how robots end up in the
    * out area under 5.7.1.6.
+   *
+   * The team mate's relay is the exception that makes a little forward motion
+   * worth it: when the other robot just told us where its own frame puts the
+   * ball, heading that way while scanning is not blind.
    */
-  private hunt(frame: SensorFrame): ActuatorFrame {
-    const towardsOwnHalf = wrapAngle(
-      Math.atan2(0, this.defendX) - frame.compass.heading,
-    );
+  private hunt(frame: SensorFrame, heading: number): ActuatorFrame {
+    const relay = this.relay(frame);
+    if (relay) {
+      return {
+        motors: mixOmni(this.drive, this.offTheWall(frame, relay.ball.bearing), 0.5 * this.skill, 0.35),
+        dribbler: 1,
+      };
+    }
+    // Our own goal is behind us in this frame, always, so PI is the way home.
+    const towardsOwnHalf = wrapAngle(Math.PI - heading);
     return {
       motors: mixOmni(this.drive, towardsOwnHalf, 0.25 * this.skill, 0.45),
       dribbler: 1,
@@ -482,11 +603,11 @@ export class ReferenceAgent implements Agent {
     frame: SensorFrame,
     me: Estimate,
     seen: { bearing: number; range: number },
+    heading: number,
   ): ActuatorFrame {
-    const heading = frame.compass.heading;
 
     /*
-     * Which way is their goal, in field radians.
+     * Which way is their goal, in the robot's own frame.
      *
      * This used to be worked out from an estimated position, and it was the
      * worst bug in the agent: `locate` falls back to the centre of the field
@@ -495,70 +616,135 @@ export class ReferenceAgent implements Agent {
      * not will happily push the ball into its own net. Against an opponent
      * that stood still it scored eleven own goals in two minutes.
      *
-     * The fix is to stop needing the position. The attacking direction is a
-     * fixed field bearing, the compass gives heading, and everything else can
-     * be done relative to the ball - so the striker now works in its own frame
-     * and only refines the aim when it is confident of where it is.
+     * The fix is to stop needing the position. The goal's own colour blobs are
+     * already in this robot's frame - the camera says where the opening is
+     * without the robot knowing where it is - and the compass gives heading,
+     * so the striker works in its own frame and only refines the aim when it
+     * is confident of where it is.
      */
-    const straightAtGoal = this.attackX > 0 ? 0 : Math.PI;
-    let toGoal = straightAtGoal;
-    if (me.confidence >= 1) {
+    let goalLocal: number | null = null;
+    if (this.cameraRecent) {
+      const seenGoals = this.goalFrame.goals(frame);
+      goalLocal = this.widestOpening(this.goalFrame.blobs(frame).attacking);
+      if (goalLocal === null && seenGoals.attacking) {
+        goalLocal = seenGoals.attacking.bearing;
+      }
+    }
+    /*
+     * The aim, as a bearing in this robot's own frame. The camera's blobs are
+     * already in that frame, so the camera path skips the heading. The position
+     * path needs the heading to bring the field-frame bearing home, and the
+     * compass fallback (the opponent goal straight down the field) is a field
+     * bearing equally. Mixing frames is how the original went wrong: feeding a
+     * robot-frame bearing through `bearing - heading` again points the striker
+     * somewhere the goal is not.
+     */
+    let toGoalLocal: number;
+    if (this.cameraRecent && goalLocal !== null) {
+      toGoalLocal = goalLocal;
+    } else {
+      let toGoal = 0; // The goal being attacked is straight up +x, in this frame.
+      if (me.confidence >= 1) {
+        const bx = me.x + Math.cos(heading + seen.bearing) * seen.range;
+        const bz = me.z + Math.sin(heading + seen.bearing) * seen.range;
+        toGoal = Math.atan2(-bz * 0.35, GOAL_LINE - bx);
+      }
+      toGoalLocal = wrapAngle(toGoal - heading);
+    }
+    toGoalLocal = this.offTheWall(frame, toGoalLocal);
+
+    const held = Boolean(frame.ballGate?.held);
+
+    // Rule 5.11: If the ball is inside our own penalty box, hold outside to let the keeper clear it.
+    if (me.confidence >= 1 && !held) {
       const bx = me.x + Math.cos(heading + seen.bearing) * seen.range;
       const bz = me.z + Math.sin(heading + seen.bearing) * seen.range;
-      // Bend the aim towards the middle of the goal rather than its near post.
-      toGoal = Math.atan2(-bz * 0.35, this.attackX - bx);
+      const depthInField = bx - OWN_LINE;
+      const inOurBox = depthInField > 0 && depthInField < (PENALTY_DEPTH + 40) && Math.abs(bz) < (PENALTY_WIDTH / 2 + 40);
+      if (inOurBox) {
+        const screenX = OWN_LINE + PENALTY_DEPTH + 140;
+        const screenZ = clamp(bz, -PENALTY_WIDTH / 2 + 50, PENALTY_WIDTH / 2 - 50);
+        const toScreen = wrapAngle(Math.atan2(screenZ - me.z, screenX - me.x) - heading);
+        const dist = Math.hypot(screenX - me.x, screenZ - me.z);
+        const screenSpeed = clamp(dist / 250, 0, 0.85) * this.skill;
+        return {
+          motors: mixOmni(this.drive, this.offTheWall(frame, toScreen), screenSpeed, this.spinTo(toGoalLocal)),
+          dribbler: 0,
+          kicker: false,
+          say: this.relayMsg(frame, 'striker', me),
+        };
+      }
     }
 
-    // Everything from here is in the robot's own frame: where the ball is,
-    // and which way round it the robot has to come.
-    const toGoalLocal = this.offTheWall(frame, wrapAngle(toGoal - heading));
-    /*
-     * How far round the ball the robot is from where it ought to be.
-     *
-     * Zero means directly behind the ball on the line to their goal, so that
-     * driving straight at it pushes it straight at the target. A right angle
-     * means beside it, where driving at it knocks it sideways.
-     *
-     * Steering off the line to the ball by a fraction of this angle turns the
-     * two cases into one continuous path: there is always some component
-     * towards the ball, so the robot spirals in rather than orbiting forever,
-     * and always some component round it, so it never arrives from the wrong
-     * side.
-     *
-     * This replaced a threshold - "is the standoff point within 90 mm yet?" -
-     * and the threshold was a defect rather than a rough edge. It sat on a
-     * noisy quantity, so it chattered between two different plans several
-     * times a second and the robot spent its time switching rather than
-     * arriving. It showed up from a long way off, too: a copy of this agent
-     * with its decision loop slowed to two thirds BEAT the full-rate original
-     * by 22 goals over 48 matches, because running at half the rate is a
-     * low-pass filter on the chatter. A controller that gets better when you
-     * slow it down is over-reacting somewhere, and this was the somewhere.
-     */
     const swing = wrapAngle(seen.bearing - toGoalLocal);
-    // Wider arcs close in, where there is no room left to correct.
-    const gain = clamp(0.6 + 120 / Math.max(seen.range, 100), 0.6, 1.4);
-    const bearing = this.offTheWall(
-      frame,
-      wrapAngle(seen.bearing + clamp(swing * gain, -1.9, 1.9)),
-    );
     const aligned = Math.abs(swing) < 0.35;
+    const gain = clamp(0.6 + 120 / Math.max(seen.range, 100), 0.6, 1.4);
+    const bearing = held
+      ? toGoalLocal
+      : this.offTheWall(frame, wrapAngle(seen.bearing + clamp(swing * gain, -1.9, 1.9)));
 
-    // Face the goal while doing it, so the dribbler and kicker point the right
-    // way when the ball arrives.
     const spin = this.spinTo(toGoalLocal);
-    // Full power down the line, a little less while swinging round, so the
-    // robot does not arrive at the ball still travelling sideways.
-    const speed = (aligned ? 1 : clamp(1.15 - Math.abs(swing) * 0.35, 0.6, 1)) * this.skill;
-
-    const goal = frame.camera.goals[this.attackDirection > 0 ? 'yellow' : 'cyan'];
-    const lined = goal !== null && Math.abs(goal.bearing) < 0.2;
+    const speed = (held || aligned ? 1 : clamp(1.15 - Math.abs(swing) * 0.35, 0.6, 1)) * this.skill;
+    const dribbler = (aligned || held || Math.abs(swing) < 0.8) ? 1 : 0;
+    const kicker = held && Math.abs(toGoalLocal) < 0.25;
 
     return {
       motors: mixOmni(this.drive, bearing, speed, spin),
-      dribbler: 1,
-      kicker: frame.ballGate.held && lined,
-      say: { role: 'striker' as const, sure: me.confidence >= 1 },
+      dribbler,
+      kicker,
+      say: this.relayMsg(frame, 'striker', me),
+    };
+  }
+
+  /**
+   * The widest unoccluded arc of the goal mouth, as a bearing to aim at.
+   *
+   * The camera breaks the mouth into blobs of goal colour; whatever is not a
+   * blob there is a robot standing in front. Aiming at the centre of the widest
+   * blob is aiming at the biggest gap, which is most of the job of finishing.
+   * Returns null when there is no opening the stripe can work with (the whole
+   * mouth hidden, or only slivers left after noise).
+   */
+  private widestOpening(blobs: Blob[]): number | null {
+    let best: Blob | null = null;
+    for (const b of blobs) {
+      if (b.end - b.start < BLOB_WIDTH_FLOOR) continue;
+      if (best === null || b.end - b.start > best.end - best.start) best = b;
+    }
+    return best ? wrapAngle((best.start + best.end) / 2) : null;
+  }
+
+  /**
+   * How wide the firing window has to be, radians.
+   *
+   * The robot is 220 mm across, so on the goal line the trajectory needs half
+   * a robot plus a little clearance on each side. `b.height` is the goal as
+   * the camera sees it — `CROSSBAR_HEIGHT / height` is roughly the range — so
+   * the margin scales with distance and stays sensible for a foreshortened
+   * sliver seen from close range. Clamping keeps a from-four-inches gap legal.
+   */
+  private shotMargin(b: Blob): number {
+    return clamp(90 / Math.max(140 / b.height, 1), 0.035, 0.12);
+  }
+
+  /** What to broadcast this tick: where this robot and the ball are. */
+  private relayMsg(
+    frame: SensorFrame,
+    role: 'striker' | 'goalie',
+    me: Estimate,
+  ): ActuatorFrame['say'] {
+    if (me.confidence < 0.5) return undefined;
+    const seen = this.ball.seen(frame, 0.3);
+    return {
+      role,
+      x: Math.round(me.x),
+      z: Math.round(me.z),
+      ball: seen
+        ? {
+            bearing: Math.round(seen.bearing * 1000) / 1000,
+            range: Math.round(Math.max(0, seen.range)),
+          }
+        : undefined,
     };
   }
 
@@ -595,79 +781,106 @@ export class ReferenceAgent implements Agent {
   }
 
   /**
-   * Keep goal: hold the line, track the ball across it, clear when it arrives.
+   * Keep goal: hold the line, track the ball across it, and go out to meet a
+   * ball that is close enough to save.
    *
    * Staying on the line rather than chasing is also what keeps the goalie out
    * of 5.11 multiple defence — two robots of one team inside their own penalty
    * area is a removal, so the keeper has a reason beyond tactics to stay put.
+   *
+   * The one forward motion that is allowed is the 5.8.2 one: when the ball is
+   * close and on the goal side, the keeper charges it rather than waiting for
+   * the striker to. That is the whole of the keeper's job — meet the ball at
+   * the line, take it off the striker, and clear it only when the camera says
+   * the far mouth is open enough to kick through.
    */
   private keep(
     frame: SensorFrame,
     me: Estimate,
     seen: { bearing: number; range: number },
+    heading: number,
   ): ActuatorFrame {
-    const heading = frame.compass.heading;
+
+    /*
+     * The camera puts a colour blob on the mouth, and if a keeper sits in
+     * it the blob splits into two thin ones, one near the keeper and one far
+     * — neither wide enough to kick through, which is what happens on the
+     * field when the keeper hides the goal. So the aimed clearance only fires
+     * when the far mouth is open where this keeper is facing. The ball leaves
+     * the gate dead ahead and downfield — the charge that fetched it spun this
+     * keeper to face upfield — so the window to check is the one in front.
+     */
+    const kick = (frame: SensorFrame): boolean => {
+      if (!frame.ballGate?.held) return false;
+      // If held for more than ~0.3s (15 ticks) and facing roughly upfield, clear the ball!
+      const facingUpfield = Math.cos(heading) > 0.4;
+      if (this.heldTicks >= 15 && facingUpfield) {
+        return true;
+      }
+      if (!this.cameraRecent) return false;
+      const blobs = this.goalFrame.blobs(frame).attacking;
+      for (const b of blobs) {
+        if (b.end - b.start < BLOB_WIDTH_FLOOR) continue;
+        const arc = wrapAngle((b.start + b.end) / 2);
+        const margin = this.shotMargin(b);
+        if (Math.abs(arc) < (b.end - b.start) / 2 - margin) {
+          return true;
+        }
+      }
+      return false;
+    };
+
     const bx = me.x + Math.cos(heading + seen.bearing) * seen.range;
     const bz = me.z + Math.sin(heading + seen.bearing) * seen.range;
 
-    // Sit just off the goal line, shadowing the ball across it.
-    const holdX = this.defendX + (this.attackX > 0 ? 180 : -180);
-    const holdZ = clamp(bz * 0.7, -190, 190);
+    // Sit just off the goal line, shadowing the ball across it. Use the
+    // relayed ball's lateral component when this robot can see the ball but
+    // has no position estimate of its own.
+    let holdZ: number;
+    if (me.confidence >= 0.5) {
+      holdZ = bz * 0.7;
+    } else {
+      const relay = this.relay(frame);
+      holdZ = relay ? clamp(relay.z * 0.7, -190, 190) : 0;
+    }
+    holdZ = clamp(holdZ, -190, 190);
 
-    /*
-     * Only charge the ball from the goal side of it.
-     *
-     * The first version charged whenever the ball was close, and scored 25 own
-     * goals in a match where the opposition stood still: a keeper that drives
-     * at a ball sitting between itself and its own net pushes it in. Which
-     * side of the ball the keeper is on matters more than how near it is, and
-     * this is the bug every team writes once.
-     */
-    const upfield = Math.sign(this.attackX);
-    const goalSide = upfield * (bx - me.x) > 0;
+    const goalSide = bx - me.x > 0;
     const ballIsClose = seen.range < 320;
 
     if (ballIsClose && goalSide) {
-      // Clear it: drive through the ball, away from our goal.
-      const away = wrapAngle(Math.atan2(-bz * 0.3, this.attackX - bx) - heading);
       return {
-        motors: mixOmni(this.drive, seen.bearing, 1 * this.skill, clamp(away * 0.8, -1, 1)),
+        motors: mixOmni(this.drive, seen.bearing, 1 * this.skill, clamp(this.spinTo(
+          wrapAngle(Math.atan2(-bz * 0.3, GOAL_LINE - bx) - heading),
+        ) * 0.8, -1, 1)),
         dribbler: 1,
-        kicker: frame.ballGate.held,
-        say: { role: 'goalie' as const, active: true },
+        kicker: kick(frame),
+        say: this.relayMsg(frame, 'goalie', me),
       };
     }
 
     if (!goalSide) {
-      /*
-       * The ball is behind us, between the keeper and its own net. Getting back
-       * past it is the only priority — but not straight back, which was the
-       * second version of this bug: driving at the goal line with the ball in
-       * the way simply carries it in. Go round, by aiming at a point offset
-       * across the field from the ball, on whichever side we are already
-       * nearer, and only then come back to the line.
-       */
       const detourSide = me.z >= bz ? 1 : -1;
       const detourZ = clamp(bz + detourSide * 300, -HALF_WIDTH + 140, HALF_WIDTH - 140);
-      const detourX = this.defendX + upfield * 120;
+      const detourX = OWN_LINE + 120;
       const away = wrapAngle(Math.atan2(detourZ - me.z, detourX - me.x) - heading);
       return {
         motors: mixOmni(this.drive, away, 1 * this.skill, 0),
         dribbler: 0,
-        say: { role: 'goalie' as const, active: false },
+        say: this.relayMsg(frame, 'goalie', me),
       };
     }
 
+    const holdX = OWN_LINE + 180;
     const toHold = wrapAngle(Math.atan2(holdZ - me.z, holdX - me.x) - heading);
     const distance = Math.hypot(holdX - me.x, holdZ - me.z);
     const speed = clamp(distance / 300, 0, 1) * this.skill;
-    // Face up the field so a save deflects forwards rather than inwards.
-    const spin = this.spinTo(wrapAngle(Math.atan2(0, this.attackX - me.x) - heading));
+    const spin = this.spinTo(wrapAngle(-heading));
 
     return {
       motors: mixOmni(this.drive, toHold, speed, spin),
       dribbler: 1,
-      say: { role: 'goalie' as const, active: false },
+      say: this.relayMsg(frame, 'goalie', me),
     };
   }
 }

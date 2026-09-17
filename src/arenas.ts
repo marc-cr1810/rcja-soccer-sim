@@ -349,6 +349,8 @@ export class ArenaSupervisor {
       away: string;
       /** `reference`, `examples`, or a bot-roster name. */
       bots: string;
+      homeBots?: string;
+      awayBots?: string;
       halfSeconds: number;
       league: LeagueId | null;
       gapSeconds: number;
@@ -387,6 +389,8 @@ export class ArenaSupervisor {
       args.push('--demo-home', demo.home);
       args.push('--demo-away', demo.away);
       args.push('--demo-bots', demo.bots);
+      if (demo.homeBots) args.push('--demo-home-bots', demo.homeBots);
+      if (demo.awayBots) args.push('--demo-away-bots', demo.awayBots);
       args.push('--demo-half', String(demo.halfSeconds));
       if (demo.league !== null) args.push('--demo-league', demo.league);
       args.push('--demo-gap', String(demo.gapSeconds));

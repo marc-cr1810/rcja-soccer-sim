@@ -352,6 +352,8 @@ export class World {
   commsEnabled: boolean;
   /** Timestamp of most recent packet sent per team, for visual feedback. */
   commsActivity: Record<TeamId, number> = { violet: -99, lime: -99 };
+  /** The robot that last had physical contact or kicked the ball, and when. */
+  lastBallTouch: { robotId: string; team: TeamId; at: number } | null = null;
 
   /**
    * Flips every physics tick. Robot-robot collisions and separation are
@@ -682,6 +684,7 @@ export class World {
   /** Put an arrangement out on the field and reset everything a restart resets. */
   private applyArrangement(arrangement: Arrangement, kickingOff: TeamId): void {
     this.restartCount++;
+    this.lastBallTouch = null;
     // A robot still serving a 5.7 stand-down does not get a free pass just
     // because some restart repositions everyone else - only returnRobot()
     // (5.7.4) brings it back, automatically or by a referee's hand. Without
@@ -834,6 +837,7 @@ export class World {
         ballDZ += ballTrial.z - ballBefore.z;
         ballDVX += ballTrial.vx - ballBefore.vx;
         ballDVZ += ballTrial.vz - ballBefore.vz;
+        this.lastBallTouch = { robotId: robot.id, team: robot.team, at: this.clock };
       }
     }
     this.ball.x += ballDX;
@@ -922,10 +926,15 @@ export class World {
     }
 
     this.score[scorer] += 1;
+    let scoringRobotId: string | undefined = undefined;
+    if (this.lastBallTouch && this.clock - this.lastBallTouch.at < 6.0 && this.lastBallTouch.team === scorer) {
+      scoringRobotId = this.lastBallTouch.robotId;
+    }
     this.emit({
       kind: 'goal',
       rule: '5.5.1',
       team: scorer,
+      robotId: scoringRobotId,
       message: `Goal to ${scorer === 'violet' ? 'Violet' : 'Lime'}. Ball struck the back wall of the goal.`,
     });
     if (this.autoResolve) this.kickOff(scorer === 'violet' ? 'lime' : 'violet');

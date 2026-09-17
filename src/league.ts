@@ -52,7 +52,7 @@ import { mergeSettings, type LeagueSettings, type SettingSource } from './settin
 import { readMachine, resolveBudget, type Budget, type Machine } from './capacity';
 import { totalUsage } from './usage';
 import { Accounts, type Account } from './accounts';
-import { can, GUEST, type Actor, type Capability } from './capabilities';
+import { can, capabilitiesOf, fixtureTarget, GUEST, type Actor, type Capability } from './capabilities';
 import { bearer, type Authority, type AuthRequest, type Submitter } from './authority';
 import { slugifyTeam } from './manifest';
 import {
@@ -64,6 +64,7 @@ import {
   type FixtureResult,
 } from './tournament';
 import { loadDraw, loadResults } from './tournament-store';
+import type { Confirmation } from './tournament-run';
 import { handleDocs } from './api/docs';
 import {
   CreateInviteBodySchema,
@@ -157,9 +158,53 @@ export interface LiveFixture {
 /** A fixture in progress: which arena holds it, and what it last said. */
 interface LiveArena {
   fixture: Fixture;
+  /** The draw it came from — a fixture id is unique only within one. */
+  drawId: string;
   arenaId: string;
   state: ArenaState | null;
 }
+
+/**
+ * A fixture played out, held back from disk until a referee agrees the score.
+ *
+ * The result is already in hand and complete; the only thing missing is a
+ * person saying so. Holding the unresolved promise here rather than in the draw
+ * runner is what lets an HTTP request finish it.
+ */
+interface AwaitingConfirmation {
+  fixture: Fixture;
+  drawId: string;
+  result: FixtureResult;
+  /** When full time was, for a page that wants to say how long it has waited. */
+  since: string;
+  settle: (verdict: Confirmation) => void;
+  fail: (why: Error) => void;
+}
+
+/**
+ * A fixture whose turn has come, waiting for a referee to open it.
+ *
+ * The mirror of `AwaitingConfirmation` at the other end of the match, and held
+ * for the same reason: the draw runner cannot be the thing an HTTP request
+ * finishes, so the unresolved promise lives here.
+ */
+interface AwaitingPregame {
+  fixture: Fixture;
+  drawId: string;
+  /** When it became due, for a page that wants to say how long it has waited. */
+  since: string;
+  settle: () => void;
+  fail: (why: Error) => void;
+}
+
+/** What a fixture is, in one word, everywhere it is asked. */
+export type FixtureState =
+  | 'played'
+  | 'confirming'
+  | 'playing'
+  | 'opening'
+  | 'due'
+  | 'upcoming';
 
 interface LeagueWsData {
   type: 'relay';
@@ -200,6 +245,32 @@ export class LeagueServer {
   readonly budget: Budget;
   /** Fixtures in progress, by fixture id. Set by whoever is running the draw. */
   private readonly liveFixtures = new Map<string, LiveArena>();
+  /**
+   * Fixtures played out and waiting for a referee to agree the score.
+   *
+   * Deliberately not keyed off the arena. The result is already in hand, so an
+   * admin stopping a finished arena from `/admin/arenas` must not lose it, and
+   * `/referee/m/<id>` is an address that works whether or not a child process
+   * is still alive behind it.
+   */
+  private readonly confirming = new Map<string, AwaitingConfirmation>();
+  /**
+   * Fixtures whose turn has come, waiting for a referee to open them.
+   *
+   * Nothing has been spawned for any of these: no arena, no child process, no
+   * sandboxed interpreters. That is the whole point of the slice — a pitch
+   * comes up when somebody is standing at it.
+   */
+  private readonly due = new Map<string, AwaitingPregame>();
+  /**
+   * Opened, but not up yet.
+   *
+   * The gap between a referee pressing the button and an arena existing: the
+   * draw runner may still be queueing for one of the venue's pitches. Small
+   * enough to miss and long enough to matter — without it this window reads as
+   * "not started", to somebody who has just started it.
+   */
+  private readonly opening = new Set<string>();
   /**
    * Something a field needs to be told, by arena id.
    *
@@ -391,6 +462,21 @@ export class LeagueServer {
   async close(): Promise<void> {
     this.closingLeague = true;
     this.stopDemoPoll();
+    // A hub going down with a fixture unconfirmed writes nothing, which is the
+    // same answer as a hub killed mid-match: the fixture replays as itself. It
+    // has to be said out loud rather than left to the process exiting, or a
+    // `runDraw` awaiting an answer never returns.
+    for (const [id, waiting] of [...this.confirming]) {
+      this.confirming.delete(id);
+      waiting.fail(new Error('the league server stopped before the result was confirmed'));
+    }
+    // And the same at the other end: a fixture nobody had opened yet is simply
+    // a fixture that has not been played, and saying so is what lets its
+    // `runDraw` return instead of waiting for a referee who has gone home.
+    for (const [id, waiting] of [...this.due]) {
+      this.due.delete(id);
+      waiting.fail(new Error('the league server stopped before the match was opened'));
+    }
     this.bunServer?.stop(true);
     // Every arena dies with the hub, which is the honest thing: a child holds a
     // physics loop and four sandboxed interpreters, and there is nothing to
@@ -410,7 +496,7 @@ export class LeagueServer {
    * process that holds it, and a fixture interrupted that way writes no result
    * and is simply replayed — which is what Phase 3 already guarantees.
    */
-  async openFixture(fixture: Fixture): Promise<string> {
+  async openFixture(fixture: Fixture, drawId: string): Promise<string> {
     // A fixture pre-empts practice, and it has to: without an explicit winner
     // the one-robot-one-place invariant deadlocks at the worst moment of the
     // day, when a team whose robot is still held by a field they walked away
@@ -419,17 +505,132 @@ export class LeagueServer {
       await this.preempt(slugifyTeam(team), `${fixture.home} v ${fixture.away}`);
     }
     const arena = await this.arenas.create({ kind: 'fixture' });
-    this.liveFixtures.set(fixture.id, { fixture, arenaId: arena.id, state: null });
+    this.opening.delete(fixture.id);
+    this.liveFixtures.set(fixture.id, { fixture, drawId, arenaId: arena.id, state: null });
     this.log(`[fixture ${fixture.id}] ${fixture.home} v ${fixture.away} in arena ${arena.id}`);
     return arena.id;
   }
 
   /** Stop a fixture's arena and take it off the front page. */
   closeFixture(fixtureId: string): void {
+    // Whatever else happens, it is no longer on its way up — a fixture that
+    // failed or was sent back to be played again never reached an arena, and
+    // this is the only place that hears about it.
+    this.opening.delete(fixtureId);
     const live = this.liveFixtures.get(fixtureId);
     if (!live) return;
     this.arenas.close(live.arenaId);
     this.liveFixtures.delete(fixtureId);
+  }
+
+  /**
+   * Hold a fixture, unspawned, until a referee opens it.
+   *
+   * The draw runner awaits this before anything exists, so an arena comes up
+   * when somebody is standing at that pitch rather than when the schedule gets
+   * round to it. It never times out, for the same reason the confirmation at
+   * the other end does not: a match nobody is refereeing should not start. An
+   * admin holds `match.control` over everything and can open any fixture from
+   * the same page if the assigned referee has not arrived.
+   *
+   * Costs the venue nothing while it waits — that is the difference between
+   * this gate and the one at full time.
+   */
+  awaitPregame(fixture: Fixture, drawId: string): Promise<void> {
+    return new Promise<void>((settle, fail) => {
+      this.due.set(fixture.id, {
+        fixture,
+        drawId,
+        since: new Date().toISOString(),
+        settle,
+        fail,
+      });
+      this.log(`[fixture ${fixture.id}] ready — waiting for a referee to open it`);
+    });
+  }
+
+  /**
+   * Hold a played fixture until a referee agrees the score.
+   *
+   * The draw runner awaits this between the last leg and the write, so nothing
+   * reaches disk — or the table — until somebody says so. It never times out:
+   * a result no referee ever looked at must not be able to reach a table, and
+   * an admin holds `match.control` over everything if the assigned referee has
+   * walked away. The cost is that the fixture keeps its arena and its slot
+   * while it waits, which is also what lets the referee go back and look.
+   */
+  awaitConfirmation(fixture: Fixture, drawId: string, result: FixtureResult): Promise<Confirmation> {
+    return new Promise<Confirmation>((settle, fail) => {
+      this.confirming.set(fixture.id, {
+        fixture,
+        drawId,
+        result,
+        since: new Date().toISOString(),
+        settle,
+        fail,
+      });
+      this.log(`[fixture ${fixture.id}] full time — waiting for a referee to confirm`);
+    });
+  }
+
+  /**
+   * What a fixture is, in one word, asked the same way by every page.
+   *
+   * `confirming` has to be tested before `playing`: a fixture waiting to be
+   * confirmed is still in `liveFixtures`, because its arena is deliberately
+   * left up for the referee to look at.
+   *
+   * The three before a match exists are the same question asked of three
+   * registries and they are genuinely different things to somebody in a hall:
+   * `due` is "your turn, open it when you are ready", `opening` is "somebody
+   * pressed it and the pitch is coming up", and `upcoming` is "not yet".
+   */
+  private stateOf(fixtureId: string, played: boolean): FixtureState {
+    if (played) return 'played';
+    if (this.confirming.has(fixtureId)) return 'confirming';
+    if (this.liveFixtures.has(fixtureId)) return 'playing';
+    if (this.opening.has(fixtureId)) return 'opening';
+    if (this.due.has(fixtureId)) return 'due';
+    return 'upcoming';
+  }
+
+  /** Which fixture an arena is playing, if it is playing one at all. */
+  private fixtureForArena(arenaId: string): LiveArena | null {
+    for (const live of this.liveFixtures.values()) {
+      if (live.arenaId === arenaId) return live;
+    }
+    return null;
+  }
+
+  /**
+   * The name a capability check knows an arena's match by.
+   *
+   * `undefined` for an arena playing no fixture — the demo, most of all. A
+   * targeted capability cannot be held over a match that is not in any draw,
+   * which leaves the demo to whoever holds `any`.
+   */
+  private targetForArena(arenaId: string): string | undefined {
+    const live = this.fixtureForArena(arenaId);
+    return live ? fixtureTarget(live.drawId, live.fixture.id) : undefined;
+  }
+
+  /**
+   * Is refereeing this person's job?
+   *
+   * Deliberately not "have they been given a match". This gates the referee's
+   * own pages, and a referee who has been assigned nothing yet needs to reach
+   * the page that tells them so — sending them to a team dashboard instead
+   * looks, at a venue, exactly like an account that does not work. It leaks
+   * nothing, because the page can only ever show them their own assignments,
+   * and every capability over an actual match stays named one fixture at a
+   * time.
+   *
+   * Asked of the capability table rather than of `actor.role`, so a role that
+   * is given `match.control` later is a referee here too without this being
+   * remembered.
+   */
+  private mayReferee(actor: Actor): boolean {
+    return capabilitiesOf(actor.role).includes('match.control');
   }
 
   // ------------------------------------------------------------------- demo
@@ -452,6 +653,8 @@ export class LeagueServer {
           home: demo.home,
           away: demo.away,
           bots: demo.bots,
+          homeBots: demo.homeBots,
+          awayBots: demo.awayBots,
           halfSeconds: demo.halfSeconds,
           league: demo.league,
           gapSeconds: demo.gapSeconds,
@@ -560,8 +763,8 @@ export class LeagueServer {
         fixtureId: '',
         arenaId: this.demoArena.arenaId,
         url: `/a/${this.demoArena.arenaId}/`,
-        home: this.settings.demo.home,
-        away: this.settings.demo.away,
+        home: state?.teams?.violet ?? this.settings.demo.home,
+        away: state?.teams?.lime ?? this.settings.demo.away,
         score: state?.score ?? { violet: 0, lime: 0 },
         clock: state?.clock ?? 0,
         half: state?.half ?? 1,
@@ -696,10 +899,10 @@ export class LeagueServer {
         return this.serveBundle(this.workspaceRoot, url.slice('/workspace'.length), 'workspace');
       }
       // The console itself lives on the arena playing the match — there is no
-      // single one any more. What is here is the list of matches this person
-      // may take, which Phase 11 replaces with their actual assignments.
+      // single one any more. What is here is the person's own assignments, so
+      // the door opens for anybody holding one and for an admin.
       if (url === '/referee' || url.startsWith('/referee/')) {
-        if (!can(actor, 'match.control')) return this.refuse(req, actor, '/referee/');
+        if (!this.mayReferee(actor)) return this.refuse(req, actor, '/referee/');
       }
       if (url === '/admin' || url.startsWith('/admin/')) {
         if (!can(actor, 'account.manage')) return this.refuse(req, actor, '/admin');
@@ -761,7 +964,11 @@ export class LeagueServer {
 
     const headers = new Headers(req.headers);
     if (rest === '/referee' || rest.startsWith('/referee/') || rest.startsWith('/referee-api/')) {
-      if (!can(actor, 'match.control')) return this.refuse(req, actor, `/a/${id}/referee/`);
+      // Named, not blanket: this is the one place that knows which match the
+      // arena is playing, so it is the one place the assignment can be checked.
+      if (!can(actor, 'match.control', this.targetForArena(id))) {
+        return this.refuse(req, actor, `/a/${id}/referee/`);
+      }
       const token = this.arenas.refereeTokenOf(id);
       if (token) headers.set('authorization', `Bearer ${token}`);
     }
@@ -1418,28 +1625,46 @@ export class LeagueServer {
       // A fixture's arena is also its place on the front page, so stopping one
       // has to take it off — otherwise the hall watches a card whose match is
       // no longer being played anywhere.
-      for (const [fixtureId, live] of this.liveFixtures) {
-        if (live.arenaId === id) this.liveFixtures.delete(fixtureId);
-      }
+      const playing = this.fixtureForArena(id);
+      if (playing) this.liveFixtures.delete(playing.fixture.id);
       const stopped = this.arenas.close(id);
       const account = this.accountFor(req);
       if (stopped && account) this.accounts.record(account.id, 'arena.kill', id, 'stopped an arena');
       return Response.json({ ok: stopped }, { status: stopped ? 200 : 404 });
     }
 
-    /**
-     * The matches a referee may take right now.
-     *
-     * Phase 11 replaces this with their actual assignments; until then it is
-     * every fixture in progress, which is the same list a referee at a venue
-     * with two pitches is looking at anyway.
-     */
     if (path === '/referee/fixtures' && req.method === 'GET') {
-      if (!can(actor, 'match.control')) return this.refuse(req, actor, '/referee');
-      return Response.json(
-        { ok: true, fixtures: this.live.map((one) => ({ ...one, console: `/a/${one.arenaId}/referee/` })) },
-        { status: 200 },
-      );
+      if (!this.mayReferee(actor)) return this.refuse(req, actor, '/referee');
+      return Response.json(await this.refereeFixtures(actor), { status: 200 });
+    }
+
+    if (path.startsWith('/referee/match/') && req.method === 'GET') {
+      if (!this.mayReferee(actor)) return this.refuse(req, actor, '/referee');
+      const answer = await this.refereeMatch(path.slice('/referee/match/'.length), actor);
+      return Response.json(answer.payload, { status: answer.status });
+    }
+
+    // Opening pre-game: the one request in this server that causes a child
+    // process to exist. Beside the GET above rather than under it — the GET is
+    // method-guarded, so nothing collides.
+    if (path.startsWith('/referee/match/') && path.endsWith('/open') && req.method === 'POST') {
+      if (!this.mayReferee(actor)) return this.refuse(req, actor, '/referee');
+      const fixtureId = path.slice('/referee/match/'.length, -'/open'.length);
+      return this.openPregame(req, fixtureId, actor);
+    }
+
+    // The two answers a referee can give at full time. Beside the GET above
+    // rather than under it: the GET is method-guarded, so nothing collides.
+    for (const [verb, verdict] of [
+      ['confirm', 'confirmed'],
+      ['replay', 'replay'],
+    ] as const) {
+      const suffix = `/${verb}`;
+      if (path.startsWith('/referee/match/') && path.endsWith(suffix) && req.method === 'POST') {
+        if (!this.mayReferee(actor)) return this.refuse(req, actor, '/referee');
+        const fixtureId = path.slice('/referee/match/'.length, -suffix.length);
+        return this.settleConfirmation(req, fixtureId, verdict, actor);
+      }
     }
 
     if (path === '/me' && req.method === 'GET') {
@@ -1450,7 +1675,7 @@ export class LeagueServer {
           account: account && publicAccount(account),
           can: {
             workspace: can(actor, 'team.workspace.write', actor.slug ?? undefined),
-            referee: can(actor, 'match.control'),
+            referee: this.mayReferee(actor),
             admin: can(actor, 'account.manage'),
           },
         },
@@ -1588,7 +1813,9 @@ export class LeagueServer {
     const upcoming = draw.fixtures
       .filter((f) => !played.has(f.id) && !playing.has(f.id))
       .slice(0, 6)
-      .map((f) => ({ id: f.id, home: f.home, away: f.away }));
+      // With its state, because "up next" and "up next, and the referee has not
+      // opened it yet" are different things to a hall watching a screen.
+      .map((f) => ({ id: f.id, home: f.home, away: f.away, state: this.stateOf(f.id, false) }));
     const recent = [...results]
       .sort((a, b) => b.completedAt.localeCompare(a.completedAt))
       .slice(0, 6)
@@ -1608,12 +1835,188 @@ export class LeagueServer {
     };
   }
 
+  /**
+   * A referee's day: every fixture in this draw they may take.
+   *
+   * Folded from the draw rather than read off the live arenas, because the
+   * question a referee has twenty minutes early — "which one is mine?" — is
+   * about a match that has not started, and `live` cannot answer it.
+   *
+   * The narrowing needs no role branching: an admin holds `match.control` over
+   * everything and keeps every fixture, a referee keeps the ones assigned to
+   * them. Two things fall out of asking it this way. An assignment naming some
+   * other draw never appears, because only this draw's fixtures are offered to
+   * the check; and the demo arena is not in any draw, so it stops being
+   * something a referee is invited to referee.
+   */
+  private async refereeFixtures(actor: Actor): Promise<unknown> {
+    const loaded = await this.tournament();
+    if (!loaded) return { ok: true, tournament: null, fixtures: [] };
+    const { draw, results } = loaded;
+    const byId = new Map(results.map((r) => [r.fixtureId, r]));
+
+    const mine = draw.fixtures.filter((f) => can(actor, 'match.control', fixtureTarget(draw.id, f.id)));
+    const cards = mine.map((f) => {
+      const live = this.liveFor(f.id);
+      const result = byId.get(f.id);
+      return {
+        id: f.id,
+        home: f.home,
+        away: f.away,
+        state: this.stateOf(f.id, result !== undefined),
+        ...(live ? { live, console: `/a/${live.arenaId}/referee/` } : {}),
+        ...(result ? resultCard(result) : {}),
+      };
+    });
+
+    // What wants them now, then what is on, then what is coming, then what is
+    // done — a referee in a hall reads the top of this list and walks
+    // somewhere. Every state has to be in here: a missing one sorts as `NaN`,
+    // which is not an ordering at all, and Slice E's `confirming` spent its
+    // first afternoon quietly unsorted for exactly that reason.
+    const order: Record<FixtureState, number> = {
+      confirming: 0,
+      playing: 1,
+      opening: 2,
+      due: 3,
+      upcoming: 4,
+      played: 5,
+    };
+    cards.sort((a, b) => order[a.state] - order[b.state]);
+    return { ok: true, tournament: summary(draw), fixtures: cards };
+  }
+
+  /**
+   * One fixture, at a name that does not move.
+   *
+   * An arena id is born with the match and is gone after it, so it is no use
+   * to a referee who wants to look at this before it starts, bookmark it, or
+   * be sent it. A fixture id is in the draw and outlives every process.
+   */
+  private async refereeMatch(fixtureId: string, actor: Actor): Promise<{ payload: unknown; status: number }> {
+    const loaded = await this.tournament();
+    if (!loaded) return { payload: { ok: false, reason: 'this server is not running a tournament' }, status: 200 };
+    const fixture = loaded.draw.fixtures.find((f) => f.id === fixtureId);
+    if (!fixture) return { payload: { ok: false, reason: 'no such fixture' }, status: 200 };
+    if (!can(actor, 'match.control', fixtureTarget(loaded.draw.id, fixture.id))) {
+      return { payload: { ok: false, reason: 'this match is not yours to referee' }, status: 403 };
+    }
+
+    const result = loaded.results.find((r) => r.fixtureId === fixtureId);
+    const live = this.liveFor(fixtureId);
+    const waiting = this.confirming.get(fixtureId);
+    return {
+      payload: {
+        ok: true,
+        tournament: summary(loaded.draw),
+        fixture: { id: fixture.id, home: fixture.home, away: fixture.away },
+        state: this.stateOf(fixtureId, result !== undefined),
+        live,
+        console: live ? `/a/${live.arenaId}/referee/` : null,
+        // The score being asked about, carried rather than read off the arena:
+        // an admin may have stopped the child process after full time, and the
+        // referee is still owed the number they are agreeing to.
+        final: waiting ? { ...resultCard(waiting.result), since: waiting.since } : null,
+      },
+      status: 200,
+    };
+  }
+
+  /**
+   * Open a fixture's pre-game, which is what spawns its arena.
+   *
+   * Narrowed by the same targeted check as everything else about a match, with
+   * the draw taken from the waiting fixture itself. Two shapes of answer that
+   * are not the obvious ones:
+   *
+   * - **Idempotent.** A referee who presses a button and sees nothing happen
+   *   presses it again, and a child process takes a moment to come up. A second
+   *   press on a match already opening or already open is a 200, not an error.
+   * - **404 for a fixture that is not due**, which reveals nothing the public
+   *   schedule does not already say.
+   */
+  private openPregame(req: Request, fixtureId: string, actor: Actor): Response {
+    if (this.opening.has(fixtureId) || this.liveFixtures.has(fixtureId)) {
+      return Response.json({ ok: true, already: true }, { status: 200 });
+    }
+    const waiting = this.due.get(fixtureId);
+    if (!waiting) {
+      return Response.json(
+        { ok: false, reason: 'that match is not ready to be opened yet' },
+        { status: 404 },
+      );
+    }
+    if (!can(actor, 'match.control', fixtureTarget(waiting.drawId, fixtureId))) {
+      return Response.json({ ok: false, reason: 'this match is not yours to referee' }, { status: 403 });
+    }
+
+    this.due.delete(fixtureId);
+    this.opening.add(fixtureId);
+    waiting.settle();
+
+    const account = this.accountFor(req);
+    if (account) {
+      this.accounts.record(
+        account.id,
+        'match.control',
+        fixtureTarget(waiting.drawId, fixtureId),
+        'opened pre-game',
+      );
+    }
+    this.log(`[fixture ${fixtureId}] opened by ${account?.slug ?? 'nobody in particular'}`);
+    return Response.json({ ok: true }, { status: 200 });
+  }
+
+  /**
+   * A referee's answer at full time: write this down, or play it again.
+   *
+   * Narrowed by the same targeted check as everything else about a match — the
+   * draw is taken from the waiting fixture itself, so a referee holding the
+   * same fixture id in a different division cannot answer for this one. A
+   * fixture nothing is waiting on is a 404 whoever asks, which reveals nothing
+   * the public schedule does not already say.
+   */
+  private settleConfirmation(
+    req: Request,
+    fixtureId: string,
+    verdict: Confirmation,
+    actor: Actor,
+  ): Response {
+    const waiting = this.confirming.get(fixtureId);
+    if (!waiting) {
+      return Response.json(
+        { ok: false, reason: 'nothing is waiting to be confirmed for that match' },
+        { status: 404 },
+      );
+    }
+    if (!can(actor, 'match.control', fixtureTarget(waiting.drawId, fixtureId))) {
+      return Response.json({ ok: false, reason: 'this match is not yours to referee' }, { status: 403 });
+    }
+
+    this.confirming.delete(fixtureId);
+    waiting.settle(verdict);
+
+    const account = this.accountFor(req);
+    if (account) {
+      this.accounts.record(
+        account.id,
+        'match.control',
+        fixtureTarget(waiting.drawId, fixtureId),
+        verdict === 'confirmed' ? 'confirmed the result' : 'sent the match back to be played again',
+      );
+    }
+    this.log(
+      `[fixture ${fixtureId}] ${verdict === 'confirmed' ? 'confirmed' : 'to be played again'}` +
+        ` by ${account?.slug ?? 'nobody in particular'}`,
+    );
+    return Response.json({ ok: true, verdict }, { status: 200 });
+  }
+
   private async schedule(): Promise<unknown> {
     const loaded = await this.tournament();
     if (!loaded) return { ok: true, tournament: null, fixtures: [] };
     const { draw, results } = loaded;
     const byId = new Map(results.map((r) => [r.fixtureId, r]));
-    const playing = new Set(this.live.map((one) => one.fixtureId));
     return {
       ok: true,
       tournament: summary(draw),
@@ -1623,7 +2026,7 @@ export class LeagueServer {
           id: f.id,
           home: f.home,
           away: f.away,
-          state: result ? 'played' : playing.has(f.id) ? 'playing' : 'upcoming',
+          state: this.stateOf(f.id, result !== undefined),
           ...(result ? resultCard(result) : {}),
         };
       }),
@@ -1650,7 +2053,7 @@ export class LeagueServer {
       ok: true,
       tournament: summary(loaded.draw),
       fixture: { id: fixture.id, home: fixture.home, away: fixture.away, seeds: fixture.seeds },
-      state: result ? 'played' : live ? 'playing' : 'upcoming',
+      state: this.stateOf(fixtureId, result !== undefined),
       live,
       record: result
         ? {
@@ -1665,6 +2068,7 @@ export class LeagueServer {
               calls: leg.result.calls,
               events: leg.result.events,
               refereeActions: leg.result.refereeActions,
+              robotStats: leg.result.robotStats,
             })),
           }
         : null,
@@ -1890,8 +2294,12 @@ export function accountsAuthority(accounts: Accounts): Authority {
     workspaces: true,
 
     async referee(req) {
+      // A world asks only whether this person referees at all — it is holding
+      // one match and has no draw to name it by. Which match they may take is
+      // decided by the hub, before the request is forwarded here.
       const found = actorOf(req);
-      return found !== null && can(found.actor, 'match.control');
+      if (found === null) return false;
+      return can(found.actor, 'match.control') || accounts.hasAssignment(found.account.id);
     },
 
     async team(req) {

@@ -166,6 +166,8 @@ export interface MatchOptions {
    * play.
    */
   observe?: (match: Match) => void;
+  /** Seconds until the next match will automatically start (e.g. in a demo arena). */
+  nextMatchIn?: number;
 }
 
 /**
@@ -193,11 +195,18 @@ export interface ScoreCorrection {
   at: number;
 }
 
+export interface RobotStats {
+  goals: number;
+  saves: number;
+  shots: number;
+  penalties: number;
+}
+
 export interface MatchResult {
   score: Record<TeamId, number>;
   /** Seconds of match time played. */
   clock: number;
-  goals: { team: TeamId; at: number; half: 1 | 2 }[];
+  goals: { team: TeamId; at: number; half: 1 | 2; robotId?: string }[];
   /** Per-robot connection health, for the match record. */
   slots: Record<string, ReturnType<AgentSlot['report']>>;
   /**
@@ -223,6 +232,8 @@ export interface MatchResult {
   /** Whether a referee ended the match early rather than it running full time. */
   abandoned: boolean;
   abandonReason?: string;
+  /** Performance statistics per robot seat. */
+  robotStats?: Record<string, RobotStats>;
 }
 
 interface Slot {
@@ -294,7 +305,7 @@ export class Match {
    * inside a single half - the granularity a mercy rule needs.
    */
   private slotOrderFlipped = false;
-  private readonly goals: { team: TeamId; at: number; half: 1 | 2 }[] = [];
+  private readonly goals: { team: TeamId; at: number; half: 1 | 2; robotId?: string }[] = [];
   private lastScore = { violet: 0, lime: 0 };
   private readonly calls: Record<string, number> = {};
   private readonly eventLog: MatchEvent[] = [];
@@ -309,6 +320,28 @@ export class Match {
   private abandoned = false;
   private abandonReason: string | undefined;
   private hasKickedOffThisHalf = false;
+  readonly robotStats: Record<string, RobotStats> = {
+    'violet-1': { goals: 0, saves: 0, shots: 0, penalties: 0 },
+    'violet-2': { goals: 0, saves: 0, shots: 0, penalties: 0 },
+    'lime-1': { goals: 0, saves: 0, shots: 0, penalties: 0 },
+    'lime-2': { goals: 0, saves: 0, shots: 0, penalties: 0 },
+  };
+  private shotInFlight: {
+    targetGoal: 'cyan' | 'yellow';
+    shooterId?: string;
+    at: number;
+  } | null = null;
+  private readonly lastSaveAt: Record<string, number> = {};
+  private readonly lastShotAt: Record<string, number> = {};
+
+  private ensureStats(id: string): RobotStats {
+    let s = this.robotStats[id];
+    if (!s) {
+      s = { goals: 0, saves: 0, shots: 0, penalties: 0 };
+      this.robotStats[id] = s;
+    }
+    return s;
+  }
 
   constructor(opts: MatchOptions) {
     const league = getLeague(opts.league ?? 'open');
@@ -542,6 +575,9 @@ export class Match {
   private fire(robot: Robot): void {
     this.world.ball.vx = Math.cos(robot.heading) * KICK_SPEED;
     this.world.ball.vz = Math.sin(robot.heading) * KICK_SPEED;
+    this.world.lastBallTouch = { robotId: robot.id, team: robot.team, at: this.world.clock };
+    this.ensureStats(robot.id).shots++;
+    this.lastShotAt[robot.id] = this.world.clock;
   }
 
   /**
@@ -578,10 +614,75 @@ export class Match {
   step(dt: number): void {
     this.tickControl(dt, true);
     this.dribble(dt);
+    this.detectShotBeforeStep();
     this.world.step(dt);
+    this.detectSaveAfterStep();
     this.recordGoals();
     this.recordCalls();
     this.observer?.(this);
+  }
+
+  private detectShotBeforeStep(): void {
+    const ball = this.world.ball;
+    const speed = Math.hypot(ball.vx, ball.vz);
+    if (speed < 450) return;
+
+    // Check if moving towards cyan (-1200)
+    if (ball.vx < -350) {
+      const t = (-1200 - ball.x) / ball.vx;
+      if (t > 0 && t < 2.2) {
+        const crossZ = ball.z + ball.vz * t;
+        if (Math.abs(crossZ) < 250) {
+          const shooterId = this.world.lastBallTouch?.robotId;
+          this.shotInFlight = { targetGoal: 'cyan', shooterId, at: this.world.clock };
+          if (shooterId && (this.world.clock - (this.lastShotAt[shooterId] ?? -99) > 1.0)) {
+            this.lastShotAt[shooterId] = this.world.clock;
+            this.ensureStats(shooterId).shots++;
+          }
+        }
+      }
+    } else if (ball.vx > 350) {
+      // Check if moving towards yellow (+1200)
+      const t = (1200 - ball.x) / ball.vx;
+      if (t > 0 && t < 2.2) {
+        const crossZ = ball.z + ball.vz * t;
+        if (Math.abs(crossZ) < 250) {
+          const shooterId = this.world.lastBallTouch?.robotId;
+          this.shotInFlight = { targetGoal: 'yellow', shooterId, at: this.world.clock };
+          if (shooterId && (this.world.clock - (this.lastShotAt[shooterId] ?? -99) > 1.0)) {
+            this.lastShotAt[shooterId] = this.world.clock;
+            this.ensureStats(shooterId).shots++;
+          }
+        }
+      }
+    }
+  }
+
+  private detectSaveAfterStep(): void {
+    if (!this.shotInFlight) return;
+    if (this.world.clock - this.shotInFlight.at > 2.5) {
+      this.shotInFlight = null;
+      return;
+    }
+    const targetGoal = this.shotInFlight.targetGoal;
+    const defTeam: TeamId = this.world.defendingGoal('violet') === targetGoal ? 'violet' : 'lime';
+    const ball = this.world.ball;
+
+    for (const robot of this.world.robots) {
+      if (robot.team !== defTeam || robot.removed) continue;
+      const inDefArea = Math.abs(robot.x) > 1200 - 450;
+      if (!inDefArea && !robot.isGoalie) continue;
+
+      const dist = Math.hypot(robot.x - ball.x, robot.z - ball.z);
+      if (dist <= robot.radius + ball.radius + 18) {
+        if (this.world.clock - (this.lastSaveAt[robot.id] ?? -99) > 1.2) {
+          this.lastSaveAt[robot.id] = this.world.clock;
+          this.ensureStats(robot.id).saves++;
+        }
+        this.shotInFlight = null;
+        break;
+      }
+    }
   }
 
   /** Run the control pass at its own cadence, whatever the physics is doing. */
@@ -619,6 +720,9 @@ export class Match {
       const event = events[i]!;
       this.calls[event.kind] = (this.calls[event.kind] ?? 0) + 1;
       this.eventLog.push(event);
+      if (event.robotId && (event.kind === 'possible-damaged' || event.kind === 'illegal-kickoff')) {
+        this.ensureStats(event.robotId).penalties++;
+      }
     }
     this.lastSeenEvent = events[events.length - 1];
   }
@@ -631,7 +735,13 @@ export class Match {
     for (const team of ['violet', 'lime'] as const) {
       while (this.world.score[team] > this.lastScore[team]) {
         this.lastScore[team]++;
-        this.goals.push({ team, at: this.world.clock, half: this.world.half });
+        this.shotInFlight = null;
+        const lastGoalEvent = [...this.world.events].reverse().find((e) => e.kind === 'goal' && e.team === team);
+        const robotId = lastGoalEvent?.robotId;
+        this.goals.push({ team, at: this.world.clock, half: this.world.half, robotId });
+        if (robotId) {
+          this.ensureStats(robotId).goals++;
+        }
       }
     }
   }
@@ -753,6 +863,7 @@ export class Match {
   removeRobot(robotId: string, rule: string, reason: string): void {
     this.world.removeRobot(robotId, rule, reason);
     this.recordRefereeAction('remove-robot', `${robotId} (${rule}): ${reason}`);
+    this.ensureStats(robotId).penalties++;
   }
 
   /** Rule 5.7.4: return a robot once the referee is satisfied it is fixed. Refuses early. */
@@ -958,6 +1069,12 @@ export class Match {
       scoreCorrections: [...this.scoreCorrections],
       abandoned: this.abandoned,
       abandonReason: this.abandonReason,
+      robotStats: {
+        'violet-1': { ...this.ensureStats('violet-1') },
+        'violet-2': { ...this.ensureStats('violet-2') },
+        'lime-1': { ...this.ensureStats('lime-1') },
+        'lime-2': { ...this.ensureStats('lime-2') },
+      },
     };
   }
 }

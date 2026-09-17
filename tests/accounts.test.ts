@@ -207,9 +207,12 @@ describe('who may do what', () => {
     expect(can(act, 'team.submit')).toBe(false);
   });
 
-  it('lets a referee control a match but not administer anything', () => {
-    expect(can(referee, 'match.control')).toBe(true);
-    expect(can(referee, 'match.abandon')).toBe(true);
+  it('gives a referee with no assignment no match to control', () => {
+    // The whole reach of `assigned`: the role carries the capability, holding
+    // it over nothing until a fixture is named.
+    expect(can(referee, 'match.control')).toBe(false);
+    expect(can(referee, 'match.control', 'round-1:act-robotics-v-nsw-lightning')).toBe(false);
+    expect(can(referee, 'match.abandon')).toBe(false);
     expect(can(referee, 'account.manage')).toBe(false);
     expect(can(referee, 'team.submit', 'act-robotics')).toBe(false);
   });

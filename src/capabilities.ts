@@ -31,10 +31,10 @@ export function isRole(value: string): value is Role {
  * How far a capability reaches.
  *
  * - `own` — only things belonging to this account, matched by slug.
- * - `assigned` — only things this account has been assigned to. Nothing is
- *   assigned to anybody until Phase 11 builds referee assignments, so this
- *   resolves to false today; it is defined now because leaving it out would
- *   mean threading a second concept through every check later.
+ * - `assigned` — only things this account has been assigned to, named one at a
+ *   time by a targeted grant. A role holding a capability at this scope holds
+ *   it over nothing until something assigns it; that is the point, and it is
+ *   why the blanket form has to fail.
  * - `any` — everything of that kind.
  */
 export type Scope = 'own' | 'assigned' | 'any';
@@ -102,12 +102,10 @@ export const GUEST: Actor = { id: null, role: 'guest', slug: null, grants: [] };
 /**
  * The capability table from END-STATE.md, as code.
  *
- * One deliberate looseness, recorded here rather than left to be discovered:
- * a referee's match capabilities are `any` rather than `assigned`, because
- * nothing assigns a referee to a fixture until Phase 11 and `any` is exactly
- * the reach the hand-issued referee token has today. Narrowing it later moves
- * from too-permissive to correct, which is the safe direction; granting
- * `assigned` now would mean no referee could kick anything off at all.
+ * A referee's match capabilities are `assigned`, which means they are held
+ * over nothing at all until `assignments` names a fixture. The blanket reach
+ * they used to carry is gone: a referee at a venue with two pitches controls
+ * the match they were given and not the one on the next pitch over.
  */
 const ROLE_CAPABILITIES: Record<Role, Partial<Record<Capability, Scope>>> = {
   guest: {
@@ -134,11 +132,12 @@ const ROLE_CAPABILITIES: Record<Role, Partial<Record<Capability, Scope>>> = {
     'results.read': 'any',
     'field.open': 'any',
     'field.join': 'any',
-    // `any` until Phase 11 — see the note above.
-    'fixture.setup': 'any',
-    'match.control': 'any',
-    'match.score.correct': 'any',
-    'match.abandon': 'any',
+    // Held over an assigned fixture and nothing else. `assignedCapabilities`
+    // reads these back, so this table stays the only place the list lives.
+    'fixture.setup': 'assigned',
+    'match.control': 'assigned',
+    'match.score.correct': 'assigned',
+    'match.abandon': 'assigned',
   },
   admin: {
     'match.watch': 'any',
@@ -167,6 +166,30 @@ const ROLE_CAPABILITIES: Record<Role, Partial<Record<Capability, Scope>>> = {
 /** Every capability a role carries, for showing a person what they can do. */
 export function capabilitiesOf(role: Role): Capability[] {
   return Object.keys(ROLE_CAPABILITIES[role]) as Capability[];
+}
+
+/**
+ * The capabilities a role holds only over what it is assigned.
+ *
+ * Read back out of the table rather than written down a second time, so that
+ * flipping a capability to `assigned` is the whole of the change — an
+ * assignment starts granting it with nothing else edited.
+ */
+export function assignedCapabilities(role: Role): Capability[] {
+  return Object.entries(ROLE_CAPABILITIES[role])
+    .filter(([, scope]) => scope === 'assigned')
+    .map(([capability]) => capability as Capability);
+}
+
+/**
+ * What a fixture is called when it is the thing a capability is about.
+ *
+ * A fixture's own id is `home-v-away` and is unique only inside its own draw,
+ * so the draw has to be part of the name or two divisions can hand one referee
+ * somebody else's match.
+ */
+export function fixtureTarget(drawId: string, fixtureId: string): string {
+  return `${drawId}:${fixtureId}`;
 }
 
 /**
@@ -213,8 +236,10 @@ function satisfies(
       // No target means "anything of this kind", which `own` cannot promise.
       return target !== undefined && actor.slug !== null && target === actor.slug;
     case 'assigned':
-      // Phase 11. Nothing is assigned to anybody yet, and pretending otherwise
-      // would be a check that passes for the wrong reason.
+      // An assignment arrives as a grant naming its fixture, which the early
+      // return above answers. Reaching here means the blanket form was asked
+      // for instead, and holding a capability over everything is exactly what
+      // being assigned is not.
       return false;
   }
 }

@@ -1126,7 +1126,14 @@ function aggregate(
  * ignored, and a robot that is 2% worse than ideal at something is a robot
  * that is fine.
  */
-function diagnose(r: BenchResult): Finding[] {
+/**
+ * Everything worth telling a team about a run, worst first.
+ *
+ * Exported so the calibration of the gates can be tested against made-up
+ * scorelines. A finding that never fires is as useless as one that always
+ * does, and neither shows up in a run against a robot that plays well.
+ */
+export function diagnose(r: BenchResult): Finding[] {
   const found: Finding[] = [];
   const add = (f: Finding): void => {
     found.push(f);
@@ -1399,6 +1406,72 @@ function diagnose(r: BenchResult): Finding[] {
       message: `no goals in ${r.matches} matches against ${r.opponent}.`,
     });
   }
+  /*
+   * The two ends of the field are the same game. Is this program playing them
+   * that way?
+   *
+   * Rule 1.4/5.4 swaps ends at half-time and nothing else about the match
+   * changes, so for a team under test half 1 and half 2 ARE its two attack
+   * directions - which makes the split already in `scores` the measurement,
+   * with no extra matches to play. It is a weak measurement and it is reported
+   * as one: goals inside a single match are not independent, so one runaway
+   * half contributes several correlated goals and the totals overstate how
+   * much has actually been seen. The gate is deliberately coarse for that
+   * reason, and the wording asks rather than concludes.
+   *
+   * It is still worth saying. The defect it looks for is silent - a robot with
+   * a sign missing plays a perfectly competent half and an incoherent one, and
+   * the half it plays well is whichever end the author happened to test at.
+   *
+   * Skipped for `--team both`: then the tested programs are on both sides of
+   * the match, both halves contain both attack directions, and the split means
+   * nothing.
+   */
+  const onBothSides =
+    r.tested.some((id) => id.startsWith('violet')) && r.tested.some((id) => id.startsWith('lime'));
+  const halves = r.scores.filter((s) => s.half1 && s.half2);
+  if (!onBothSides && halves.length >= 3) {
+    const oneEnd = halves.reduce((n, s) => n + s.half1!.for, 0);
+    const otherEnd = halves.reduce((n, s) => n + s.half2!.for, 0);
+    const total = oneEnd + otherEnd;
+    const gap = Math.abs(oneEnd - otherEnd);
+    /*
+     * Scale the bar with the evidence, rather than picking a ratio.
+     *
+     * A fixed ratio is wrong at both ends of the sample size. "Three quarters
+     * of the goals at one end" fires on 7-3, which is a coin landing the same
+     * way ten times out of a possible thirty-four in a hundred - and, tested
+     * against the run that started all this, it does NOT fire on 82-33, which
+     * was a real bug and is only 71%. A ratio cannot tell those apart because
+     * it throws away `total`.
+     *
+     * Two standard deviations of a fair coin is `sqrt(total)`; the extra half
+     * again is for goals inside a match not being independent, which makes the
+     * raw count overstate how much has been seen. So: `3 * sqrt(total)`. That
+     * fires on 82-33 (gap 49 against a bar of 32), stays quiet on the same
+     * agent after the fix (gap 15 against 33), quiet on 7-3, and quiet on a
+     * balanced two hundred - which is the behaviour wanted from all four.
+     */
+    if (total >= 10 && gap >= 3 * Math.sqrt(total)) {
+      add({
+        severity: 'low',
+        subject: 'team',
+        code: 'one-sided',
+        message:
+          `scored ${oneEnd} attacking one end and ${otherEnd} attacking the other ` +
+          `(${total} goals over ${halves.length} matches). Nothing about the game changes at ` +
+          `half-time except which way you are going, so a gap this size is worth a look - ` +
+          `though goals in one match lean on each other, so treat it as a question and not a verdict.`,
+        advice:
+          'Every rule that reads an x or a z needs to know which way you are attacking, and each ' +
+          'one signed by hand is a chance to miss one. Work in attack-relative coordinates ' +
+          'instead: GoalFrame.to_frame() turns the field so the goal you are shooting at is ' +
+          'always at +x, and both halves become the same code with no sign to remember. See ' +
+          '"You change ends at half-time, and your code does not" in python/README.md.',
+      });
+    }
+  }
+
   const spread = r.scores.map((s) => s.for - s.against);
   if (r.matches > 2 && Math.min(...spread) < 0 && Math.max(...spread) > 0) {
     add({

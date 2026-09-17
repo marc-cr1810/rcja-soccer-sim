@@ -26,7 +26,7 @@ import { DEFAULT_OPTIONS, formatBench, runBench, type BenchResult } from './benc
 import { slugifyTeam } from './manifest';
 import { isLeagueId, type LeagueId } from './leagues';
 import { hashSubmission } from './submission';
-import { formatTable, makeDraw, type Draw } from './tournament';
+import { formatTable, makeDraw, type Draw, type Fixture, type FixtureResult } from './tournament';
 import { listEntrants, loadDraw, loadResults, saveDraw } from './tournament-store';
 import { runDraw } from './tournament-run';
 import { getVersion } from './version';
@@ -473,17 +473,8 @@ async function arena(flags: Map<string, string>): Promise<void> {
 /** The demo arena: football for a hall screen, started by hand or by a hub. */
 async function demoArena(flags: Map<string, string>): Promise<void> {
   const bots = flags.get('demo-bots') ?? 'reference';
-  if (bots !== 'reference' && bots !== 'examples') {
-    // `agentsFor` throws rather than exits so a library is never the thing that
-    // kills its host — but this is the CLI, and a typo'd bot name should be a
-    // clean exit with the roster on the screen, not a stack trace.
-    try {
-      agentsFor(bots);
-    } catch (err) {
-      console.error(`  ${(err as Error).message}`);
-      process.exit(1);
-    }
-  }
+  const homeBots = flags.get('demo-home-bots');
+  const awayBots = flags.get('demo-away-bots');
 
   const teams = {
     violet: flags.get('demo-home') ?? 'Violet',
@@ -499,15 +490,23 @@ async function demoArena(flags: Map<string, string>): Promise<void> {
     realtime: true,
     viewHz: num(flags, 'view-hz', 60),
     pythonLibDir: pythonLibDir(),
+    submissionsDir: flags.get('submissions'),
+    scratchDir: flags.has('scratch') ? resolve(flags.get('scratch')!) : undefined,
     control: (req, url) => demo?.handle(req, url) ?? null,
   });
 
   demo = new DemoArena(server, {
     teams,
     bots,
+    homeBots,
+    awayBots,
+    submissionsDir: flags.get('submissions'),
+    pythonLibDir: pythonLibDir() ?? null,
+    seatCpuPercent: flags.has('seat-cpu') ? num(flags, 'seat-cpu', 50) : undefined,
+    seatMemoryMb: flags.has('seat-mem') ? num(flags, 'seat-mem', 512) : undefined,
     halfSeconds: num(flags, 'demo-half', 300),
     league: leagueFrom(flags, 'demo-league'),
-    gapSeconds: num(flags, 'demo-gap', 3),
+    gapSeconds: num(flags, 'demo-gap', 10),
     log: (line) => console.log(`  ${line}`),
   });
 
@@ -1113,6 +1112,86 @@ async function invite(flags: Map<string, string>): Promise<void> {
   }
 }
 
+/**
+ * Give a referee a fixture.
+ *
+ * Out of the terminal eventually — an organiser's screen is Phase 12 — but a
+ * referee has to be assignable before any of the day around it can be built or
+ * tried. The fixture is checked against the draw on disk rather than taken on
+ * trust: an assignment naming a fixture that does not exist is one nobody can
+ * use and nothing reports, which is the failure this command exists to stop.
+ */
+async function assign(flags: Map<string, string>): Promise<void> {
+  const { Accounts } = await import('./accounts');
+  const accounts = new Accounts({ file: join(leagueData(flags), 'league.db') });
+  try {
+    if (flags.get('list') === 'true') {
+      const all = accounts.listAssignments();
+      if (all.length === 0) {
+        console.log('\n  nothing assigned yet\n');
+        return;
+      }
+      console.log('');
+      for (const one of all) {
+        console.log(`  ${one.drawId.padEnd(20)}  ${one.fixtureId.padEnd(28)}  ${one.displayName}`);
+      }
+      console.log('');
+      return;
+    }
+
+    const who = flags.get('referee');
+    const drawId = flags.get('draw');
+    const fixtureId = flags.get('fixture');
+    if (!who || who === 'true' || !drawId || drawId === 'true' || !fixtureId || fixtureId === 'true') {
+      console.error('\n  needs --referee <slug> --draw <id> --fixture <id>\n');
+      process.exit(1);
+    }
+
+    const account = accounts.bySlug(slugifyTeam(who));
+    if (!account) {
+      console.error(`\n  no account called "${who}"\n`);
+      process.exit(1);
+    }
+    if (account.role !== 'referee' && account.role !== 'admin') {
+      console.error(`\n  ${account.displayName} is a ${account.role} account, not a referee\n`);
+      process.exit(1);
+    }
+
+    let draw: Draw;
+    try {
+      draw = await loadDraw(tournamentsRoot(flags), drawId);
+    } catch {
+      console.error(`\n  no draw called "${drawId}" under ${tournamentsRoot(flags)}\n`);
+      process.exit(1);
+    }
+    const fixture = draw!.fixtures.find((one) => one.id === fixtureId);
+    if (!fixture) {
+      console.error(`\n  "${drawId}" has no fixture "${fixtureId}". It has:\n`);
+      for (const one of draw!.fixtures) console.error(`    ${one.id.padEnd(28)}  ${one.home} v ${one.away}`);
+      console.error('');
+      process.exit(1);
+    }
+
+    if (flags.get('remove') === 'true') {
+      const had = accounts.unassign({ accountId: account!.id, drawId, fixtureId });
+      if (!had) {
+        console.error(`\n  ${account!.displayName} was not assigned ${fixture.home} v ${fixture.away}\n`);
+        process.exit(1);
+      }
+      accounts.record(null, 'referee.assign', `${drawId}:${fixtureId}`, `unassigned ${account!.slug}`);
+      console.log(`\n  ${account!.displayName} no longer has ${fixture.home} v ${fixture.away}\n`);
+      return;
+    }
+
+    accounts.assign({ accountId: account!.id, drawId, fixtureId, by: null });
+    accounts.record(null, 'referee.assign', `${drawId}:${fixtureId}`, `assigned ${account!.slug}`);
+    console.log(`\n  ${account!.displayName} referees ${fixture.home} v ${fixture.away}`);
+    console.log(`  they will find it under /referee when they log in\n`);
+  } finally {
+    accounts.close();
+  }
+}
+
 /** Non-loopback IPv4 addresses on this machine, for displaying venue LAN URLs. */
 function lanAddresses(): string[] {
   const nets = networkInterfaces();
@@ -1671,12 +1750,49 @@ async function league(flags: Map<string, string>): Promise<void> {
     onFixtureStart: (fixture, played, total) => {
       console.log(`  fixture ${played + 1} of ${total}:  ${fixture.home} v ${fixture.away}`);
     },
+    // Nothing is spawned until a referee opens it. Installed on the same
+    // condition as the confirmation at the other end, and for the same reason:
+    // a headless run has nobody standing at the pitch, and a match that waited
+    // for one would never be played at all.
+    ...(refereed
+      ? {
+          openPregame: (fixture: Fixture) => server.awaitPregame(fixture, made!.id),
+        }
+      : {}),
+    onFixtureDue: (fixture) => {
+      console.log(`  ready:      ${fixture.home} v ${fixture.away}`);
+      console.log(`              no pitch is running until the referee opens it at`);
+      console.log(`              http://localhost:${port}/referee/m/${fixture.id}`);
+    },
+    // The referee agrees the score, and that is what writes it. Installed only
+    // when there is a referee to ask: a headless run has nobody, and waiting
+    // for a confirmation that can never arrive would stop the draw dead.
+    ...(refereed
+      ? {
+          confirmResult: async (fixture: Fixture, result: FixtureResult) => {
+            const score = result.legs
+              .map((leg) => `${leg.result.score.violet}-${leg.result.score.lime}`)
+              .join(', ');
+            console.log(`  full time:  ${fixture.home} v ${fixture.away}  ${score}`);
+            console.log(`              nothing is recorded until it is confirmed at`);
+            console.log(`              http://localhost:${port}/referee/m/${fixture.id}`);
+            return await server.awaitConfirmation(fixture, made!.id, result);
+          },
+        }
+      : {}),
     onFixtureDone: (fixture, result) => {
       server.closeFixture(fixture.id);
       const score = result.legs
         .map((leg) => `${leg.result.score.violet}-${leg.result.score.lime}`)
         .join(', ');
       console.log(`  played:  ${fixture.home} v ${fixture.away}  ${score}\n`);
+    },
+    onFixtureReplay: (fixture) => {
+      // A fresh arena, not the one that just finished. Lineups resolve at arena
+      // start, so a team that re-pushed after a shambles gets their new code in
+      // the re-run — which is most of the reason a referee asks for one.
+      server.closeFixture(fixture.id);
+      console.log(`  ${fixture.home} v ${fixture.away} will be played again — nothing was recorded\n`);
     },
     onFixtureFailed: (fixture, error) => {
       // Left unwritten on purpose: an unfinished fixture is exactly what an
@@ -1689,7 +1805,7 @@ async function league(flags: Map<string, string>): Promise<void> {
       // The hub plays no football. It opens an arena — a child process running
       // the same binary a team runs on a laptop — and tells it what to play;
       // the arena resolves its own lineup and spawns its own sandboxed robots.
-      const arenaId = server.liveFor(fixture.id)?.arenaId ?? (await server.openFixture(fixture));
+      const arenaId = server.liveFor(fixture.id)?.arenaId ?? (await server.openFixture(fixture, made!.id));
       if (made!.legs > 1) {
         console.log(`    leg ${leg + 1} of ${made!.legs}  (seed ${formatSeedValue(seed)})`);
       }
@@ -1829,6 +1945,8 @@ function budgetFlags(flags: Map<string, string>): Record<string, number | string
   if (flags.has('demo-bots')) out.demoBots = flags.get('demo-bots')!;
   if (flags.has('demo-home')) out.demoHome = flags.get('demo-home')!;
   if (flags.has('demo-away')) out.demoAway = flags.get('demo-away')!;
+  if (flags.has('demo-home-bots')) out.demoHomeBots = flags.get('demo-home-bots')!;
+  if (flags.has('demo-away-bots')) out.demoAwayBots = flags.get('demo-away-bots')!;
   if (flags.has('demo-half')) out.demoHalf = num(flags, 'demo-half', 0);
   if (flags.has('demo-league')) {
     const raw = flags.get('demo-league')!;
@@ -1899,6 +2017,7 @@ function usage(): void {
     arenas        list what a league server is running, or stop one       [stop <id> --url --key]
     account       make or repair an account                               [--create --passwd --list --role --name --data]
     invite        issue a single-use registration code                    [--role --team --list --data]
+    assign        give a referee the fixture they are to run              [--referee --draw --fixture --remove --list]
     service       manage systemd user background service (Linux)          [install|status|restart|stop|logs|uninstall]
     upgrade       check for and install latest release from GitHub
 
@@ -2059,6 +2178,9 @@ if (import.meta.main) {
       break;
     case 'invite':
       await invite(flags);
+      break;
+    case 'assign':
+      await assign(flags);
       break;
     case 'service':
     case 'systemd':

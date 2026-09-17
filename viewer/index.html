@@ -37,6 +37,58 @@
       <span class="ko-team"></span>
     </div>
 
+    <!-- Match Summary Modal for Full-Time / Match End -->
+    <div id="match-summary" class="summary-overlay" hidden>
+      <div class="summary-modal" role="dialog" aria-modal="true" aria-labelledby="summary-title">
+        <button type="button" class="summary-close-btn" id="summary-close" aria-label="Close summary">&times;</button>
+        <div class="summary-header">
+          <div class="summary-status-pill" id="summary-status-pill">Full Time Summary</div>
+          <h2 id="summary-title" class="summary-verdict">Match Finished</h2>
+          <div class="summary-hero-score">
+            <div class="team-col violet">
+              <span class="team-name" id="sum-violet-name">Violet</span>
+              <span class="team-score" id="sum-violet-score">0</span>
+            </div>
+            <span class="score-dash">:</span>
+            <div class="team-col lime">
+              <span class="team-score" id="sum-lime-score">0</span>
+              <span class="team-name" id="sum-lime-name">Lime</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="summary-body">
+          <div class="summary-block-heading">Match Spotlights</div>
+          <div class="summary-spotlights" id="summary-spotlights"></div>
+
+          <div class="summary-block-heading">Team Comparison</div>
+          <div class="summary-teams" id="summary-teams"></div>
+
+          <div class="summary-block-heading">Robot Performance</div>
+          <div class="summary-robots-wrap">
+            <table class="summary-robots-table">
+              <thead>
+                <tr>
+                  <th>Robot</th>
+                  <th>Team</th>
+                  <th>Role</th>
+                  <th>Goals</th>
+                  <th>Saves</th>
+                  <th>Shots</th>
+                  <th>Cards</th>
+                </tr>
+              </thead>
+              <tbody id="summary-robots-body"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="summary-footer">
+          <span class="summary-shortcut-hint">Press <strong>Esc</strong> to close</span>
+          <button type="button" class="summary-dismiss-btn" id="summary-dismiss">Back to Pitch</button>
+        </div>
+      </div>
+    </div>
     <!-- Click, or press C. -->
     <div id="cameras" class="cameras"></div>
     <div id="status" class="status">connecting…</div>

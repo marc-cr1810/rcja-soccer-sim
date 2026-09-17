@@ -29,6 +29,7 @@ somebody with.
 
 from ._ws import WebSocketError
 from .drive import WHEEL_AXES, clamp, coast, drive, wrap_angle
+from .frame import GoalFrame
 from .robot import DEFAULT_URL, PROTOCOL_VERSION, Memory, Reading, Robot
 from .sense import (
     BallTracker,
@@ -61,6 +62,7 @@ __all__ = [
     "PROTOCOL_VERSION",
     "BallTracker",
     "Channel",
+    "GoalFrame",
     "GyroRate",
     "Locator",
     "Memory",

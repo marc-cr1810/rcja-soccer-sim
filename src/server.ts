@@ -262,6 +262,8 @@ export class MatchServer {
   readonly agents = new AgentGateway();
 
   private current: Match | null = null;
+  private lastResult: MatchResult | null = null;
+  private lastNextMatchIn?: number;
   private readonly viewerRoot: string | null;
   private readonly refereeRoot: string | null;
   private readonly practiceRoot: string | null;
@@ -500,6 +502,9 @@ export class MatchServer {
         halfSeconds: this.current.halfLength,
       });
       this.sendToViewer(ws, { type: 'frame', frame: this.current.snapshot() });
+      if (this.lastResult) {
+        this.sendToViewer(ws, { type: 'summary', result: this.lastResult, nextMatchIn: this.lastNextMatchIn });
+      }
     }
   }
 
@@ -778,6 +783,8 @@ export class MatchServer {
         options.kickoffCountdown ?? this.opts.kickoffCountdown ?? (this.realtime ? KICKOFF_COUNTDOWN_SECONDS : 0),
     });
     this.current = match;
+    this.lastResult = null;
+    this.lastNextMatchIn = undefined;
     // A program that dropped out mid-match may not simply reconnect and carry
     // on; the gateway refuses it until rule 5.7.2's stand-down is served, and
     // only the match knows how much of it is left.
@@ -802,6 +809,9 @@ export class MatchServer {
     if (!this.realtime) {
       const result = remote ? await this.playFast(match) : match.run();
       this.broadcast({ type: 'frame', frame: match.snapshot() });
+      this.lastResult = result;
+      this.lastNextMatchIn = options.nextMatchIn;
+      this.broadcast({ type: 'summary', result, nextMatchIn: options.nextMatchIn });
       return result;
     }
 
@@ -848,7 +858,11 @@ export class MatchServer {
       this.broadcast({ type: 'frame', frame: match.snapshot() });
     }
 
-    return match.result();
+    const res = match.result();
+    this.lastResult = res;
+    this.lastNextMatchIn = options.nextMatchIn;
+    this.broadcast({ type: 'summary', result: res, nextMatchIn: options.nextMatchIn });
+    return res;
   }
 
   /**
@@ -884,7 +898,10 @@ export class MatchServer {
       }
       match.world.running = false;
     }
-    return match.result();
+    const res = match.result();
+    this.lastResult = res;
+    this.broadcast({ type: 'summary', result: res });
+    return res;
   }
 
   /**
@@ -968,7 +985,10 @@ export class MatchServer {
       if (match.isEnded) break;
     }
 
-    return match.result();
+    const res = match.result();
+    this.lastResult = res;
+    this.broadcast({ type: 'summary', result: res });
+    return res;
   }
 
   /**
@@ -1012,6 +1032,7 @@ export class MatchServer {
       idealSensors: this.opts.idealSensors ?? false,
     });
     this.current = match;
+    this.lastResult = null;
     // Nobody is serving a sanction in a lobby; there is no match to be sent
     // off from. A program that reconnects simply takes its seat again.
     this.agents.standDown = () => 0;

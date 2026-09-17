@@ -464,3 +464,285 @@ describe('a division played through', () => {
     await rm(dir, { recursive: true, force: true });
   }, 60000);
 });
+
+/**
+ * Somebody agreeing it, between the last whistle and the disk.
+ *
+ * The rule these defend is that a result is a decision and not the side effect
+ * of a clock running out — so the interesting assertion in nearly every one of
+ * them is about the *absence* of a file at a moment when the football is over.
+ */
+describe('a result nobody has agreed to', () => {
+  it('is not on disk until the confirmation resolves', async () => {
+    const dir = await root();
+    const draw = makeDraw(['A', 'B'], { name: 'unconfirmed' });
+    await saveDraw(dir, draw);
+
+    // One gate every confirmation waits behind, so the assertion below happens
+    // with both fixtures played out and neither one agreed.
+    let open: () => void = () => {};
+    const gate = new Promise<void>((released) => {
+      open = released;
+    });
+    let asked = 0;
+
+    const running = runDraw(dir, draw, {
+      playLeg: async () => ({ result: scored(2, 1), submissions: {} }),
+      confirmResult: async () => {
+        asked++;
+        await gate;
+        return 'confirmed';
+      },
+    });
+
+    while (asked === 0) await new Promise((t) => setTimeout(t, 5));
+    // Full time has been and gone, and there is nothing in the results
+    // directory — which is the whole point of the slice.
+    expect(await loadResults(dir, draw)).toEqual([]);
+
+    open();
+    const results = await running;
+    expect(results).toHaveLength(2);
+    expect(await loadResults(dir, draw)).toHaveLength(2);
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('plays the fixture again in this same run when it is not agreed', async () => {
+    const dir = await root();
+    const draw = makeDraw(['A', 'B'], { name: 'replayed' });
+    await saveDraw(dir, draw);
+
+    const attempts: string[] = [];
+    const replayed: string[] = [];
+    const declinedOnce = new Set<string>();
+
+    const results = await runDraw(dir, draw, {
+      slots: 1,
+      playLeg: async (fixture) => {
+        attempts.push(fixture.id);
+        // A different score the second time, so the written result can be
+        // told apart from the one that was thrown away.
+        return { result: scored(declinedOnce.has(fixture.id) ? 5 : 1, 0), submissions: {} };
+      },
+      confirmResult: async (fixture) => {
+        if (declinedOnce.has(fixture.id)) return 'confirmed';
+        declinedOnce.add(fixture.id);
+        return 'replay';
+      },
+      onFixtureReplay: (fixture) => replayed.push(fixture.id),
+    });
+
+    // Two fixtures, each played twice, and not a word about failure.
+    expect(attempts).toHaveLength(4);
+    expect(replayed.length).toBe(2);
+    expect(results).toHaveLength(2);
+    for (const result of results) {
+      expect(result.legs[0]!.result.score.violet).toBe(5);
+    }
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('leaves the fixture for the next run when the confirmation throws', async () => {
+    const dir = await root();
+    const draw = makeDraw(['A', 'B'], { name: 'interrupted' });
+    await saveDraw(dir, draw);
+
+    const failures: string[] = [];
+    const results = await runDraw(dir, draw, {
+      continueOnFailure: true,
+      playLeg: async () => ({ result: scored(1, 0), submissions: {} }),
+      confirmResult: async () => {
+        throw new Error('the league server stopped before the result was confirmed');
+      },
+      onFixtureFailed: (fixture) => failures.push(fixture.id),
+    });
+
+    // Nothing written, nothing retried here — a fixture that fails for a reason
+    // that has not gone away is not worth playing twice in one run.
+    expect(results).toEqual([]);
+    expect(failures).toHaveLength(2);
+    expect(await loadResults(dir, draw)).toEqual([]);
+
+    // The next run finds them exactly as it finds a fixture nobody ever started.
+    const later = await runDraw(dir, draw, {
+      playLeg: async () => ({ result: scored(3, 0), submissions: {} }),
+    });
+    expect(later).toHaveLength(2);
+    await rm(dir, { recursive: true, force: true });
+  });
+});
+
+describe('a fixture nobody has opened yet', () => {
+  it('spawns nothing until somebody opens it', async () => {
+    const dir = await root();
+    const draw = makeDraw(['A', 'B'], { name: 'unopened' });
+    await saveDraw(dir, draw);
+
+    let open: () => void = () => {};
+    const gate = new Promise<void>((released) => {
+      open = released;
+    });
+    const due: string[] = [];
+    const played: string[] = [];
+
+    const running = runDraw(dir, draw, {
+      onFixtureDue: (fixture) => due.push(fixture.id),
+      openPregame: () => gate,
+      playLeg: async (fixture) => {
+        played.push(fixture.id);
+        return { result: scored(1, 0), submissions: {} };
+      },
+    });
+
+    while (due.length === 0) await new Promise((t) => setTimeout(t, 5));
+    // The fixture's turn has come and its teams are free, and still nothing has
+    // been asked to play: at a venue that is a pitch that has not been started,
+    // four robots that have not been spawned, and a referee who has not arrived
+    // yet costing nobody anything.
+    expect(due).toEqual(['a-v-b']);
+    expect(played).toEqual([]);
+
+    open();
+    const results = await running;
+    expect(played.length).toBeGreaterThan(0);
+    expect(results).toHaveLength(2);
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  /**
+   * Eligible is not the same as occupying a pitch.
+   *
+   * The whole reason this slice is not four lines. Before it, a fixture took
+   * one of the venue's slots the instant the scheduler reached it — which was
+   * also the instant it was spawned, so the two cost the same. With a referee
+   * in front of the spawn they are different moments, and conflating them means
+   * one slow referee holds a pitch that nothing is running on.
+   */
+  it('offers every fixture whose turn has come, however few pitches there are', async () => {
+    const dir = await root();
+    const draw = makeDraw(['A', 'B', 'C', 'D'], { name: 'one-pitch' });
+    await saveDraw(dir, draw);
+
+    const due: string[] = [];
+    const gates = new Map<string, () => void>();
+    let openEverything = false;
+    const inFlight = new Set<string>();
+    const together: number[] = [];
+
+    const running = runDraw(dir, draw, {
+      slots: 1,
+      onFixtureDue: (fixture) => due.push(fixture.id),
+      openPregame: (fixture) => {
+        if (openEverything) return Promise.resolve();
+        return new Promise<void>((go) => gates.set(fixture.id, go));
+      },
+      playLeg: async (fixture) => {
+        inFlight.add(fixture.id);
+        together.push(inFlight.size);
+        await new Promise((t) => setTimeout(t, 5));
+        inFlight.delete(fixture.id);
+        return { result: scored(1, 0), submissions: {} };
+      },
+    });
+
+    while (due.length < 2) await new Promise((t) => setTimeout(t, 5));
+    // Two matches are ready for their referees although the venue has one
+    // pitch, and nothing is running on either.
+    expect(due).toEqual(['a-v-b', 'c-v-d']);
+    expect(together).toEqual([]);
+
+    openEverything = true;
+    for (const go of gates.values()) go();
+    const results = await running;
+
+    // And the pitch is still one pitch.
+    expect(Math.max(...together)).toBe(1);
+    expect(results).toHaveLength(12);
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('hands the next free pitch to whoever asked for it first', async () => {
+    const dir = await root();
+    const draw = makeDraw(['A', 'B', 'C', 'D'], { name: 'in-turn' });
+    await saveDraw(dir, draw);
+
+    const gates = new Map<string, () => void>();
+    let openEverything = false;
+    const started: string[] = [];
+
+    const running = runDraw(dir, draw, {
+      slots: 1,
+      openPregame: (fixture) => {
+        if (openEverything) return Promise.resolve();
+        return new Promise<void>((go) => gates.set(fixture.id, go));
+      },
+      onFixtureStart: (fixture) => started.push(fixture.id),
+      playLeg: async () => {
+        await new Promise((t) => setTimeout(t, 5));
+        return { result: scored(1, 0), submissions: {} };
+      },
+    });
+
+    while (gates.size < 2) await new Promise((t) => setTimeout(t, 5));
+    // The second fixture in the draw is opened first, and it is the one that
+    // plays first: a referee who is ready does not queue behind one who is not.
+    gates.get('c-v-d')!();
+    gates.get('a-v-b')!();
+    await new Promise((t) => setTimeout(t, 20));
+    expect(started.slice(0, 2)).toEqual(['c-v-d', 'a-v-b']);
+
+    openEverything = true;
+    for (const go of gates.values()) go();
+    await running;
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('leaves a fixture unwritten when it could not be opened', async () => {
+    const dir = await root();
+    const draw = makeDraw(['A', 'B'], { name: 'never-opened' });
+    await saveDraw(dir, draw);
+
+    const failed: string[] = [];
+    const results = await runDraw(dir, draw, {
+      continueOnFailure: true,
+      openPregame: async (fixture) => {
+        if (fixture.id === 'a-v-b') throw new Error('the league server stopped');
+      },
+      onFixtureFailed: (fixture) => failed.push(fixture.id),
+      playLeg: async () => ({ result: scored(1, 0), submissions: {} }),
+    });
+
+    // Unwritten and unplayed, which is the answer a hub killed mid-match gives
+    // too: it comes round again on the next run.
+    expect(failed).toEqual(['a-v-b']);
+    expect(results.map((r) => r.fixtureId)).toEqual(['b-v-a']);
+    expect((await loadResults(dir, draw)).map((r) => r.fixtureId)).toEqual(['b-v-a']);
+    await rm(dir, { recursive: true, force: true });
+  });
+});
+
+describe('a match the referee called off', () => {
+  it('writes nothing and is reported, rather than counting the board', async () => {
+    const dir = await root();
+    const draw = makeDraw(['A', 'B'], { name: 'abandoned' });
+    await saveDraw(dir, draw);
+
+    const failures: string[] = [];
+    const results = await runDraw(dir, draw, {
+      continueOnFailure: true,
+      playLeg: async () => ({
+        // Three-nil on the board when it was called off. Until this slice that
+        // was written down and awarded three points.
+        result: { ...scored(3, 0), abandoned: true, abandonReason: 'field damaged' },
+        submissions: {},
+      }),
+      onFixtureFailed: (fixture, error) => failures.push(`${fixture.id}: ${error.message}`),
+    });
+
+    expect(results).toEqual([]);
+    expect(await loadResults(dir, draw)).toEqual([]);
+    expect(failures[0]).toContain('abandoned');
+    expect(failures[0]).toContain('field damaged');
+    await rm(dir, { recursive: true, force: true });
+  });
+});

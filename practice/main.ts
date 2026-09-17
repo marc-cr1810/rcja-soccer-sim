@@ -591,10 +591,12 @@ function receive(message: ViewMessage): void {
     }
     return;
   }
-  previous = latest;
-  previousAt = latestAt;
-  latest = message.frame;
-  latestAt = performance.now();
+  if (message.type === 'frame') {
+    previous = latest;
+    previousAt = latestAt;
+    latest = message.frame;
+    latestAt = performance.now();
+  }
 }
 
 function connect(): void {

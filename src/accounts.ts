@@ -28,7 +28,7 @@ import { dirname } from 'node:path';
 
 import { fail, ok, slugifyTeam, type Result } from './manifest';
 import type { Actor, Capability, Grant, Role, Scope } from './capabilities';
-import { isRole } from './capabilities';
+import { assignedCapabilities, fixtureTarget, isRole } from './capabilities';
 
 /** A team account is an organisation; a referee or admin account is a person. */
 export type AccountKind = 'team' | 'person';
@@ -54,6 +54,15 @@ export interface Invite {
   createdAt: string;
   expiresAt: string;
   usedAt: string | null;
+}
+
+/** A referee, and the fixture they are to run. */
+export interface Assignment {
+  /** The draw the fixture belongs to. A fixture id alone is not unique. */
+  drawId: string;
+  fixtureId: string;
+  accountId: string;
+  createdAt: string;
 }
 
 export interface ApiKeyInfo {
@@ -135,9 +144,18 @@ CREATE TABLE IF NOT EXISTS audit (
   target     TEXT,
   detail     TEXT
 );
+CREATE TABLE IF NOT EXISTS assignments (
+  draw_id    TEXT NOT NULL,
+  fixture_id TEXT NOT NULL,
+  account_id TEXT NOT NULL REFERENCES accounts(id),
+  created_at TEXT NOT NULL,
+  created_by TEXT,
+  PRIMARY KEY (draw_id, fixture_id, account_id)
+);
 CREATE INDEX IF NOT EXISTS audit_at ON audit(at);
 CREATE INDEX IF NOT EXISTS grants_account ON grants(account_id);
 CREATE INDEX IF NOT EXISTS keys_account ON api_keys(account_id);
+CREATE INDEX IF NOT EXISTS assignments_account ON assignments(account_id);
 `;
 
 interface AccountRow {
@@ -562,8 +580,91 @@ export class Accounts {
       id: account.id,
       role: account.role,
       slug: account.slug,
-      grants: this.grantsFor(account.id),
+      grants: [...this.grantsFor(account.id), ...this.assignmentGrants(account)],
     };
+  }
+
+  // ------------------------------------------------------------- assignments
+
+  /**
+   * Give a referee a fixture.
+   *
+   * Idempotent, and it does not object to a second referee on the same
+   * fixture. Reassigning twenty minutes before kick-off should not fail on a
+   * rule about tidiness; removing the first one is a separate decision that
+   * can be made after the match has somebody to run it.
+   */
+  assign(opts: { accountId: string; drawId: string; fixtureId: string; by: string | null }): void {
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO assignments (draw_id, fixture_id, account_id, created_at, created_by)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(opts.drawId, opts.fixtureId, opts.accountId, now(), opts.by);
+  }
+
+  /** Take a fixture back off a referee. True if they had it. */
+  unassign(opts: { accountId: string; drawId: string; fixtureId: string }): boolean {
+    const done = this.db
+      .prepare('DELETE FROM assignments WHERE draw_id = ? AND fixture_id = ? AND account_id = ?')
+      .run(opts.drawId, opts.fixtureId, opts.accountId);
+    return done.changes > 0;
+  }
+
+  assignmentsFor(accountId: string): Assignment[] {
+    return this.db
+      .prepare(
+        `SELECT draw_id AS drawId, fixture_id AS fixtureId, account_id AS accountId, created_at AS createdAt
+         FROM assignments WHERE account_id = ? ORDER BY draw_id, fixture_id`,
+      )
+      .all(accountId) as Assignment[];
+  }
+
+  /** Every assignment on the server, for an organiser looking at the day. */
+  listAssignments(): (Assignment & { slug: string; displayName: string })[] {
+    return this.db
+      .prepare(
+        `SELECT s.draw_id AS drawId, s.fixture_id AS fixtureId, s.account_id AS accountId,
+                s.created_at AS createdAt, a.slug, a.display_name AS displayName
+         FROM assignments s JOIN accounts a ON a.id = s.account_id
+         ORDER BY s.draw_id, s.fixture_id, a.slug`,
+      )
+      .all() as (Assignment & { slug: string; displayName: string })[];
+  }
+
+  /**
+   * Has this account been given anything at all?
+   *
+   * The question a menu asks. `can()` cannot answer it for a targeted scope —
+   * "may they control some match, we don't know which" is not something an
+   * assignment-shaped grant can say yes to — so it is asked of the table
+   * directly rather than by handing `can()` an undefined target and reading
+   * its `false` as though it meant no.
+   */
+  hasAssignment(accountId: string): boolean {
+    const row = this.db
+      .prepare('SELECT 1 AS found FROM assignments WHERE account_id = ? LIMIT 1')
+      .get(accountId) as { found: number } | null;
+    return row !== null;
+  }
+
+  /**
+   * An assignment, as capabilities.
+   *
+   * One grant per assigned-scope capability the role carries, each naming its
+   * own fixture. The list comes from the capability table itself, so an
+   * assignment grants whatever `assigned` means there and cannot drift from it.
+   */
+  private assignmentGrants(account: Account): Grant[] {
+    const capabilities = assignedCapabilities(account.role);
+    if (capabilities.length === 0) return [];
+    return this.assignmentsFor(account.id).flatMap((one) =>
+      capabilities.map((capability) => ({
+        capability,
+        scope: 'assigned' as Scope,
+        target: fixtureTarget(one.drawId, one.fixtureId),
+      })),
+    );
   }
 
   // ------------------------------------------------------------------- audit

@@ -55,6 +55,7 @@ export const GoalSchema = z
   .object({
     team: TeamIdSchema,
     at: z.number().openapi({ description: 'Match clock when scored, in seconds' }),
+    robotId: z.string().optional().openapi({ description: 'Robot id that scored the goal, if known' }),
   })
   .openapi('Goal');
 export type Goal = z.infer<typeof GoalSchema>;
@@ -216,6 +217,16 @@ export type ScheduleFixture = z.infer<typeof ScheduleFixtureSchema>;
 
 // ─── Match record ──────────────────────────────────────────────────────────────
 
+export const RobotStatsSchema = z
+  .object({
+    goals: z.number().int(),
+    saves: z.number().int(),
+    shots: z.number().int(),
+    penalties: z.number().int(),
+  })
+  .openapi('RobotStats', { description: 'Performance statistics for an individual robot' });
+export type RobotStats = z.infer<typeof RobotStatsSchema>;
+
 export const LegRecordSchema = z
   .object({
     seed: SeedSchema,
@@ -225,6 +236,7 @@ export const LegRecordSchema = z
     calls: z.record(z.string(), z.number().int()).openapi({ description: 'Referee calls by kind' }),
     events: z.array(MatchEventSchema),
     refereeActions: z.array(RefereeActionSchema),
+    robotStats: z.record(z.string(), RobotStatsSchema).optional().openapi({ description: 'Per-robot performance statistics' }),
   })
   .openapi('LegRecord', { description: 'One leg of a fixture — the detailed match record' });
 export type LegRecord = z.infer<typeof LegRecordSchema>;

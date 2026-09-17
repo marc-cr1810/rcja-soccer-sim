@@ -10,6 +10,7 @@
 import {
   Sampler,
   ballBlocked,
+  diagnose,
   formatBench,
   partnerId,
   relaying,
@@ -265,6 +266,74 @@ describe('the report', () => {
     expect(text).toContain('ball distribution:   centre spot (parked): 25%');
     expect(text).toContain('[-1000,  -800] own goal');
     expect(text.split('\n').every((line) => line.length < 120)).toBe(true);
+  });
+});
+
+/**
+ * The handedness gate, against scorelines whose right answer is known.
+ *
+ * Rule 1.4/5.4 swaps ends at half-time, so for a team under test H1 and H2 are
+ * its two attack directions and the split already in `scores` is the
+ * measurement. The only question is where to put the bar, and it is worth
+ * testing precisely because both ways of getting it wrong are silent: a bar
+ * too high never fires and nobody notices, and a bar too low cries wolf until
+ * teams stop reading the report.
+ *
+ * The first case is the real one. Two copies of the same agent played 20 seeds
+ * and put 82 goals in one net against 33 in the other, because a lateral dodge
+ * was missing its attack direction. That is the run this finding exists for.
+ */
+describe('one-sided', () => {
+  const halves = (pairs: [number, number][]): BenchResult => ({
+    ...skeleton(),
+    matches: pairs.length,
+    scores: pairs.map(([h1, h2], i) => ({
+      seed: i + 1,
+      for: h1 + h2,
+      against: 0,
+      half1: { for: h1, against: 0 },
+      half2: { for: h2, against: 0 },
+    })),
+  });
+  const fires = (r: BenchResult): boolean => diagnose(r).some((f) => f.code === 'one-sided');
+
+  const spread = (a: number, b: number, n = 5): [number, number][] =>
+    Array.from({ length: n }, (_, i) => [
+      Math.floor(a / n) + (i < a % n ? 1 : 0),
+      Math.floor(b / n) + (i < b % n ? 1 : 0),
+    ]);
+
+  it('fires on the split that this finding was written for', () => {
+    expect(fires(halves(spread(82, 33)))).toBe(true);
+  });
+
+  it('is quiet on the same agent once the sign was fixed', () => {
+    // 53-68 over the same 20 seeds. A gap of 15 on 121 goals is not evidence
+    // of anything, and a check that called it one would be worse than none.
+    expect(fires(halves(spread(53, 68)))).toBe(false);
+  });
+
+  it('is quiet on a balanced team that scores a great deal', () => {
+    expect(fires(halves(spread(110, 110)))).toBe(false);
+  });
+
+  it('is quiet when there are barely any goals to divide', () => {
+    // 7-3 is three matches of football, and a fair coin does this often.
+    expect(fires(halves(spread(7, 3)))).toBe(false);
+  });
+
+  it('says so when it does fire, without claiming more than it knows', () => {
+    const finding = diagnose(halves(spread(82, 33))).find((f) => f.code === 'one-sided')!;
+    expect(finding.severity).toBe('low');
+    expect(finding.message).toContain('82');
+    expect(finding.message).toContain('33');
+    expect(finding.advice).toContain('GoalFrame');
+  });
+
+  it('does not fire when the tested programs are on both sides', () => {
+    // Then both halves contain both attack directions and the split is noise.
+    const both = { ...halves(spread(82, 33)), tested: ['violet-1', 'lime-1'] };
+    expect(fires(both)).toBe(false);
   });
 });
 

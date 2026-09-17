@@ -188,4 +188,40 @@ describe('league.json', () => {
     expect(settings.arenas.max).toBe(2);
     expect(sources['arenas.max']).toBe('flag');
   });
+
+  it('loads home and away objects with name and bots in demo settings', () => {
+    const where = dir();
+    writeFileSync(
+      join(where, 'league.json'),
+      JSON.stringify({
+        demo: {
+          on: true,
+          home: { name: 'TeamRef', bots: 'reference' },
+          away: { name: 'Lightning', bots: 'nsw-lightning' },
+        },
+      }),
+    );
+    const { settings, complaints } = loadSettings(where);
+    expect(complaints).toEqual([]);
+    expect(settings.demo.home).toBe('TeamRef');
+    expect(settings.demo.homeBots).toBe('reference');
+    expect(settings.demo.away).toBe('Lightning');
+    expect(settings.demo.awayBots).toBe('nsw-lightning');
+  });
+
+  it('loads bots object and allows flag overrides for demo team bots', () => {
+    const where = dir();
+    writeFileSync(
+      join(where, 'league.json'),
+      JSON.stringify({
+        demo: {
+          on: true,
+          bots: { home: 'reference', away: 'example' },
+        },
+      }),
+    );
+    const { settings } = loadSettings(where, { demoAwayBots: 'rehearsal' });
+    expect(settings.demo.homeBots).toBe('reference');
+    expect(settings.demo.awayBots).toBe('rehearsal');
+  });
 });

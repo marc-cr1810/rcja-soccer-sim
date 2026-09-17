@@ -97,10 +97,25 @@ const ROUTES: [RegExp, Route][] = [
   [/^\/team\/settings$/, settings],
   [/^\/admin$/, admin],
   [/^\/referee\/?$/, refereeList],
+  [/^\/referee\/m\/([^/]+)$/, (p) => refereeMatch(p[0]!)],
 ];
 
 /** Refreshed while something is live, cleared on every navigation. */
 let ticking: ReturnType<typeof setInterval> | null = null;
+
+/**
+ * Re-run this page on a timer, replacing whatever was already running.
+ *
+ * A page that refreshes by calling itself renders again on every tick, and
+ * setting the interval on the way through without dropping the old one
+ * *doubles* the timers each time: a live match left open goes from one request
+ * every three seconds to hundreds a second inside a minute. Measured, not
+ * theorised — 256 requests in a single burst.
+ */
+function repoll(again: () => void, ms: number): void {
+  if (ticking) clearInterval(ticking);
+  ticking = setInterval(again, ms);
+}
 
 async function go(path: string, replace = false): Promise<void> {
   freshKey = null;
@@ -152,12 +167,7 @@ function chrome(): void {
   else if (me.account) links.push(['/team', 'My team']);
 
   nav.innerHTML = links
-    .map(
-      ([href, text]) =>
-        `<a href="${href}"${href.startsWith('/referee') ? ' data-full' : ''} class="${
-          location.pathname === href ? 'on' : ''
-        }">${text}</a>`,
-    )
+    .map(([href, text]) => `<a href="${href}" class="${location.pathname === href ? 'on' : ''}">${text}</a>`)
     .join('');
 
   if (me.account) {
@@ -273,15 +283,32 @@ function liveScoreline(live: Live): string {
   });
 }
 
+/**
+ * What a state is called on a public sheet.
+ *
+ * Only the ones that do not read as English on their own. A match whose clock
+ * has run out but whose referee has not agreed it yet is at full time, and
+ * saying "playing" there would be a small lie told on a projector. `upcoming`
+ * is deliberately blank: a row on a list of what is coming does not need to be
+ * told it is coming.
+ */
+const PUBLIC_STATE: Record<string, string> = {
+  confirming: 'full time',
+  due: 'waiting for the referee',
+  opening: 'starting',
+  upcoming: '',
+};
+
 /** A fixture as a line on a sheet: who, the score if there is one, and where it got to. */
 function fixtureRow(card: Card): string {
   const played = card.state === 'played';
+  const state = card.state ?? '';
   return h(`
     <a class="row" href="/m/${encodeURIComponent(card.id)}">
       <span class="grow">${esc(card.home)}<span class="v">v</span>${esc(card.away)}</span>
       ${played ? `<span class="score">${card.homeGoals ?? 0}&ndash;${card.awayGoals ?? 0}</span>` : ''}
-      <span class="state ${card.state === 'playing' ? 'playing' : ''}">${
-        played ? esc(when(card.completedAt ?? '')) : esc(card.state ?? '')
+      <span class="state ${state === 'playing' ? 'playing' : ''}">${
+        played ? esc(when(card.completedAt ?? '')) : esc(PUBLIC_STATE[state] ?? state)
       }</span>
     </a>
   `);
@@ -329,7 +356,7 @@ async function front(): Promise<void> {
         )
         .join('')}
     `);
-    ticking = setInterval(() => void front(), 3000);
+    repoll(() => void front(), 3000);
     return;
   }
 
@@ -375,7 +402,7 @@ async function front(): Promise<void> {
   `);
 
   // A live score that does not move is worse than no live score at all.
-  if (data.live.length) ticking = setInterval(() => void front(), 3000);
+  if (data.live.length) repoll(() => void front(), 3000);
 }
 
 function table(rows: Standing[]): string {
@@ -463,25 +490,240 @@ async function teamPage(teamSlug: string): Promise<void> {
  * and the referee event log kept whole rather than the sixty-entry ring buffer
  * the console's banner uses. A timeline is that log, printed.
  */
-async function matchPage(fixtureId: string): Promise<void> {
-  interface MatchData {
-    ok: boolean;
-    reason?: string;
-    fixture: { home: string; away: string };
-    state: string;
-    live: Live[];
-    record: {
-      completedAt: string;
-      submissions: Record<string, string>;
-      verdict: { homeGoals: number; awayGoals: number; outcome: string };
-      legs: {
-        seed: unknown;
-        score: { violet: number; lime: number };
-        clock: number;
-        events: { at: number; kind: string; rule: string; message: string }[];
-      }[];
-    } | null;
+interface RobotStat {
+  goals: number;
+  saves: number;
+  shots: number;
+  penalties: number;
+}
+
+interface MatchLegData {
+  seed: unknown;
+  score: { violet: number; lime: number };
+  clock: number;
+  goals?: { team: 'violet' | 'lime'; at: number; half?: 1 | 2; robotId?: string }[];
+  calls?: Record<string, number>;
+  events: { at: number; kind: string; rule: string; message: string; team?: 'violet' | 'lime'; robotId?: string }[];
+  refereeActions?: { action: string; at: number; detail?: string }[];
+  robotStats?: Record<string, RobotStat>;
+}
+
+interface MatchRecordData {
+  completedAt: string;
+  submissions: Record<string, string>;
+  verdict: {
+    homeLegsWon?: number;
+    awayLegsWon?: number;
+    drawnLegs?: number;
+    homeGoals: number;
+    awayGoals: number;
+    outcome: string;
+  };
+  legs: MatchLegData[];
+}
+
+interface MatchData {
+  ok: boolean;
+  reason?: string;
+  fixture: { id?: string; home: string; away: string };
+  state: string;
+  live: Live[];
+  record: MatchRecordData | null;
+}
+
+interface RobotSummary {
+  id: string;
+  number: number;
+  team: 'violet' | 'lime';
+  teamName: string;
+  role: string;
+  goals: number;
+  saves: number;
+  shots: number;
+  penalties: number;
+}
+
+interface ProcessedStats {
+  winnerSide: 'violet' | 'lime' | null;
+  winnerName: string | null;
+  outcomeTitle: string;
+  homeGoals: number;
+  awayGoals: number;
+  homeLegsWon: number;
+  awayLegsWon: number;
+  drawnLegs: number;
+  robots: RobotSummary[];
+  topScorer: { robot: RobotSummary; count: number } | null;
+  topKeeper: { robot: RobotSummary; count: number } | null;
+  topShooter: { robot: RobotSummary; count: number } | null;
+  teamMetrics: {
+    name: string;
+    home: number;
+    away: number;
+  }[];
+  goalsTimeline: { team: 'violet' | 'lime'; at: number; half: number; robotId?: string }[];
+}
+
+function processMatchStats(record: MatchRecordData, fixture: { home: string; away: string }): ProcessedStats {
+  const v = record.verdict;
+  let homeLegsWon = v.homeLegsWon ?? 0;
+  let awayLegsWon = v.awayLegsWon ?? 0;
+  let drawnLegs = v.drawnLegs ?? 0;
+
+  if (v.homeLegsWon === undefined && record.legs.length > 0) {
+    homeLegsWon = 0;
+    awayLegsWon = 0;
+    drawnLegs = 0;
+    for (const leg of record.legs) {
+      if (leg.score.violet > leg.score.lime) homeLegsWon++;
+      else if (leg.score.lime > leg.score.violet) awayLegsWon++;
+      else drawnLegs++;
+    }
   }
+
+  const winnerSide: 'violet' | 'lime' | null =
+    v.outcome === 'won' ? 'violet' : v.outcome === 'lost' ? 'lime' : null;
+  const winnerName = winnerSide === 'violet' ? fixture.home : winnerSide === 'lime' ? fixture.away : null;
+  const outcomeTitle = winnerName ? `${winnerName} Victory` : 'Match Drawn';
+
+  const robots: Record<string, RobotSummary> = {
+    'violet-1': { id: 'violet-1', number: 1, team: 'violet', teamName: fixture.home, role: 'Striker', goals: 0, saves: 0, shots: 0, penalties: 0 },
+    'violet-2': { id: 'violet-2', number: 2, team: 'violet', teamName: fixture.home, role: 'Goalie', goals: 0, saves: 0, shots: 0, penalties: 0 },
+    'lime-1': { id: 'lime-1', number: 1, team: 'lime', teamName: fixture.away, role: 'Striker', goals: 0, saves: 0, shots: 0, penalties: 0 },
+    'lime-2': { id: 'lime-2', number: 2, team: 'lime', teamName: fixture.away, role: 'Goalie', goals: 0, saves: 0, shots: 0, penalties: 0 },
+  };
+
+  let homeRestarts = 0;
+  let awayRestarts = 0;
+  let homeCleanSheets = 0;
+  let awayCleanSheets = 0;
+  let homeMultDef = 0;
+  let awayMultDef = 0;
+  const goalsTimeline: { team: 'violet' | 'lime'; at: number; half: number; robotId?: string }[] = [];
+
+  for (const leg of record.legs) {
+    if (leg.score.lime === 0) homeCleanSheets++;
+    if (leg.score.violet === 0) awayCleanSheets++;
+
+    if (leg.robotStats) {
+      for (const [id, s] of Object.entries(leg.robotStats)) {
+        if (robots[id]) {
+          robots[id].goals += s.goals ?? 0;
+          robots[id].saves += s.saves ?? 0;
+          robots[id].shots += s.shots ?? 0;
+          robots[id].penalties += s.penalties ?? 0;
+        }
+      }
+    }
+
+    if (leg.goals && leg.goals.length > 0) {
+      for (const g of leg.goals) {
+        goalsTimeline.push({
+          team: g.team,
+          at: g.at,
+          half: g.half ?? (g.at > leg.clock / 2 ? 2 : 1),
+          robotId: g.robotId,
+        });
+        if (!leg.robotStats) {
+          const targetId = g.robotId ?? (g.team === 'violet' ? 'violet-1' : 'lime-1');
+          if (robots[targetId]) robots[targetId].goals++;
+        }
+      }
+    } else {
+      for (const e of leg.events) {
+        if (e.kind === 'goal' && e.team) {
+          goalsTimeline.push({
+            team: e.team,
+            at: e.at,
+            half: e.at > leg.clock / 2 ? 2 : 1,
+            robotId: e.robotId,
+          });
+          if (!leg.robotStats) {
+            const targetId = e.robotId ?? (e.team === 'violet' ? 'violet-1' : 'lime-1');
+            if (robots[targetId]) robots[targetId].goals++;
+          }
+        }
+      }
+    }
+
+    for (const e of leg.events) {
+      if (e.kind === 'ball-out-of-play' || e.kind === 'kickoff') {
+        if (e.team === 'violet') homeRestarts++;
+        else if (e.team === 'lime') awayRestarts++;
+      }
+      if (e.kind === 'possible-multiple-defence') {
+        if (e.team === 'violet') homeMultDef++;
+        else if (e.team === 'lime') awayMultDef++;
+      }
+      if (!leg.robotStats && (e.kind === 'possible-damaged' || e.kind === 'illegal-kickoff')) {
+        if (e.robotId && robots[e.robotId]) {
+          robots[e.robotId].penalties++;
+        }
+      }
+    }
+  }
+
+  const robotList = Object.values(robots);
+
+  const topScorerRobot = [...robotList].sort((a, b) => b.goals - a.goals)[0];
+  const topScorer = topScorerRobot && topScorerRobot.goals > 0
+    ? { robot: topScorerRobot, count: topScorerRobot.goals }
+    : null;
+
+  const goalies = robotList.filter((r) => r.role === 'Goalie');
+  const topKeeperRobot = [...goalies].sort((a, b) => b.saves - a.saves)[0] ?? goalies[0];
+  const topKeeper = topKeeperRobot && topKeeperRobot.saves > 0
+    ? { robot: topKeeperRobot, count: topKeeperRobot.saves }
+    : topKeeperRobot ? { robot: topKeeperRobot, count: 0 } : null;
+
+  const topShooterRobot = [...robotList].sort((a, b) => b.shots - a.shots)[0];
+  const topShooter = topShooterRobot && topShooterRobot.shots > 0
+    ? { robot: topShooterRobot, count: topShooterRobot.shots }
+    : null;
+
+  const totalHomeSaves = robots['violet-1'].saves + robots['violet-2'].saves;
+  const totalAwaySaves = robots['lime-1'].saves + robots['lime-2'].saves;
+  const totalHomeShots = robots['violet-1'].shots + robots['violet-2'].shots;
+  const totalAwayShots = robots['lime-1'].shots + robots['lime-2'].shots;
+  const totalHomePenalties = robots['violet-1'].penalties + robots['violet-2'].penalties;
+  const totalAwayPenalties = robots['lime-1'].penalties + robots['lime-2'].penalties;
+
+  const teamMetrics = [
+    { name: 'Goals Scored', home: v.homeGoals, away: v.awayGoals },
+    { name: 'Saves Made', home: totalHomeSaves, away: totalAwaySaves },
+    { name: 'Shots Fired', home: totalHomeShots, away: totalAwayShots },
+    { name: 'Clean Sheets', home: homeCleanSheets, away: awayCleanSheets },
+    { name: 'Stand-downs (§5.7)', home: totalHomePenalties, away: totalAwayPenalties },
+    { name: 'Multiple Defence (§5.3)', home: homeMultDef, away: awayMultDef },
+    { name: 'Restarts Awarded', home: homeRestarts, away: awayRestarts },
+  ];
+
+  return {
+    winnerSide,
+    winnerName,
+    outcomeTitle,
+    homeGoals: v.homeGoals,
+    awayGoals: v.awayGoals,
+    homeLegsWon,
+    awayLegsWon,
+    drawnLegs,
+    robots: robotList,
+    topScorer,
+    topKeeper,
+    topShooter,
+    teamMetrics,
+    goalsTimeline,
+  };
+}
+
+/**
+ * One match.
+ *
+ * Full match sheet view with rich post-game summary: outcome banner,
+ * final aggregate scoreboard, player accolades (top scorer, top saves),
+ * robot roster table, team comparisons, and per-leg timelines.
+ */
+async function matchPage(fixtureId: string): Promise<void> {
   const data = await api<MatchData>(`/api/match/${encodeURIComponent(fixtureId)}`);
   if (!data.ok) {
     view.innerHTML = h(`<h1>Unknown match</h1><p class="dim">${esc(data.reason ?? '')}</p>`);
@@ -492,12 +734,36 @@ async function matchPage(fixtureId: string): Promise<void> {
     <h1>${esc(data.fixture.home)}<span class="v">v</span>${esc(data.fixture.away)}</h1>
   `);
 
-  if (data.state === 'playing' && data.live) {
+  // `confirming` is on this branch on purpose: the match is over, the score is
+  // final, and the page flips to the full match sheet by itself the moment the
+  // referee agrees it. Falling through instead would show "Not played yet"
+  // beside a scoreline the hall just watched, and stop refreshing.
+  if ((data.state === 'playing' || data.state === 'confirming') && data.live) {
     view.innerHTML = head + h(`
       ${liveScoreline(data.live)}
-      <p style="margin-top:1rem"><a href="${esc(data.live.url)}" data-full>Watch the match</a></p>
+      ${
+        data.state === 'confirming'
+          ? `<p class="dim" style="margin-top:1rem">Full time. The result is with the referee.</p>`
+          : `<p style="margin-top:1rem"><a href="${esc(data.live.url)}" data-full>Watch the match</a></p>`
+      }
     `);
-    ticking = setInterval(() => void matchPage(fixtureId), 3000);
+    repoll(() => void matchPage(fixtureId), 3000);
+    return;
+  }
+
+  // Nothing exists for this fixture yet and that is now a thing somebody chose
+  // rather than a thing the schedule has not reached. Worth saying: a team
+  // standing at a pitch is owed the difference between "not yet" and "we are
+  // waiting for your referee".
+  if (data.state === 'due' || data.state === 'opening') {
+    view.innerHTML =
+      head +
+      h(`<div class="empty">${
+        data.state === 'due'
+          ? 'Waiting for the referee to open this match.'
+          : 'The referee has opened this match — the pitch is coming up.'
+      }</div>`);
+    repoll(() => void matchPage(fixtureId), 3000);
     return;
   }
 
@@ -507,35 +773,241 @@ async function matchPage(fixtureId: string): Promise<void> {
   }
 
   const record = data.record;
-  view.innerHTML = head + h(`
-    <p class="dim">Finished ${esc(when(record.completedAt))}. ${
-      record.verdict.outcome === 'drawn'
-        ? 'It was a draw'
-        : `${esc(record.verdict.outcome === 'won' ? data.fixture.home : data.fixture.away)} took it`
-    }, ${record.verdict.homeGoals}&ndash;${record.verdict.awayGoals}.</p>
+  const stats = processMatchStats(record, data.fixture);
 
+  view.innerHTML = head + h(`
+    <!-- Match Summary Hero Card -->
+    <div class="match-summary-card ${stats.winnerSide ? `winner-${stats.winnerSide}` : 'is-draw'}">
+      <div class="summary-top-banner">
+        <div class="verdict-badge ${stats.winnerSide ? `badge-${stats.winnerSide}` : 'badge-draw'}">
+          ${stats.winnerSide
+            ? `<span class="badge-icon">🏆</span> <span class="badge-text">${esc(stats.outcomeTitle)}</span>`
+            : `<span class="badge-icon">🤝</span> <span class="badge-text">Match Drawn</span>`
+          }
+        </div>
+        <span class="completed-label">${
+          record.legs.length > 1
+            ? `${stats.homeLegsWon}&ndash;${stats.awayLegsWon} legs (${stats.drawnLegs} drawn) &middot; ${esc(when(record.completedAt))}`
+            : `Full Time &middot; ${esc(when(record.completedAt))}`
+        }</span>
+      </div>
+
+      <div class="summary-hero-score">
+        <div class="hero-team home violet">
+          <div class="team-bar"></div>
+          <div class="team-meta">
+            <span class="team-role">Home &middot; Violet</span>
+            <a href="/t/${encodeURIComponent(slug(data.fixture.home))}" class="team-title">${esc(data.fixture.home)}</a>
+            ${record.legs.length > 1 ? `<span class="legs-won-tag">${stats.homeLegsWon} legs won</span>` : ''}
+          </div>
+          <div class="hero-goals">${stats.homeGoals}</div>
+        </div>
+
+        <div class="hero-center">
+          <span class="ft-pill">FT</span>
+          <span class="vs-dash">&ndash;</span>
+          <span class="total-legs">${record.legs.length} ${record.legs.length === 1 ? 'leg' : 'legs'}</span>
+        </div>
+
+        <div class="hero-team away lime">
+          <div class="hero-goals">${stats.awayGoals}</div>
+          <div class="team-meta">
+            <span class="team-role">Away &middot; Lime</span>
+            <a href="/t/${encodeURIComponent(slug(data.fixture.away))}" class="team-title">${esc(data.fixture.away)}</a>
+            ${record.legs.length > 1 ? `<span class="legs-won-tag">${stats.awayLegsWon} legs won</span>` : ''}
+          </div>
+          <div class="team-bar"></div>
+        </div>
+      </div>
+
+      ${stats.goalsTimeline.length ? `
+        <div class="summary-goals-strip">
+          <span class="goals-strip-label">Goals</span>
+          <div class="goals-chips">
+            ${stats.goalsTimeline
+              .map(
+                (g) =>
+                  `<span class="goal-chip ${g.team}">
+                    <span class="chip-ball">⚽</span>
+                    <span class="chip-time">${clock(g.at)}</span>
+                    <span class="chip-team">${g.team === 'violet' ? esc(data.fixture.home) : esc(data.fixture.away)}</span>
+                    ${g.robotId ? `<span class="chip-robot">#${g.robotId.slice(g.robotId.lastIndexOf('-') + 1)}</span>` : ''}
+                  </span>`,
+              )
+              .join('')}
+          </div>
+        </div>
+      ` : ''}
+    </div>
+
+    <!-- Player Accolades / Spotlights -->
+    <h2>Player Spotlights</h2>
+    <div class="accolades-grid">
+      <div class="accolade-card top-scorer">
+        <div class="accolade-header">
+          <span class="accolade-icon">⚽</span>
+          <span class="accolade-category">Most Goals Scored</span>
+        </div>
+        <div class="accolade-body">
+          ${stats.topScorer ? `
+            <div class="accolade-who">
+              <span class="robot-pill ${stats.topScorer.robot.team}">${stats.topScorer.robot.team === 'violet' ? 'Violet' : 'Lime'} ${stats.topScorer.robot.number}</span>
+              <span class="team-name">${esc(stats.topScorer.robot.teamName)}</span>
+            </div>
+            <div class="accolade-stat">
+              <span class="stat-number">${stats.topScorer.count}</span>
+              <span class="stat-unit">${stats.topScorer.count === 1 ? 'goal' : 'goals'}</span>
+            </div>
+          ` : `
+            <span class="accolade-empty">No goals scored</span>
+          `}
+        </div>
+      </div>
+
+      <div class="accolade-card top-keeper">
+        <div class="accolade-header">
+          <span class="accolade-icon">🧤</span>
+          <span class="accolade-category">Most Goals Saved</span>
+        </div>
+        <div class="accolade-body">
+          ${stats.topKeeper ? `
+            <div class="accolade-who">
+              <span class="robot-pill ${stats.topKeeper.robot.team}">${stats.topKeeper.robot.team === 'violet' ? 'Violet' : 'Lime'} ${stats.topKeeper.robot.number}</span>
+              <span class="team-name">${esc(stats.topKeeper.robot.teamName)}</span>
+              <span class="role-badge">${esc(stats.topKeeper.robot.role)}</span>
+            </div>
+            <div class="accolade-stat">
+              <span class="stat-number">${stats.topKeeper.count}</span>
+              <span class="stat-unit">${stats.topKeeper.count === 1 ? 'save' : 'saves'}</span>
+            </div>
+          ` : `
+            <span class="accolade-empty">No saves recorded</span>
+          `}
+        </div>
+      </div>
+
+      <div class="accolade-card top-shooter">
+        <div class="accolade-header">
+          <span class="accolade-icon">🎯</span>
+          <span class="accolade-category">Most Shots Fired</span>
+        </div>
+        <div class="accolade-body">
+          ${stats.topShooter ? `
+            <div class="accolade-who">
+              <span class="robot-pill ${stats.topShooter.robot.team}">${stats.topShooter.robot.team === 'violet' ? 'Violet' : 'Lime'} ${stats.topShooter.robot.number}</span>
+              <span class="team-name">${esc(stats.topShooter.robot.teamName)}</span>
+            </div>
+            <div class="accolade-stat">
+              <span class="stat-number">${stats.topShooter.count}</span>
+              <span class="stat-unit">${stats.topShooter.count === 1 ? 'shot' : 'shots'}</span>
+            </div>
+          ` : `
+            <span class="accolade-empty">No shots recorded</span>
+          `}
+        </div>
+      </div>
+    </div>
+
+    <!-- Full Robot Performance Table -->
+    <h2>Robot Performance</h2>
+    <div class="table-container">
+      <table class="robot-table">
+        <thead>
+          <tr>
+            <th>Robot</th>
+            <th>Team</th>
+            <th>Role</th>
+            <th>Goals</th>
+            <th>Saves</th>
+            <th>Shots</th>
+            <th>Penalties (§5.7)</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${stats.robots
+            .map(
+              (r) => `
+            <tr class="robot-row ${r.team}">
+              <td class="robot-col">
+                <span class="robot-badge ${r.team}">
+                  <span class="badge-dot"></span>
+                  ${r.team === 'violet' ? 'Violet' : 'Lime'} ${r.number}
+                </span>
+              </td>
+              <td class="team-col">${esc(r.teamName)}</td>
+              <td class="role-col"><span class="role-pill ${r.role.toLowerCase()}">${esc(r.role)}</span></td>
+              <td class="num-col ${r.goals > 0 ? 'top-stat' : ''}">${r.goals}</td>
+              <td class="num-col ${r.saves > 0 ? 'top-stat' : ''}">${r.saves}</td>
+              <td class="num-col">${r.shots}</td>
+              <td class="num-col ${r.penalties > 0 ? 'warn-stat' : ''}">${r.penalties}</td>
+            </tr>
+          `,
+            )
+            .join('')}
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Team Comparison Metrics -->
+    <h2>Team Comparison</h2>
+    <div class="team-comparison-card">
+      <div class="comparison-header">
+        <span class="side-title violet">${esc(data.fixture.home)}</span>
+        <span class="metric-title">Metric</span>
+        <span class="side-title lime">${esc(data.fixture.away)}</span>
+      </div>
+      ${stats.teamMetrics
+        .map((m) => {
+          const sum = m.home + m.away;
+          const homePct = sum === 0 ? 50 : Math.round((m.home / sum) * 100);
+          const awayPct = 100 - homePct;
+          return `
+          <div class="comparison-row">
+            <span class="row-val violet ${m.home > m.away ? 'is-lead' : ''}">${m.home}</span>
+            <div class="row-center">
+              <span class="row-label">${esc(m.name)}</span>
+              <div class="ratio-bar">
+                <div class="fill violet" style="width: ${homePct}%"></div>
+                <div class="fill lime" style="width: ${awayPct}%"></div>
+              </div>
+            </div>
+            <span class="row-val lime ${m.away > m.home ? 'is-lead' : ''}">${m.away}</span>
+          </div>
+        `;
+        })
+        .join('')}
+    </div>
+
+    <!-- Fixture Legs Timeline & Code -->
+    <h2>Fixture Legs</h2>
     ${record.legs
       .map(
         (leg, index) => `
-        <h2>Leg ${index + 1}</h2>
-        <p class="dim">${leg.score.violet}&ndash;${leg.score.lime} over ${clock(leg.clock)},
-          on seed <span class="mono">${esc(seedText(leg.seed))}</span>. Replaying that seed
-          replays this match.</p>
-        <div class="timeline">
-          ${
-            leg.events.length
-              ? leg.events
-                  .map(
-                    (event) =>
-                      `<div>
-                         <span class="at">${clock(event.at)}</span>
-                         <span class="rule">${esc(event.rule)}</span>
-                         <span class="grow">${esc(event.message)}</span>
-                       </div>`,
-                  )
-                  .join('')
-              : '<span class="dim">No calls.</span>'
-          }
+        <div class="leg-card">
+          <div class="leg-card-header">
+            <span class="leg-badge">Leg ${index + 1}</span>
+            <span class="leg-score">${esc(data.fixture.home)} ${leg.score.violet} &ndash; ${leg.score.lime} ${esc(data.fixture.away)}</span>
+            <span class="leg-clock">${clock(leg.clock)}</span>
+          </div>
+          <p class="dim" style="margin: 0.3rem 0 0.8rem">
+            Played on seed <span class="mono">${esc(seedText(leg.seed))}</span>. Replaying that seed replays this match.
+          </p>
+          <div class="timeline">
+            ${
+              leg.events.length
+                ? leg.events
+                    .map(
+                      (event) =>
+                        `<div>
+                           <span class="at">${clock(event.at)}</span>
+                           <span class="rule">${esc(event.rule)}</span>
+                           <span class="grow">${esc(event.message)}</span>
+                         </div>`,
+                    )
+                    .join('')
+                : '<span class="dim">No calls.</span>'
+            }
+          </div>
         </div>`,
       )
       .join('')}
@@ -587,10 +1059,9 @@ async function login(): Promise<void> {
     // `me` is refreshed by `go`, so ask it where to send them afterwards.
     me = await api<Me>('/api/me');
     const next = asked ?? home();
-    // The referee console is its own bundle, so going there is a real
-    // navigation rather than a route change.
-    if (next.startsWith('/referee')) location.href = next;
-    else await go(next);
+    // A referee's own pages are this bundle now; only an arena's console is
+    // somewhere else, and nothing sends anybody straight there.
+    await go(next);
     return null;
   });
 }
@@ -950,19 +1421,37 @@ async function settings(): Promise<void> {
   });
 }
 
+interface RefereeCard {
+  id: string;
+  home: string;
+  away: string;
+  state: string;
+  live?: Live;
+  console?: string;
+}
+
+/** What a state is called on a referee's own list. */
+const REFEREE_STATE: Record<string, string> = {
+  playing: 'on now',
+  confirming: 'waiting on you',
+  opening: 'opening',
+  due: 'ready to open',
+  upcoming: 'not started',
+  played: 'played',
+};
+
 /**
- * The matches a referee may take right now.
+ * A referee's day: the matches they have been given.
  *
- * The console itself is not here and cannot be: it lives on the arena playing
- * the match, because there is no single world any more. Phase 11 replaces this
- * list with a referee's actual assignments — the next game and the ones after
- * it, with times — which is the screen somebody standing in a hall needs.
+ * Their assignments rather than whatever happens to be running, so the game
+ * they are standing at twenty minutes early is on this page — which is the
+ * whole point of a referee having a screen at all. The console itself is not
+ * here and cannot be: it lives on the arena playing the match. What is here is
+ * a name for each match that does not move.
  */
 async function refereeList(): Promise<void> {
   if (!me.can.referee) return void go('/login?next=%2Freferee');
-  const { fixtures } = await api<{
-    fixtures: { fixtureId: string; home: string; away: string; console: string; running: boolean }[];
-  }>('/api/referee/fixtures');
+  const { fixtures } = await api<{ fixtures: RefereeCard[] }>('/api/referee/fixtures');
 
   view.innerHTML = h(`
     <h1>Refereeing</h1>
@@ -970,15 +1459,187 @@ async function refereeList(): Promise<void> {
       fixtures.length
         ? `<div class="rows">${fixtures
             .map(
-              (fixture) => `<a class="row" href="${esc(fixture.console)}">
+              (fixture) => `<a class="row" href="/referee/m/${encodeURIComponent(fixture.id)}">
                 <span class="grow">${esc(fixture.home)} v ${esc(fixture.away)}</span>
-                <span class="state">${fixture.running ? 'playing' : 'waiting to kick off'}</span>
+                <span class="state">${esc(REFEREE_STATE[fixture.state] ?? fixture.state)}</span>
               </a>`,
             )
             .join('')}</div>`
-        : `<div class="empty">No match is open yet. One appears here the moment the schedule reaches it.</div>`
+        : `<div class="empty">Nothing is assigned to you yet. An organiser puts your games here.</div>`
     }
   `);
+  // So a referee can leave this open and watch their game come round.
+  if (fixtures.some((one) => one.state !== 'played')) {
+    repoll(() => void refereeList(), 5000);
+  }
+}
+
+/**
+ * One match a referee is to run, at a URL that outlives the arena.
+ *
+ * Openable before there is anything to open — that is the point. An arena id
+ * exists only while the match does, so this page is what a referee can be
+ * given in advance, and it grows the console link by itself the moment the
+ * match is spawned.
+ */
+async function refereeMatch(fixtureId: string): Promise<void> {
+  if (!me.can.referee) return void go(`/login?next=${encodeURIComponent(`/referee/m/${fixtureId}`)}`);
+  const data = await api<{
+    ok: boolean;
+    reason?: string;
+    fixture: { id: string; home: string; away: string };
+    state: string;
+    live: Live | null;
+    console: string | null;
+    final: { homeScore: number; awayScore: number } | null;
+  }>(`/api/referee/match/${encodeURIComponent(fixtureId)}`);
+
+  if (!data.ok) {
+    view.innerHTML = h(`
+      <h1>Not your match</h1>
+      <p class="dim">${esc(data.reason ?? '')}</p>
+      <p><a href="/referee">Back to your games</a></p>
+    `);
+    return;
+  }
+
+  const head = h(`
+    <p class="dim"><a href="/referee">Refereeing</a></p>
+    <h1>${esc(data.fixture.home)}<span class="v">v</span>${esc(data.fixture.away)}</h1>
+  `);
+
+  // Full time, and nothing is on disk yet. This is the one page in the site that
+  // decides something rather than showing it: until a button here is pressed the
+  // fixture is not in the table, does not count, and is holding its arena open
+  // so the referee can go back and look at the board.
+  if (data.state === 'confirming' && data.final) {
+    view.innerHTML =
+      head +
+      h(`
+      ${scoreline({
+        href: `/m/${encodeURIComponent(data.fixture.id)}`,
+        home: data.fixture.home,
+        away: data.fixture.away,
+        homeGoals: data.final.homeScore,
+        awayGoals: data.final.awayScore,
+        state: ['full time', 'not recorded yet'],
+      })}
+      <p class="dim" style="margin-top:1rem">Nothing is written down until you confirm it.</p>
+      <p style="margin-top:1rem">
+        <button id="confirm-result">Confirm the result</button>
+        <button id="replay-match" class="quiet">Play it again</button>
+      </p>
+      ${data.console ? `<p class="dim"><a href="${esc(data.console)}" data-full>Back to the console</a></p>` : ''}
+    `);
+
+    const answer = async (verb: 'confirm' | 'replay'): Promise<void> => {
+      const res = await api<{ ok: boolean; reason?: string }>(
+        `/api/referee/match/${encodeURIComponent(fixtureId)}/${verb}`,
+        { method: 'POST' },
+      );
+      // Shown as the server phrased it — somebody else confirming it first is
+      // the likely refusal, and that is worth reading rather than rewording.
+      if (!res.ok && res.reason) alert(res.reason);
+      await go(`/referee/m/${encodeURIComponent(fixtureId)}`, true);
+    };
+    document.getElementById('confirm-result')?.addEventListener('click', () => void answer('confirm'));
+
+    // Two presses, because this one throws away a match that was actually
+    // played and it sits next to the button that keeps it. Said on the button
+    // itself rather than in a modal — the rest of this site, including the
+    // admin's stop-an-arena button, never puts a dialog in front of anybody.
+    const replay = document.getElementById('replay-match') as HTMLButtonElement | null;
+    let armed = false;
+    replay?.addEventListener('click', () => {
+      if (armed) return void answer('replay');
+      armed = true;
+      replay.textContent = 'Press again to discard it';
+      // `button.stop` is the danger outline the admin's arena list already uses.
+      replay.classList.remove('quiet');
+      replay.classList.add('stop');
+      // And stop re-rendering: a poll that redrew the page here would disarm
+      // the button under the hand that just armed it.
+      if (ticking) {
+        clearInterval(ticking);
+        ticking = null;
+      }
+    });
+
+    // Slowly, and only so an admin confirming elsewhere is noticed: a re-render
+    // under somebody's cursor is how a button gets pressed by accident.
+    repoll(() => void refereeMatch(fixtureId), 5000);
+    return;
+  }
+
+  // The one control in this site that makes a computer start. Until it is
+  // pressed nothing exists for this fixture at all — no arena, no robots, no
+  // sandboxed interpreters — so this page is where a referee's match begins
+  // rather than where it is reported. A button rather than the page load
+  // itself: this page is polled, bookmarked and reached with the back button,
+  // and none of those should spawn five processes at a venue.
+  if (data.state === 'due' || data.state === 'opening') {
+    const waiting = data.state === 'opening';
+    view.innerHTML =
+      head +
+      h(`
+      <div class="empty">${
+        waiting
+          ? 'Opening the pitch. This takes a moment &mdash; longer if every pitch at the venue is busy.'
+          : 'Nothing is running yet. Opening this starts the pitch and brings both teams&rsquo; robots up.'
+      }</div>
+      ${waiting ? '' : `<p style="margin-top:1rem"><button id="open-pregame">Open pre-game</button></p>`}
+    `);
+
+    const open = document.getElementById('open-pregame') as HTMLButtonElement | null;
+    open?.addEventListener('click', () => {
+      // No two-press guard, unlike the discard button at full time: this one
+      // only ever makes something exist.
+      open.disabled = true;
+      open.textContent = 'Opening\u2026';
+      void (async () => {
+        const res = await api<{ ok: boolean; reason?: string }>(
+          `/api/referee/match/${encodeURIComponent(fixtureId)}/open`,
+          { method: 'POST' },
+        );
+        if (!res.ok && res.reason) alert(res.reason);
+        await go(`/referee/m/${encodeURIComponent(fixtureId)}`, true);
+      })();
+    });
+
+    // Quickly while a pitch is coming up, because that is about to change;
+    // slowly while it is merely due, because a re-render under somebody's
+    // cursor is how a button gets pressed by accident.
+    repoll(() => void refereeMatch(fixtureId), waiting ? 2000 : 5000);
+    return;
+  }
+
+  if (data.state === 'playing' && data.live && data.console) {
+    view.innerHTML =
+      head +
+      h(`
+      ${liveScoreline(data.live)}
+      <p style="margin-top:1rem"><a href="${esc(data.console)}" data-full>Take the match</a></p>
+    `);
+    repoll(() => void refereeMatch(fixtureId), 3000);
+    return;
+  }
+
+  if (data.state === 'played') {
+    view.innerHTML =
+      head +
+      h(`
+      <div class="empty">This match has been played.</div>
+      <p><a href="/m/${encodeURIComponent(data.fixture.id)}">See the record</a></p>
+    `);
+    return;
+  }
+
+  view.innerHTML =
+    head +
+    h(`
+    <div class="empty">Not started yet. This page becomes the match when it opens — leave it up.</div>
+  `);
+  repoll(() => void refereeMatch(fixtureId), 3000);
 }
 
 /**

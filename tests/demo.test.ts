@@ -25,10 +25,10 @@ afterEach(async () => {
   for (const arenas of supervisors.splice(0)) arenas.closeAll();
 });
 
-async function waitFor(check: () => boolean, timeoutMs = 30_000, what = 'condition'): Promise<void> {
+async function waitFor(check: () => boolean | Promise<boolean>, timeoutMs = 30_000, what = 'condition'): Promise<void> {
   const until = Date.now() + timeoutMs;
   for (;;) {
-    if (check()) return;
+    if (await check()) return;
     if (Date.now() > until) throw new Error(`timed out waiting for ${what}`);
     await new Promise((done) => setTimeout(done, 100));
   }
@@ -77,6 +77,44 @@ describe('the demo arena, from the inside', () => {
     expect(after.playing).toBe(true);
     demo.stop();
   }, 60_000);
+
+  it('supports per-team bot configuration and resolves submitted team name', async () => {
+    let demoRef: InstanceType<typeof DemoArena> | null = null;
+    const server = new MatchServer({
+      port: 0,
+      realtime: true,
+      control: (req, url) => demoRef?.handle(req, url) ?? null,
+    });
+    servers.push(server);
+    const port = await server.listen();
+
+    const demo = new DemoArena(server, {
+      teams: { violet: 'Violet', lime: 'Lime' },
+      homeBots: 'reference',
+      awayBots: 'rehearsal',
+      submissionsDir: 'submissions',
+      halfSeconds: 2,
+      gapSeconds: 0,
+    });
+    demoRef = demo;
+    demo.start(port);
+
+    await waitFor(async () => {
+      const answer = await fetch(`http://127.0.0.1:${port}/arena-api/state`);
+      if (answer.status !== 200) return false;
+      const data = (await answer.json()) as { state: { playing: boolean; teams?: { violet: string; lime: string } } };
+      return data.state.playing && data.state.teams?.lime === 'Rehearsal';
+    }, 10_000, 'state with resolved rehearsal team name');
+
+    const answer = await fetch(`http://127.0.0.1:${port}/arena-api/state`);
+    const { state } = (await answer.json()) as {
+      state: { playing: boolean; teams: { violet: string; lime: string } };
+    };
+    expect(state.playing).toBe(true);
+    expect(state.teams.violet).toBe('Reference');
+    expect(state.teams.lime).toBe('Rehearsal');
+    demo.stop();
+  }, 60_000);
 });
 
 describe('a demo arena, supervised', () => {
@@ -107,5 +145,42 @@ describe('a demo arena, supervised', () => {
     // A demo must not be reaped by the idle sweep, which only touches practice.
     arenas.sweep();
     expect(arenas.info(arena.id)).not.toBeNull();
+  }, 60_000);
+
+  it('passes homeBots and awayBots to the child arena process and resolves team names', async () => {
+    const arenas = new ArenaSupervisor({ submissionsDir: 'submissions', log: () => {} });
+    supervisors.push(arenas);
+
+    const arena = await arenas.create({
+      kind: 'demo',
+      demo: {
+        home: 'Violet',
+        away: 'Lime',
+        bots: 'reference',
+        homeBots: 'reference',
+        awayBots: 'rehearsal',
+        halfSeconds: 2,
+        league: null,
+        gapSeconds: 0,
+      },
+    });
+    const port = arenas.portOf(arena.id);
+    expect(port).not.toBeNull();
+
+    await waitFor(async () => {
+      const answer = await fetch(`http://127.0.0.1:${port}/arena-api/state`);
+      if (answer.status !== 200) return false;
+      const data = (await answer.json()) as { state: { playing: boolean; teams?: { violet: string; lime: string } } };
+      return data.state.playing && data.state.teams?.lime === 'Rehearsal';
+    }, 15_000, 'supervised demo state with resolved rehearsal team name');
+
+    const answer = await fetch(`http://127.0.0.1:${port}/arena-api/state`);
+    const payload = (await answer.json()) as {
+      ok: boolean;
+      state: { playing: boolean; teams: { violet: string; lime: string } };
+    };
+    expect(payload.ok).toBe(true);
+    expect(payload.state.teams.violet).toBe('Reference');
+    expect(payload.state.teams.lime).toBe('Rehearsal');
   }, 60_000);
 });

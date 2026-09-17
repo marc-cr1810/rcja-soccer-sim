@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import math
 
+from .drive import wrap_angle
 from .field import other_side
 
 #: The camera's two goal sightings are named after the goal paint (cyan, yellow),
@@ -147,3 +148,84 @@ class GoalFrame:
     def from_our_goal(self, along: float) -> tuple[float, float]:
         """A point ``along`` millimetres up the field from our goal."""
         return self.my_x + self.up_x * along, self.my_z + self.up_z * along
+
+    # ------------------------------------------------- attack-relative coords
+
+    @property
+    def centre(self) -> tuple[float, float]:
+        """The centre spot, as this robot measured it: midway between the goals."""
+        return (self.my_x + self.their_x) / 2.0, (self.my_z + self.their_z) / 2.0
+
+    def to_frame(self, x: float, z: float) -> tuple[float, float]:
+        """A field point in attack-relative coordinates.
+
+        The frame's ``+x`` runs towards the goal this robot is attacking and
+        its origin is the centre spot, so it is the field frame turned to face
+        the right way — same origin, same millimetres, same constants. Feed the
+        result to :func:`~rcja_soccer.field.in_penalty_box`, ``back_inside`` or
+        anything else that takes field coordinates and it still means what it
+        says; ``HALF_LENGTH`` is still the goal line, and the goal being
+        attacked is now always the one at ``+HALF_LENGTH``.
+
+        That is the point of it. A rule written in these coordinates is the
+        same rule at both ends, because the ends are no longer distinguishable
+        from inside the rule: there is no ``attack_direction`` left to multiply
+        by and so none to forget. ``if bz > 60`` picks the same physical side
+        of the field in the first half and the second.
+
+        The lateral axis is ``up`` turned a quarter turn to the left, which
+        makes this a *rotation* and not a mirror. That matters here rather than
+        being a detail: the open drivetrain is chiral - four tangential wheels
+        all driving the same way round - so a frame that flipped handedness
+        would turn a robot's own left into its right and every steering
+        correction with it.
+        """
+        cx, cz = self.centre
+        dx = x - cx
+        dz = z - cz
+        return dx * self.up_x + dz * self.up_z, -dx * self.up_z + dz * self.up_x
+
+    def from_frame(self, forward: float, lateral: float) -> tuple[float, float]:
+        """Back to field coordinates, for anything that still speaks them."""
+        cx, cz = self.centre
+        return (
+            cx + forward * self.up_x - lateral * self.up_z,
+            cz + forward * self.up_z + lateral * self.up_x,
+        )
+
+    def heading(self, heading: float) -> float:
+        """A compass heading, relative to the goal this robot is attacking.
+
+        Facing the attacking goal reads ``0`` in *both* halves, so the ±pi
+        branch cut sits behind the robot rather than under it. Nothing in this
+        library needs that - every angle here is compared with ``wrap_angle``,
+        which does not care where the cut falls - but a program that filters,
+        averages or integrates a heading of its own does, and this is the
+        reading to do it to.
+
+        The robot-frame bearing a motor mixer wants comes out the same either
+        way: ``travel`` and ``heading`` are both shifted by the same amount, so
+        their difference is unchanged. Mixing conventions is therefore safe in
+        the one place it would otherwise be easy to get wrong.
+        """
+        return wrap_angle(heading - self.up_angle())
+
+    def goals(self, s) -> tuple[object | None, object | None]:
+        """The camera's two goal sightings, named by what they are to us.
+
+        Returns ``(attacking, defending)``. The camera reports goals by paint,
+        because that is what a colour blob detector can tell you, and the paint
+        does not move at half-time while (rule 1.4/5.4) which one this team is
+        shooting at does. Asking for them this way is the other half of not
+        having to track the swap: with ``to_frame`` for the geometry and this
+        for the camera, nothing a program reads is still keyed to an end of the
+        field.
+        """
+        camera = getattr(s, "camera", None)
+        goals = getattr(camera, "goals", None) if camera is not None else None
+        if goals is None:
+            return None, None
+        return (
+            getattr(goals, self.their_colour, None),
+            getattr(goals, self.my_colour, None),
+        )

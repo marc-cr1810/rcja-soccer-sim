@@ -203,6 +203,11 @@ describe('the match server', () => {
       expect(hello.league.id).toBe('open');
       expect(hello.teams.violet).toBe('ACT');
     }
+    const summary = messages.find((m) => m.type === 'summary');
+    expect(summary).toBeDefined();
+    if (summary?.type === 'summary') {
+      expect(summary.result.robotStats).toBeDefined();
+    }
     socket.close();
   });
 

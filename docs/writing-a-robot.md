@@ -135,6 +135,13 @@ The server shows a field as soon as it starts, and each robot appears on it as
 its program connects — so you can see which of your four are in before anything
 kicks off.
 
+One thing worth checking before a competition rather than during one: that
+your robot plays the same in the second half as the first. It changes ends at
+half-time and your code does not, which is the one bug that looks like bad luck
+— see ["You change ends at half-time, and your code does
+not"](../python/README.md#nine-things-that-will-catch-you-out). `bun run bench`
+will flag it if the scoreline is lopsided enough to show.
+
 or use `examples/play.py` / `bun run bench` to run it against the reference
 team — see [python/README.md](../python/README.md#try-it) and
 [python/README.md](../python/README.md#measuring-it). None of that involves a

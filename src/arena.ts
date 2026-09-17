@@ -36,11 +36,13 @@ import type { MatchResult } from './match';
 import type { LeagueId } from './leagues';
 import type { SeedInput } from './rand';
 import { agentsFor, referenceTeam } from './reference';
+import { botRoster } from './bots';
 import { matchSeed } from './rand';
-import { resolveLineup, spawnLineup, type SpawnedLineup } from './lineup';
+import { resolveLineup, spawnLineup, type LineupEntry, type SpawnedLineup } from './lineup';
 import { hashSubmission } from './submission';
 import type { MatchServer } from './server';
 import type { Transport } from './agent';
+import { waitForSeats } from './bench';
 import type { Subprocess } from 'bun';
 import { join, resolve } from 'node:path';
 
@@ -80,6 +82,8 @@ export interface ArenaState {
   running: boolean;
   /** Simulated seconds per wall second, or `null` until a window has closed. */
   fidelity: number | null;
+  /** Teams playing the current match. */
+  teams?: { violet: string; lime: string } | null;
   /** The finished match, held until the hub collects it. */
   finished: PlayedMatch | null;
   /** Why the last request could not be played, if it could not. */
@@ -247,6 +251,12 @@ export interface DemoOptions {
   teams: { violet: string; lime: string };
   /** `reference`, `examples`, or a bot-roster name. Default `reference`. */
   bots?: string;
+  homeBots?: string;
+  awayBots?: string;
+  submissionsDir?: string;
+  pythonLibDir?: string | null;
+  seatCpuPercent?: number;
+  seatMemoryMb?: number;
   halfSeconds?: number;
   league?: LeagueId;
   /** Wall-clock pause between matches, so the hall can read the table. */
@@ -258,7 +268,9 @@ const PYTHON_SEAT_TIMEOUT_MS = 15_000;
 
 export class DemoArena {
   private stopping = false;
-  private producer: Subprocess | null = null;
+  private producers = new Map<string, Subprocess>();
+  private lineup: SpawnedLineup | null = null;
+  private currentTeams: { violet: string; lime: string } | null = null;
   private readonly log: (line: string) => void;
   private port = 0;
 
@@ -267,6 +279,7 @@ export class DemoArena {
     private readonly opts: DemoOptions,
   ) {
     this.log = opts.log ?? (() => {});
+    this.currentTeams = { ...opts.teams };
   }
 
   /** The control surface, mounted on `MatchServer` like `FixtureArena`'s. */
@@ -291,6 +304,7 @@ export class DemoArena {
       half: frame?.half ?? 1,
       running: frame?.running ?? false,
       fidelity: this.server.realtimeFidelity,
+      teams: this.currentTeams,
       // A demo never finishes and never refuses: there is nothing to collect.
       finished: null,
       error: null,
@@ -305,22 +319,178 @@ export class DemoArena {
 
   stop(): void {
     this.stopping = true;
-    this.stopProducer();
+    this.stopProducers();
+    this.lineup?.stop();
+    this.lineup = null;
+  }
+
+  private resolveSideBot(side: 'violet' | 'lime'): string {
+    if (side === 'violet' && this.opts.homeBots) return this.opts.homeBots;
+    if (side === 'lime' && this.opts.awayBots) return this.opts.awayBots;
+    const bots = this.opts.bots ?? 'reference';
+    if (bots === 'reference' || bots === 'examples' || bots === 'example') {
+      return bots === 'examples' ? 'example' : bots;
+    }
+    if (bots.includes(',')) {
+      const [h, a] = bots.split(',').map((s) => s.trim());
+      return side === 'violet' ? (h || 'reference') : (a || 'reference');
+    }
+    if (bots.includes(':')) {
+      const [h, a] = bots.split(':').map((s) => s.trim());
+      return side === 'violet' ? (h || 'reference') : (a || 'reference');
+    }
+    return side === 'violet' ? 'reference' : bots;
+  }
+
+  private isSubmission(bot: string): boolean {
+    if (bot === 'reference' || bot === 'example' || bot === 'examples') return false;
+    if (botRoster().some((b) => b.name === bot)) return false;
+    return true;
+  }
+
+  private resolveTeamNames(
+    resolvedLineup: Partial<Record<string, LineupEntry>>,
+    violetBot: string,
+    limeBot: string,
+  ): { violet: string; lime: string } {
+    const defaultHome = this.opts.teams.violet === 'Violet' || !this.opts.teams.violet;
+    const defaultAway = this.opts.teams.lime === 'Lime' || !this.opts.teams.lime;
+
+    const nameForSide = (
+      side: 'violet' | 'lime',
+      isDefault: boolean,
+      configuredName: string,
+      bot: string,
+    ): string => {
+      if (!isDefault && configuredName) return configuredName;
+
+      const entry = resolvedLineup[`${side}-1`] ?? resolvedLineup[`${side}-2`];
+      if (entry?.manifest.team) return entry.manifest.team;
+
+      if (bot !== 'reference' && bot !== 'example' && bot !== 'examples') {
+        return bot
+          .split(/[-_]+/)
+          .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+          .join(' ');
+      }
+
+      if (bot === 'example' || bot === 'examples') {
+        return 'Examples';
+      }
+
+      if (violetBot === 'reference' && (limeBot === 'reference' || !limeBot)) {
+        return side === 'violet' ? 'Violet' : 'Lime';
+      }
+      return 'Reference';
+    };
+
+    return {
+      violet: nameForSide('violet', defaultHome, this.opts.teams.violet, violetBot),
+      lime: nameForSide('lime', defaultAway, this.opts.teams.lime, limeBot),
+    };
+  }
+
+  private buildAgents(violetBot: string, limeBot: string): ReturnType<typeof agentsFor> {
+    const agentForSide = (side: 'violet' | 'lime', botName: string) => {
+      const rosterBot = botRoster().find((b) => b.name === botName);
+      if (rosterBot) {
+        const [r1, r2] = rosterBot.make(side);
+        return { [`${side}-1`]: r1, [`${side}-2`]: r2 };
+      }
+      return referenceTeam(side);
+    };
+    return {
+      ...agentForSide('violet', violetBot),
+      ...agentForSide('lime', limeBot),
+    } as ReturnType<typeof agentsFor>;
   }
 
   private async run(): Promise<void> {
-    const bots = this.opts.bots ?? 'reference';
     for (;;) {
       if (this.stopping) return;
 
-      // Who fills the seats: the built-in agents always go in — a remote seat
-      // simply takes over from its reference fallback, so a seat that never
-      // shows up still has a robot on the field.
-      const agents = agentsFor(bots === 'reference' || bots === 'examples' ? undefined : bots);
-      const transports = bots === 'examples' ? await this.seatExamples() : undefined;
-      if (this.stopping) return;
+      const violetBot = this.resolveSideBot('violet');
+      const limeBot = this.resolveSideBot('lime');
 
-      await this.playOne(agents, transports);
+      // 1. Resolve submissions if either side uses a submitted team
+      const submissionsDir = this.opts.submissionsDir ?? this.server.submissionsDirectory;
+      let resolvedLineup: Partial<Record<string, LineupEntry>> = {};
+      if (submissionsDir && (this.isSubmission(violetBot) || this.isSubmission(limeBot))) {
+        try {
+          resolvedLineup = await resolveLineup(submissionsDir, {
+            violet: this.isSubmission(violetBot) ? violetBot : '__none__',
+            lime: this.isSubmission(limeBot) ? limeBot : '__none__',
+          });
+        } catch (err) {
+          this.log(`could not resolve submission lineup: ${(err as Error).message}`);
+        }
+      }
+
+      // 2. Resolve display team names
+      const matchTeams = this.resolveTeamNames(resolvedLineup, violetBot, limeBot);
+      this.currentTeams = matchTeams;
+
+      // 3. Spawn submission processes if any resolved
+      let submissionTransports: Partial<Record<string, Transport>> = {};
+      if (Object.keys(resolvedLineup).length > 0) {
+        try {
+          this.lineup = await spawnLineup(
+            this.server,
+            resolvedLineup,
+            {
+              pythonLibDir: this.opts.pythonLibDir ?? resolve(REPO_ROOT, 'python'),
+              cpuQuotaPercent: this.opts.seatCpuPercent,
+              memoryLimitMb: this.opts.seatMemoryMb,
+              connectTimeoutSeconds: 10,
+            },
+            this.log,
+          );
+          submissionTransports = this.lineup.transports;
+        } catch (err) {
+          this.log(`could not seat submission lineup: ${(err as Error).message}; playing built-in instead`);
+          this.lineup?.stop();
+          this.lineup = null;
+        }
+      }
+
+      // 4. Spawn / seat example robots if needed
+      const violetExample = violetBot === 'example' || violetBot === 'examples';
+      const limeExample = limeBot === 'example' || limeBot === 'examples';
+      let exampleTransports: Partial<Record<string, Transport>> = {};
+
+      if (violetExample && limeExample) {
+        exampleTransports = await this.seatExamples(
+          ['violet-1', 'violet-2', 'lime-1', 'lime-2'],
+          'both',
+          matchTeams,
+        );
+      } else if (violetExample) {
+        exampleTransports = await this.seatExamples(['violet-1', 'violet-2'], 'violet', matchTeams);
+      } else if (limeExample) {
+        exampleTransports = await this.seatExamples(['lime-1', 'lime-2'], 'lime', matchTeams);
+      } else {
+        this.stopProducers();
+      }
+
+      if (this.stopping) {
+        this.lineup?.stop();
+        this.lineup = null;
+        return;
+      }
+
+      // 5. In-process agents as fallbacks for all seats
+      const agents = this.buildAgents(violetBot, limeBot);
+      const transports = { ...exampleTransports, ...submissionTransports };
+
+      try {
+        await this.playOne(agents, transports, matchTeams);
+      } finally {
+        this.lineup?.stop();
+        this.lineup = null;
+        for (const id of Object.keys(resolvedLineup)) {
+          this.server.agents.clearToken(id);
+        }
+      }
     }
   }
 
@@ -330,38 +500,60 @@ export class DemoArena {
    * whatever is missing with the built-in reference agent, and tries again
    * next time.
    */
-  private async seatExamples(): Promise<Partial<Record<string, Transport>>> {
-    // Seats that are already warm stay warm; only reseat after a drop.
-    if (this.server.agents.ready && this.producer) return this.server.agents.transports();
+  private async seatExamples(
+    neededSeats: string[],
+    mode: 'both' | 'violet' | 'lime',
+    teams: { violet: string; lime: string },
+  ): Promise<Partial<Record<string, Transport>>> {
+    if (neededSeats.length === 0) {
+      this.stopProducers();
+      return {};
+    }
 
-    this.stopProducer();
-    this.spawnProducer();
+    const live = this.server.agents.transports();
+    const allConnected = neededSeats.every((id) => live[id]?.connected);
+    if (allConnected && this.producers.has(mode)) {
+      return live;
+    }
 
-    const timeout = new Promise<'stalled'>((ok) =>
-      setTimeout(() => ok('stalled'), PYTHON_SEAT_TIMEOUT_MS),
-    );
-    const result = await Promise.race([
-      this.server.agents.whenReady().then(() => 'seated' as const),
-      timeout,
-    ]);
-    if (result === 'stalled' && !this.server.agents.ready) {
-      this.log('the example robots did not join in time; playing built-in instead');
+    this.stopProducers();
+    this.spawnProducer(mode, teams);
+
+    try {
+      await waitForSeats(this.server, neededSeats, PYTHON_SEAT_TIMEOUT_MS / 1000);
+    } catch {
+      this.log(`example robots for ${mode} did not join in time; playing built-in instead`);
     }
     return this.server.agents.transports();
   }
 
-  private spawnProducer(): void {
+  private spawnProducer(mode: 'both' | 'violet' | 'lime', teams: { violet: string; lime: string }): void {
     const script = join(REPO_ROOT, 'python', 'examples', 'play.py');
+    const args = [
+      'python3',
+      script,
+      '--url',
+      `ws://127.0.0.1:${this.port}/agent`,
+      '--violet',
+      teams.violet,
+      '--lime',
+      teams.lime,
+    ];
+    if (mode === 'violet' || mode === 'lime') {
+      args.push('--only', mode);
+    }
     try {
-      this.producer = Bun.spawn(
-        ['python3', script, '--url', `ws://127.0.0.1:${this.port}/agent`, '--violet', this.opts.teams.violet, '--lime', this.opts.teams.lime],
-        { cwd: process.cwd(), stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' },
-      );
-      this.log(`spawned the example robots: python3 ${script}`);
-      this.drain(this.producer);
+      const producer = Bun.spawn(args, {
+        cwd: process.cwd(),
+        stdin: 'ignore',
+        stdout: 'pipe',
+        stderr: 'pipe',
+      });
+      this.producers.set(mode, producer);
+      this.log(`spawned example robots (${mode}): python3 ${script}`);
+      this.drain(producer);
     } catch (err) {
-      this.log(`could not start the example robots (${(err as Error).message}); playing built-in instead`);
-      this.producer = null;
+      this.log(`could not start example robots (${(err as Error).message}); playing built-in instead`);
     }
   }
 
@@ -384,42 +576,47 @@ export class DemoArena {
     }
     producer.exited.then((code) => {
       this.log(`example robots exited (code ${code})`);
-      if (this.producer === producer) this.producer = null;
+      for (const [key, p] of this.producers.entries()) {
+        if (p === producer) this.producers.delete(key);
+      }
     });
   }
 
-  private stopProducer(): void {
-    const producer = this.producer;
-    this.producer = null;
-    if (!producer) return;
-    try {
-      producer.kill('SIGTERM');
-    } catch {
-      // Already gone.
+  private stopProducers(): void {
+    for (const producer of this.producers.values()) {
+      try {
+        producer.kill('SIGTERM');
+      } catch {
+        // Already gone.
+      }
     }
+    this.producers.clear();
   }
 
   private async playOne(
     agents: ReturnType<typeof agentsFor>,
     transports: Partial<Record<string, Transport>> | undefined,
+    teams: { violet: string; lime: string },
   ): Promise<void> {
+    const gap = this.opts.gapSeconds !== undefined ? this.opts.gapSeconds : 10;
     try {
       const result = await this.server.play({
         agents,
         transports,
-        teams: this.opts.teams,
+        teams,
         league: this.opts.league,
         halfSeconds: this.opts.halfSeconds ?? 300,
         seed: matchSeed(),
         refereed: false,
+        nextMatchIn: gap,
       });
-      this.log(`full time: ${this.opts.teams.violet} ${result.score.violet} — ${result.score.lime} ${this.opts.teams.lime}`);
+      this.log(`full time: ${teams.violet} ${result.score.violet} — ${result.score.lime} ${teams.lime}`);
     } catch (err) {
       // A match that refuses to play must not stop the loop — the screen never
       // sits still, so log it and carry on to the next one.
       this.log(`could not play a demo match: ${(err as Error).message}`);
     }
-    await this.pause((this.opts.gapSeconds ?? 3) * 1000);
+    await this.pause(gap * 1000);
   }
 
   private async pause(ms: number): Promise<void> {

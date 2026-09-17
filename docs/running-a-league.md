@@ -316,11 +316,110 @@ before a match needs a server that comes up.
 
 ## Refereeing
 
-A referee signs in and opens **`/referee`**, which lists the matches in progress;
-the console opens on the arena playing one. There is no token to hand out and
-nothing to paste. The hub decides from the session and the referee's capability
-whether to let them in, so a spectator never downloads match-control code at
-all.
+A referee signs in and opens **`/referee`**, which lists **the matches they have
+been assigned** — not every match on the server — whether or not they have
+started. There is no token to hand out and nothing to paste. The hub decides
+from the session and the referee's capability whether to let them in, so a
+spectator never downloads match-control code at all.
+
+Each game has its own page at **`/referee/m/<fixture>`**, and that address does
+not change: it works before the match exists, so it is the thing to write on a
+run sheet or send to somebody. Left open, it is where the match begins and then
+where it is run: it grows an **Open pre-game** button when the fixture's turn
+comes, and a **Take the match** link to the console once the pitch is up. An
+arena's own address is no use for this — it is born with the match and is a
+different string next time.
+
+A referee is given a fixture from the terminal:
+
+```bash
+bun run serve -- assign --referee sam-referee --draw state-round-1 --fixture act-robotics-v-nsw-lightning
+bun run serve -- assign --list
+bun run serve -- assign --remove --referee sam-referee --draw state-round-1 --fixture act-robotics-v-nsw-lightning
+```
+
+The fixture is checked against the draw as it is written, so a typo is refused
+with the fixture list rather than accepted as an assignment nobody can use. A
+draw and a fixture are both needed because a fixture's id is `home-v-away` and
+two divisions can produce the same one.
+
+**Being a referee is not by itself permission to take a match.** An unassigned
+referee still reaches their page — it says nothing has been given to them yet,
+which at a venue is a far better answer than a door that will not open — but
+they control no match until an organiser names one. An admin holds every
+capability over everything. Assigning and unassigning take effect on the next
+request, so a referee swapped at the last minute does not need to sign in again.
+Two referees can hold the same fixture at once, deliberately: reassigning under
+pressure should not fail on a rule about tidiness.
+
+### Nothing starts until the referee opens it
+
+A fixture's arena is a child process holding a physics loop and four sandboxed
+Python interpreters, and until Phase 11 it came up the moment the schedule
+reached the fixture — whether or not anybody was standing at that pitch.
+
+Now the schedule only says **whose turn it is**. When a fixture's turn comes and
+neither of its teams is in another match, it goes to *ready*, its referee's page
+grows an **Open pre-game** button, and the terminal prints the address:
+
+```
+  ready:      ACT Robotics v NSW Lightning
+              no pitch is running until the referee opens it at
+              http://localhost:8080/referee/m/act-robotics-v-nsw-lightning
+```
+
+Pressing it is what spawns the arena. Nothing exists before that: the fixture
+costs the venue nothing, and it is not holding one of the concurrency slots
+either — being **ready** and **being played** are counted separately, so one
+referee who has not arrived yet cannot idle a pitch that another referee is
+waiting for. Every fixture whose turn has come is offered at once, however many
+pitches the venue has; whoever presses first gets the next free one, and the
+rest open as pitches come free.
+
+Exactly one of a team's fixtures is ever ready at a time, because two robots
+cannot be on two pitches. A referee holding three games sees the one that is
+theirs to start now.
+
+**It never times out.** A fixture nobody opens waits all day, on the same
+grounds as the confirmation at the other end of the match: a match nobody is
+refereeing should not start on a timer. The cost is worth saying plainly — a
+refereed draw on a server where **no referee has been assigned anything will sit
+at *waiting for the referee* and play nothing.** Any admin can open any fixture
+from the same page, so the way out is a browser rather than a restart. A server
+run with `--headless` has nobody to ask and plays its fixtures as soon as their
+turn comes, exactly as before.
+
+### One confirmation writes the result
+
+When the second half runs out, **nothing is recorded yet.** The fixture's page
+shows the final score with two buttons, and the match is not in the table, not in
+the results directory and not counted until one of them is pressed:
+
+- **Confirm the result** — it is written whole, appears in the table
+  immediately, and the arena is shut down.
+- **Play it again** — nothing is written, and the fixture is re-run in this same
+  session on a fresh arena. Use it when the game was a shambles rather than a
+  match: a team that re-pushes before the re-run gets their new code in it,
+  because a lineup is resolved when the arena opens.
+
+A match **abandoned** from the console is the third answer, and it also writes
+nothing — that is the point of abandoning. It is not re-run automatically; it
+stays unplayed and comes round again the next time the server is started.
+
+While a fixture waits to be confirmed it keeps its arena and one of the venue's
+concurrency slots, so the referee can go back and look at the board. It never
+times out, on purpose: a result nobody ever agreed to must not be able to reach a
+table. If a referee walks away, **any admin can confirm it from the same page**,
+and the terminal prints the address at full time:
+
+```
+  full time:  ACT Robotics v NSW Lightning  3-1
+              nothing is recorded until it is confirmed at
+              http://localhost:8080/referee/m/act-robotics-v-nsw-lightning
+```
+
+A server run with `--headless` has nobody to ask and writes results the moment
+they are played, exactly as before.
 
 ## Whose field is whose
 

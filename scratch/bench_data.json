@@ -1,0 +1,655 @@
+{
+  "matches": 3,
+  "halfSeconds": 45,
+  "idealSensors": false,
+  "opponent": "champion",
+  "tested": [
+    "violet-1",
+    "violet-2"
+  ],
+  "goalsFor": 3.7,
+  "goalsAgainst": 2.3,
+  "half1GoalsFor": 3,
+  "half1GoalsAgainst": 0.3,
+  "half2GoalsFor": 0.7,
+  "half2GoalsAgainst": 2,
+  "calls": {
+    "kickoff": 8,
+    "ball-out-of-play": 19.7,
+    "goal": 6,
+    "lack-of-progress": 3
+  },
+  "callsAgainstUs": {
+    "kickoff": 3.3,
+    "goal": 3.7,
+    "lack-of-progress": 0.3
+  },
+  "ball": {
+    "meanX": -5,
+    "inTestedAttackThird": 18.7,
+    "inTestedOwnThird": 18.7,
+    "outOfPlay": 19.7,
+    "overSideline": 16,
+    "overEndline": 3.7,
+    "outWhileFast": 13.7,
+    "outByRobot": {
+      "violet-2": 4.4,
+      "violet-1": 6.6,
+      "lime-1": 4,
+      "lime-2": 4.7
+    },
+    "distribution": {
+      "parkedPercent": 2.7,
+      "bins": [
+        {
+          "min": -1000,
+          "max": -800,
+          "label": "own goal",
+          "percent": 3.5
+        },
+        {
+          "min": -800,
+          "max": -600,
+          "label": "def zone",
+          "percent": 4.9
+        },
+        {
+          "min": -600,
+          "max": -400,
+          "label": "def third",
+          "percent": 6.3
+        },
+        {
+          "min": -400,
+          "max": -200,
+          "label": "def mid",
+          "percent": 8.7
+        },
+        {
+          "min": -200,
+          "max": 0,
+          "label": "def centre",
+          "percent": 9.9
+        },
+        {
+          "min": 0,
+          "max": 200,
+          "label": "att centre",
+          "percent": 39.5
+        },
+        {
+          "min": 200,
+          "max": 400,
+          "label": "att mid",
+          "percent": 9.5
+        },
+        {
+          "min": 400,
+          "max": 600,
+          "label": "att third",
+          "percent": 9.9
+        },
+        {
+          "min": 600,
+          "max": 800,
+          "label": "att zone",
+          "percent": 4.2
+        },
+        {
+          "min": 800,
+          "max": 1000,
+          "label": "opp goal",
+          "percent": 1
+        }
+      ]
+    }
+  },
+  "kicks": {
+    "violet-1": {
+      "total": 12,
+      "goals": 3.7,
+      "intoMouth": 0,
+      "blockedOut": 4.3,
+      "offTarget": 1,
+      "stoppedInPlay": 3,
+      "meanRange": 731
+    },
+    "lime-1": {
+      "total": 13.3,
+      "goals": 2.3,
+      "intoMouth": 0.3,
+      "blockedOut": 6.3,
+      "offTarget": 0.7,
+      "stoppedInPlay": 3.7,
+      "meanRange": 741
+    },
+    "lime-2": {
+      "total": 1,
+      "goals": 0,
+      "intoMouth": 0.3,
+      "blockedOut": 0,
+      "offTarget": 0.7,
+      "stoppedInPlay": 0,
+      "meanRange": 0
+    }
+  },
+  "robots": {
+    "violet-1": {
+      "id": "violet-1",
+      "team": "violet",
+      "tested": true,
+      "meanX": -90,
+      "meanZ": -1,
+      "possession": 21,
+      "nearBall": 42.4,
+      "attackThird": 16,
+      "ownThird": 34.1,
+      "outsideLines": 16.1,
+      "whollyOut": 0,
+      "stalled": 0,
+      "metresTravelled": 51,
+      "meanSpeed": 499,
+      "missed": 3,
+      "worstRun": 1,
+      "errors": 0,
+      "removals": {},
+      "relayed": 96.6,
+      "blocked": 12.3,
+      "covered": 98.8
+    },
+    "violet-2": {
+      "id": "violet-2",
+      "team": "violet",
+      "tested": true,
+      "meanX": -703,
+      "meanZ": -3,
+      "possession": 1.5,
+      "nearBall": 7.1,
+      "attackThird": 0,
+      "ownThird": 100,
+      "outsideLines": 0.1,
+      "whollyOut": 0,
+      "stalled": 0,
+      "metresTravelled": 24,
+      "meanSpeed": 248,
+      "missed": 3,
+      "worstRun": 1,
+      "errors": 0,
+      "removals": {},
+      "relayed": 91.9,
+      "blocked": 47.1,
+      "covered": 97.1
+    },
+    "lime-1": {
+      "id": "lime-1",
+      "team": "lime",
+      "tested": false,
+      "meanX": -68,
+      "meanZ": -31,
+      "possession": 18.6,
+      "nearBall": 43.8,
+      "attackThird": 19,
+      "ownThird": 32.8,
+      "outsideLines": 18.9,
+      "whollyOut": 0,
+      "stalled": 0,
+      "metresTravelled": 48,
+      "meanSpeed": 483,
+      "missed": 0,
+      "worstRun": 0,
+      "errors": 0,
+      "removals": {},
+      "relayed": 99.3,
+      "blocked": 7.9,
+      "covered": 99.6
+    },
+    "lime-2": {
+      "id": "lime-2",
+      "team": "lime",
+      "tested": false,
+      "meanX": -706,
+      "meanZ": 0,
+      "possession": 2.6,
+      "nearBall": 8.5,
+      "attackThird": 0,
+      "ownThird": 100,
+      "outsideLines": 0.1,
+      "whollyOut": 0,
+      "stalled": 0,
+      "metresTravelled": 23,
+      "meanSpeed": 235,
+      "missed": 0,
+      "worstRun": 0,
+      "errors": 0,
+      "removals": {},
+      "relayed": 91.4,
+      "blocked": 45.7,
+      "covered": 99.5
+    }
+  },
+  "kickoffs": [
+    {
+      "team": "violet",
+      "striker": "violet-1",
+      "resolution": "struck",
+      "timeToStrike": 0.16,
+      "maxCarry": 24,
+      "carryAtCall": 0,
+      "headingErrorDeg": 10,
+      "kickerRequested": true,
+      "everCharged": true,
+      "gateHeldTicks": 1,
+      "fireableTicks": 1,
+      "windowSec": 0.17,
+      "closestGap": 11
+    },
+    {
+      "team": "lime",
+      "striker": "lime-1",
+      "resolution": "struck",
+      "timeToStrike": 0.12999999999999998,
+      "maxCarry": 24,
+      "carryAtCall": 0,
+      "headingErrorDeg": 9,
+      "kickerRequested": true,
+      "everCharged": true,
+      "gateHeldTicks": 1,
+      "fireableTicks": 1,
+      "windowSec": 0.14,
+      "closestGap": 12
+    },
+    {
+      "team": "lime",
+      "striker": "lime-1",
+      "resolution": "struck",
+      "timeToStrike": 0.12999999999999998,
+      "maxCarry": 24,
+      "carryAtCall": 0,
+      "headingErrorDeg": 2,
+      "kickerRequested": true,
+      "everCharged": true,
+      "gateHeldTicks": 1,
+      "fireableTicks": 1,
+      "windowSec": 0.14,
+      "closestGap": 12
+    },
+    {
+      "team": "lime",
+      "striker": "lime-1",
+      "resolution": "struck",
+      "timeToStrike": 0.17,
+      "maxCarry": 24,
+      "carryAtCall": 0,
+      "headingErrorDeg": 8,
+      "kickerRequested": true,
+      "everCharged": true,
+      "gateHeldTicks": 2,
+      "fireableTicks": 2,
+      "windowSec": 0.18,
+      "closestGap": 11
+    },
+    {
+      "team": "lime",
+      "striker": "lime-1",
+      "resolution": "struck",
+      "timeToStrike": 0.10999999999999999,
+      "maxCarry": 24,
+      "carryAtCall": 0,
+      "headingErrorDeg": 6,
+      "kickerRequested": true,
+      "everCharged": true,
+      "gateHeldTicks": 2,
+      "fireableTicks": 2,
+      "windowSec": 0.12,
+      "closestGap": 10
+    },
+    {
+      "team": "lime",
+      "striker": "lime-1",
+      "resolution": "struck",
+      "timeToStrike": 0.10999999999999999,
+      "maxCarry": 24,
+      "carryAtCall": 0,
+      "headingErrorDeg": 11,
+      "kickerRequested": true,
+      "everCharged": true,
+      "gateHeldTicks": 2,
+      "fireableTicks": 2,
+      "windowSec": 0.12,
+      "closestGap": 10
+    },
+    {
+      "team": "lime",
+      "striker": "lime-1",
+      "resolution": "struck",
+      "timeToStrike": 0.12999999999999998,
+      "maxCarry": 24,
+      "carryAtCall": 0,
+      "headingErrorDeg": 7,
+      "kickerRequested": true,
+      "everCharged": true,
+      "gateHeldTicks": 2,
+      "fireableTicks": 2,
+      "windowSec": 0.14,
+      "closestGap": 10
+    },
+    {
+      "team": "violet",
+      "striker": "violet-1",
+      "resolution": "struck",
+      "timeToStrike": 0.20000000000000004,
+      "maxCarry": 24,
+      "carryAtCall": 0,
+      "headingErrorDeg": 3,
+      "kickerRequested": true,
+      "everCharged": true,
+      "gateHeldTicks": 2,
+      "fireableTicks": 2,
+      "windowSec": 0.21,
+      "closestGap": 11
+    },
+    {
+      "team": "violet",
+      "striker": "violet-1",
+      "resolution": "struck",
+      "timeToStrike": 0.17,
+      "maxCarry": 24,
+      "carryAtCall": 0,
+      "headingErrorDeg": 6,
+      "kickerRequested": true,
+      "everCharged": true,
+      "gateHeldTicks": 1,
+      "fireableTicks": 1,
+      "windowSec": 0.18,
+      "closestGap": 11
+    },
+    {
+      "team": "lime",
+      "striker": "lime-1",
+      "resolution": "struck",
+      "timeToStrike": 0.13999999999999999,
+      "maxCarry": 24,
+      "carryAtCall": 0,
+      "headingErrorDeg": 1,
+      "kickerRequested": true,
+      "everCharged": true,
+      "gateHeldTicks": 1,
+      "fireableTicks": 1,
+      "windowSec": 0.15,
+      "closestGap": 12
+    },
+    {
+      "team": "violet",
+      "striker": "violet-1",
+      "resolution": "struck",
+      "timeToStrike": 0.13999999999999999,
+      "maxCarry": 24,
+      "carryAtCall": 0,
+      "headingErrorDeg": 7,
+      "kickerRequested": true,
+      "everCharged": true,
+      "gateHeldTicks": 1,
+      "fireableTicks": 1,
+      "windowSec": 0.15,
+      "closestGap": 11
+    },
+    {
+      "team": "lime",
+      "striker": "lime-1",
+      "resolution": "struck",
+      "timeToStrike": 0.13999999999999999,
+      "maxCarry": 24,
+      "carryAtCall": 0,
+      "headingErrorDeg": 11,
+      "kickerRequested": true,
+      "everCharged": true,
+      "gateHeldTicks": 1,
+      "fireableTicks": 1,
+      "windowSec": 0.15,
+      "closestGap": 11
+    },
+    {
+      "team": "lime",
+      "striker": "lime-1",
+      "resolution": "struck",
+      "timeToStrike": 0.18000000000000002,
+      "maxCarry": 24,
+      "carryAtCall": 0,
+      "headingErrorDeg": 7,
+      "kickerRequested": true,
+      "everCharged": true,
+      "gateHeldTicks": 2,
+      "fireableTicks": 2,
+      "windowSec": 0.19,
+      "closestGap": 10
+    },
+    {
+      "team": "lime",
+      "striker": "lime-1",
+      "resolution": "struck",
+      "timeToStrike": 0.15,
+      "maxCarry": 24,
+      "carryAtCall": 0,
+      "headingErrorDeg": 0,
+      "kickerRequested": true,
+      "everCharged": true,
+      "gateHeldTicks": 1,
+      "fireableTicks": 1,
+      "windowSec": 0.16,
+      "closestGap": 11
+    },
+    {
+      "team": "lime",
+      "striker": "lime-1",
+      "resolution": "struck",
+      "timeToStrike": 0.12999999999999998,
+      "maxCarry": 24,
+      "carryAtCall": 0,
+      "headingErrorDeg": 6,
+      "kickerRequested": true,
+      "everCharged": true,
+      "gateHeldTicks": 2,
+      "fireableTicks": 2,
+      "windowSec": 0.14,
+      "closestGap": 10
+    },
+    {
+      "team": "violet",
+      "striker": "violet-1",
+      "resolution": "struck",
+      "timeToStrike": 0.17,
+      "maxCarry": 24,
+      "carryAtCall": 0,
+      "headingErrorDeg": 2,
+      "kickerRequested": true,
+      "everCharged": true,
+      "gateHeldTicks": 2,
+      "fireableTicks": 2,
+      "windowSec": 0.18,
+      "closestGap": 11
+    },
+    {
+      "team": "violet",
+      "striker": "violet-1",
+      "resolution": "struck",
+      "timeToStrike": 0.20000000000000004,
+      "maxCarry": 24,
+      "carryAtCall": 0,
+      "headingErrorDeg": 8,
+      "kickerRequested": true,
+      "everCharged": true,
+      "gateHeldTicks": 2,
+      "fireableTicks": 2,
+      "windowSec": 0.21,
+      "closestGap": 10
+    },
+    {
+      "team": "violet",
+      "striker": "violet-1",
+      "resolution": "struck",
+      "timeToStrike": 0.16,
+      "maxCarry": 24,
+      "carryAtCall": 0,
+      "headingErrorDeg": 10,
+      "kickerRequested": true,
+      "everCharged": true,
+      "gateHeldTicks": 2,
+      "fireableTicks": 2,
+      "windowSec": 0.17,
+      "closestGap": 11
+    },
+    {
+      "team": "lime",
+      "striker": "lime-1",
+      "resolution": "struck",
+      "timeToStrike": 0.13999999999999999,
+      "maxCarry": 24,
+      "carryAtCall": 0,
+      "headingErrorDeg": 0,
+      "kickerRequested": true,
+      "everCharged": true,
+      "gateHeldTicks": 2,
+      "fireableTicks": 2,
+      "windowSec": 0.15,
+      "closestGap": 11
+    },
+    {
+      "team": "violet",
+      "striker": "violet-1",
+      "resolution": "struck",
+      "timeToStrike": 0.21000000000000005,
+      "maxCarry": 24,
+      "carryAtCall": 0,
+      "headingErrorDeg": 7,
+      "kickerRequested": true,
+      "everCharged": true,
+      "gateHeldTicks": 2,
+      "fireableTicks": 2,
+      "windowSec": 0.22,
+      "closestGap": 10
+    },
+    {
+      "team": "lime",
+      "striker": "lime-1",
+      "resolution": "struck",
+      "timeToStrike": 0.10999999999999999,
+      "maxCarry": 24,
+      "carryAtCall": 0,
+      "headingErrorDeg": 0,
+      "kickerRequested": true,
+      "everCharged": true,
+      "gateHeldTicks": 2,
+      "fireableTicks": 2,
+      "windowSec": 0.12,
+      "closestGap": 11
+    },
+    {
+      "team": "violet",
+      "striker": "violet-1",
+      "resolution": "struck",
+      "timeToStrike": 0.09,
+      "maxCarry": 24,
+      "carryAtCall": 0,
+      "headingErrorDeg": 10,
+      "kickerRequested": true,
+      "everCharged": true,
+      "gateHeldTicks": 2,
+      "fireableTicks": 2,
+      "windowSec": 0.1,
+      "closestGap": 10
+    },
+    {
+      "team": "lime",
+      "striker": "lime-1",
+      "resolution": "struck",
+      "timeToStrike": 0.19000000000000003,
+      "maxCarry": 24,
+      "carryAtCall": 0,
+      "headingErrorDeg": 2,
+      "kickerRequested": true,
+      "everCharged": true,
+      "gateHeldTicks": 2,
+      "fireableTicks": 2,
+      "windowSec": 0.2,
+      "closestGap": 10
+    },
+    {
+      "team": "violet",
+      "striker": "violet-1",
+      "resolution": "struck",
+      "timeToStrike": 0.22000000000000006,
+      "maxCarry": 24,
+      "carryAtCall": 0,
+      "headingErrorDeg": 0,
+      "kickerRequested": true,
+      "everCharged": true,
+      "gateHeldTicks": 1,
+      "fireableTicks": 1,
+      "windowSec": 0.23,
+      "closestGap": 11
+    }
+  ],
+  "findings": [
+    {
+      "severity": "medium",
+      "subject": "team",
+      "code": "ball-out",
+      "message": "you put the ball out of play 11.0 per match (16.0 over a sideline, 3.7 over an end line; 5.3 of them were your own kicks).",
+      "advice": "Every one is a neutral-point restart under rule 5.9.2 — possession handed back for nothing. Most are not wild shots but a robot steadily dribbling the ball over a touchline it never checked: bend the direction you are pushing so the BALL stays in play, not just the robot."
+    },
+    {
+      "severity": "medium",
+      "subject": "violet-1",
+      "code": "blocked-shooting",
+      "message": "4.3 of 12.0 kicks per match were on target when they left and still went out — mean range 731 mm.",
+      "advice": "Something is in the way. A sonar reads the distance to whatever came back first, so an echo that arrives sooner than the wall behind it is a robot: that is how you see a defender. Carry the ball closer, or go round."
+    },
+    {
+      "severity": "low",
+      "subject": "match",
+      "code": "inconsistent",
+      "message": "results swing either way across seeds (+4, +1, -1); one match is not evidence here."
+    }
+  ],
+  "scores": [
+    {
+      "seed": 1,
+      "for": 6,
+      "against": 2,
+      "half1": {
+        "for": 5,
+        "against": 0
+      },
+      "half2": {
+        "for": 1,
+        "against": 2
+      }
+    },
+    {
+      "seed": 2,
+      "for": 3,
+      "against": 2,
+      "half1": {
+        "for": 3,
+        "against": 0
+      },
+      "half2": {
+        "for": 0,
+        "against": 2
+      }
+    },
+    {
+      "seed": 3,
+      "for": 2,
+      "against": 3,
+      "half1": {
+        "for": 1,
+        "against": 1
+      },
+      "half2": {
+        "for": 1,
+        "against": 2
+      }
+    }
+  ]
+}

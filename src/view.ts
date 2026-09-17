@@ -16,6 +16,7 @@
  */
 
 import type { League } from './leagues';
+import type { MatchResult } from './match';
 
 /** A robot, as far as drawing it is concerned. */
 export interface ViewRobot {
@@ -127,7 +128,14 @@ export interface ViewUpdate {
   frame: ViewFrame;
 }
 
-export type ViewMessage = ViewHello | ViewUpdate;
+export interface ViewSummary {
+  type: 'summary';
+  result: MatchResult;
+  /** Seconds until the next match will automatically start (e.g. in demo mode). */
+  nextMatchIn?: number;
+}
+
+export type ViewMessage = ViewHello | ViewUpdate | ViewSummary;
 
 /** How often the server sends a frame. */
 export const VIEW_HZ = 30;

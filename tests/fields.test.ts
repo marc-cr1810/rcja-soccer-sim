@@ -401,12 +401,15 @@ describe('a fixture pre-empts practice', () => {
       cookie: act,
     });
 
-    await started.server.openFixture({
-      id: 'act-robotics-v-nsw-lightning',
-      home: 'ACT Robotics',
-      away: 'NSW Lightning',
-      seeds: [1],
-    });
+    await started.server.openFixture(
+      {
+        id: 'act-robotics-v-nsw-lightning',
+        home: 'ACT Robotics',
+        away: 'NSW Lightning',
+        seeds: [1],
+      },
+      'round-1',
+    );
 
     // Their own field is gone — it frees a slot at the moment the hall wants
     // one, and there is nothing left to rehearse with anyway.

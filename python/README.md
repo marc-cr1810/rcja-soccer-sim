@@ -97,7 +97,7 @@ ball position and no map: a real robot does not have those, so neither do you.
 `me` is yours. Anything you put on it survives to the next tick, and it is
 cleared at every kick-off.
 
-## Eight things that will catch you out
+## Nine things that will catch you out
 
 **`s.ball` is `None` a lot.** The infrared ring sees nothing at all when a robot
 stands between you and the ball — not a weak reading, nothing. A robot that
@@ -132,6 +132,46 @@ pushing it wherever you happen to be pointing. Come round the side first. This
 is the single biggest difference between a robot that scores and one that does
 not, and it is why the example striker curves round to a point *behind* the
 ball before it drives at it.
+
+**You change ends at half-time, and your code does not.** This is the one that
+costs a half and never looks like a bug. `s.compass.heading` has a fixed zero —
+it faces the yellow goal and it faces the yellow goal all match — but rule
+1.4/5.4 swaps which goal you are attacking. So every rule you write about an
+`x` or a `z` is only half a rule. The other half is a sign, and it has to be
+right at *every* site:
+
+```python
+# Wrong in one half, and it will be the half you did not test in.
+side = -1.0 if me_z > 0 else 1.0
+```
+
+The fix is not a better sign, it is not needing one. `GoalFrame` turns the
+field so that the goal you are attacking is always at `+x`:
+
+```python
+from rcja_soccer import GoalFrame
+
+frame = GoalFrame(TEAM)          # once
+frame.update(s, heading, me_x, me_z)   # every tick; it re-reads at each kick-off
+
+me_x, me_z = frame.to_frame(me_x, me_z)
+bx, bz = frame.to_frame(bx, bz)
+heading = frame.heading(heading)
+
+side = -1.0 if me_z > 0 else 1.0   # now right at both ends, with no sign
+```
+
+Same millimetres and the same constants — `HALF_LENGTH` is still the goal line,
+and the goal you are shooting at is now always the one at `+HALF_LENGTH`. What
+is gone is the ability to tell the two ends apart from inside a rule, and with
+it the ability to get them different. `frame.goals(s)` does the same for the
+camera, handing back `(attacking, defending)` instead of cyan and yellow.
+
+It is worth doing even though you can get it right by hand, because getting it
+right by hand is not a thing you do once. The reference agent shipped with this
+simulator had forty-eight of these sites and got forty-seven of them right; the
+forty-eighth steered its dribbler into the side wall for a whole half, and it
+scored 82 goals at one end against 33 at the other before anyone noticed.
 
 **The compass drifts.** Slowly enough that you will not see it in a thirty
 second test, and far enough to matter by the end of a five minute half.
@@ -170,12 +210,13 @@ it is for "I have the ball", not for a plan.
 
 ## What comes in the box
 
-Three modules, none of which know anything your robot does not.
+Four modules, none of which know anything your robot does not.
 
 | | |
 |---|---|
 | `rcja_soccer.drive` | four wheel powers from a direction. Needed on day one. |
 | `rcja_soccer.field` | the rulebook's dimensions, and the geometry questions worth asking of them — `shot_range`, `kick_lands_in_goal`, `in_penalty_box`. |
+| `rcja_soccer.frame` | `GoalFrame` — which way you are attacking, worked out from the two goal sightings, and the coordinates that follow from it. Read the ninth gotcha above before you decide you do not need it. |
 | `rcja_soccer.sense` | `Locator` (where am I), `BallTracker` (where is the ball and where is it going), `GyroRate`/`YawRate` (how fast am I turning), `teammate_ball` (where did the radio say it was), and the steering helpers the examples use. |
 
 `field` is not a cheat: every number in it is printed in the rules and a team

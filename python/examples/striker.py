@@ -328,7 +328,12 @@ def think(s, me):
     # Keep the push on the field. Most of the balls that go out in a match are
     # not wild shots, they are a robot patiently dribbling one over a touchline
     # (rule 5.9.2, and the ball comes back on a neutral point).
-    push = steer_ball_inside(bx, bz, push)
+    #
+    # `attack_x` so a shot is not treated as one of them. The playing area ends
+    # on the goal line, so without it every push taken from inside the last
+    # third of a metre reads as putting the ball out, and gets bent into the
+    # corner from the best place on the field to be shooting from.
+    push = steer_ball_inside(bx, bz, push, attack_x=frame.their_x)
     spin = spin_towards(wrap_angle(push - heading), yaw)
 
     range_to_ball = math.hypot(bx - me_x, bz - me_z)
