@@ -1034,7 +1034,7 @@ export class World {
    * possession, it is actively in play and NOT in a lack-of-progress condition.
    */
   private detectStall(dt: number): void {
-    if (this.countdownActive || this.kickOffPending) return;
+    if (!this.running || this.countdownActive || this.kickOffPending) return;
     const ballSpd = speed(this.ball);
 
     /*

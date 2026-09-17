@@ -96,12 +96,36 @@ export class ChampionStriker {
       if (!frame.kickoff.ours) {
         return { motors: [0, 0, 0, 0], dribbler: 0 };
       }
-      const square = spinTowards(wrapAngle(-heading), yawRate);
+      // Aim the strike at the widest opening the camera can see rather than
+      // dead down the middle, where the defending keeper camps. 5.4.7 demands
+      // a clear strike, not a straight one. Spinning in place while holding
+      // keeps the ball within 120 mm of the spot, so until the kicker fires
+      // the referee reads it as legal.
+      const open = widestOpening(attackingBlobs);
+      let aim: number;
+      if (open && open.width > BALL_RADIUS * 3) {
+        aim = clamp(open.bearing, -0.5, 0.5);
+      } else {
+        // No trustworthy camera gap: pick the far post, so the keeper parked
+        // centrally is beaten to whichever edge the ball is not already on.
+        const postSide =
+          Math.abs(ball.z) > 45
+            ? Math.sign(-ball.z)
+            : Math.sign(Math.abs(me.z) > 1.0 ? -me.z : 1);
+        aim = clamp(Math.atan2(postSide * AIM_POST, GOAL_LINE), -0.5, 0.5);
+      }
       if (holding) {
+        if (Math.abs(aim) < 0.12) {
+          return {
+            motors: mixOmni(this.drive, 0, 0, 0),
+            dribbler: 1,
+            kicker: true,
+            say: this.broadcast('KICKOFF', me.x, me.z, holding, ball, 0, false),
+          };
+        }
         return {
-          motors: mixOmni(this.drive, 0, 0, square),
+          motors: mixOmni(this.drive, 0, 0, spinTowards(wrapAngle(aim), yawRate)),
           dribbler: 1,
-          kicker: true,
           say: this.broadcast('KICKOFF', me.x, me.z, holding, ball, 0, false),
         };
       }
@@ -199,7 +223,7 @@ export class ChampionStriker {
       // Camera opening detection override - only in attacking territory
       if (depthInField >= HALF_LENGTH * 0.55) {
         const open = widestOpening(attackingBlobs);
-        if (open && open.width > BALL_RADIUS * 6) {
+        if (open && open.width > BALL_RADIUS * 3) {
           aimX = meX + Math.cos(heading + open.bearing) * open.range;
           aimZ = meZ + Math.sin(heading + open.bearing) * open.range;
         }
@@ -278,7 +302,15 @@ export class ChampionStriker {
     // 10. Blocked Lane Obstacle Avoidance (Dribble Round)
     if (holding && !shotOn) {
       if (reach !== null && !laneClear) {
-        const side = meZ > 0 ? -1.0 : 1.0;
+        // Choose the side of the obstacle that the camera says opens the goal
+        // mouth, rather than a fixed hinge: a keeper camped on one post makes
+        // the wider gap the other way, and carrying round the near side into
+        // their body sells the ball.
+        let side = meZ > 0 ? -1.0 : 1.0;
+        const gap = widestOpening(attackingBlobs);
+        if (gap && gap.width > BALL_RADIUS * 3) {
+          side = Math.sign(gap.bearing);
+        }
         travelField = wrapAngle(push + side * 1.15);
         travelField = steerClearOfEdges(
           travelField,
