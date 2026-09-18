@@ -16,7 +16,21 @@ jobs:
       - name: Install system dependencies (Bubblewrap & Python)
         run: |
           sudo apt-get update
-          sudo apt-get install -y bubblewrap python3
+          sudo apt-get install -y bubblewrap python3 python3-pip python3-build || sudo apt-get install -y bubblewrap python3
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          if [ -d /etc/apparmor.d ]; then
+            sudo tee /etc/apparmor.d/bwrap << 'EOF'
+          abi <abi/4.0>,
+          include <tunables/global>
+
+          profile bwrap /usr/bin/bwrap flags=(unconfined) {
+            userns,
+            include if exists <local/bwrap>
+          }
+          EOF
+            sudo apparmor_parser -r /etc/apparmor.d/bwrap || true
+          fi
+          bwrap --dev-bind / / --unshare-all echo "bwrap sandbox OK"
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -29,11 +43,16 @@ jobs:
       - name: Static checks & typecheck
         run: make check
 
-      - name: Run test suite
-        run: bun test
-
       - name: Build web frontends
         run: make build
 
+      - name: Run test suite
+        run: bun test
+
       - name: Compile standalone binary
         run: make build-bin
+
+      - name: Build Python packages
+        run: |
+          python3 -m pip install --upgrade build || true
+          make build-py

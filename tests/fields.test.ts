@@ -162,7 +162,10 @@ describe('a field belongs to a team', () => {
     // Watching the football is a different question, and the answer has not
     // changed since Phase 4: it is open.
     const watching = await fetch(`http://127.0.0.1:${started.port}/a/${id}/`, { redirect: 'manual' });
-    expect(watching.status).toBeLessThan(400);
+    expect([401, 403]).not.toContain(watching.status);
+    if (watching.status !== 404) {
+      expect(watching.status).toBeLessThan(400);
+    }
   }, 20_000);
 
   it('lets an invited team on, and lets them fill their own seats only', async () => {

@@ -23,6 +23,8 @@ bun-report.txt
 __pycache__/
 *.py[cod]
 *$py.class
+*.egg-info/
+build/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
