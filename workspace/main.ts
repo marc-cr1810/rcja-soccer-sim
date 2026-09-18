@@ -332,6 +332,12 @@ async function submit(): Promise<void> {
     say(result.reason ?? 'the push was refused', 'bad');
     return;
   }
+  // "is now what will play" is the one sentence a locked lineup makes false,
+  // so when the server says otherwise it is the server that gets quoted.
+  if (result.notice) {
+    say(`${result.team} robot ${result.robot} ${result.notice}`, 'good');
+    return;
+  }
   say(`accepted — ${result.team} robot ${result.robot} is now what will play.`, 'good');
 }
 

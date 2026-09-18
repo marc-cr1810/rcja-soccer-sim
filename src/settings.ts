@@ -23,6 +23,7 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { isLeagueId, type LeagueId } from './leagues';
+import { DEFAULT_HALF_TIME_SECONDS, DEFAULT_MERCY_MARGIN } from './match';
 
 /** Per-seat grants, from `src/lineup.ts` where they were constants. */
 export const DEFAULT_SEAT_CPU_PERCENT = 50;
@@ -92,6 +93,60 @@ export interface PracticeSettings {
 }
 
 /**
+ * The twenty minutes before a fixture kicks off, and what a late team costs.
+ *
+ * Out of the box this does nothing at all: no timer, and a button nobody has
+ * pressed. That is the decision, not an oversight — a referee starts a match
+ * when they judge it right, and a venue that wants a clock says so here.
+ */
+export interface PregameSettings {
+  /**
+   * Minutes an open pre-game room waits before starting itself, or `null` for
+   * never — the default.
+   *
+   * What it starts is whatever is on disk: a team that pushed and did not turn
+   * up plays, and a team that did neither is four reference agents. It never
+   * overrides a referee, because the referee's Start is available from the
+   * first moment either way.
+   */
+  autoStartMins: number | null;
+  /**
+   * Goals a minute the referee's penalty clock awards to the team that is
+   * ready, against the team that is not. `0` removes the button.
+   *
+   * A clock somebody starts rather than one that starts itself: the referee is
+   * the one who can see whether the delay is the team's fault or the venue's.
+   * It is bounded by `rules.mercyMargin` — that ceiling is what stops a fixture
+   * whose opponent is never coming from holding a pitch all afternoon.
+   */
+  penaltyPerMin: number;
+}
+
+/** Rules of the sport a venue gets to set, as opposed to the ones RCJA sets. */
+export interface RuleSettings {
+  /**
+   * Goal difference that ends a match, or `null` for no limit.
+   *
+   * Not a rule number: the RCJA rules have no mercy rule. It applies to every
+   * match a venue plays except a practice field, which is a rehearsal with no
+   * result to shorten.
+   */
+  mercyMargin: number | null;
+  /**
+   * Seconds of half-time between the two halves, or 0 for none.
+   *
+   * The one window in a match where a team may correct their code: the referee
+   * takes the new pushes in by locking the lineup again, and the second half's
+   * whistle is held until both teams say they are ready or this runs out.
+   *
+   * A venue rule rather than an arena's own default, for the reason
+   * `mercyMargin` is one — every fixture at a venue should play the same game,
+   * whatever a particular child process was started with.
+   */
+  halfTimeSeconds: number;
+}
+
+/**
  * A demo arena that plays forever, filling a hall screen when the draw is
  * running or when nothing is on.
  *
@@ -124,11 +179,15 @@ export interface DemoSettings {
   league: LeagueId | null;
   /** Wall-clock pause between matches, so the hall can read the table. */
   gapSeconds: number;
+  /** Whether to randomly swap home and away sides at the start of each match. */
+  randomSides?: boolean;
 }
 
 export interface LeagueSettings {
   arenas: ArenaSettings;
   practice: PracticeSettings;
+  pregame: PregameSettings;
+  rules: RuleSettings;
   demo: DemoSettings;
 }
 
@@ -157,7 +216,9 @@ export function defaultSettings(): LeagueSettings {
       concurrentFixtures: 2,
     },
     practice: { open: true, max: null, idleMins: 20, graceMins: 5, perTeam: 1, claimSecs: 90 },
-    demo: { on: false, bots: 'reference', home: 'Violet', away: 'Lime', halfSeconds: 300, league: null, gapSeconds: 10 },
+    pregame: { autoStartMins: null, penaltyPerMin: 1 },
+    rules: { mercyMargin: DEFAULT_MERCY_MARGIN, halfTimeSeconds: DEFAULT_HALF_TIME_SECONDS },
+    demo: { on: false, bots: 'reference', home: 'Violet', away: 'Lime', halfSeconds: 300, league: null, gapSeconds: 10, randomSides: false },
   };
 }
 
@@ -176,6 +237,8 @@ export function mergeSettings(partial: Partial<LeagueSettings> | undefined): Lea
     ...partial,
     arenas: { ...defaults.arenas, ...partial.arenas },
     practice: { ...defaults.practice, ...partial.practice },
+    pregame: { ...defaults.pregame, ...partial.pregame },
+    rules: { ...defaults.rules, ...partial.rules },
     demo: { ...defaults.demo, ...partial.demo },
   };
 }
@@ -248,6 +311,8 @@ export function loadSettings(dataDir: string, overrides: Partial<Flags> = {}): L
 
   const arenas = (raw.arenas ?? {}) as Record<string, unknown>;
   const practice = (raw.practice ?? {}) as Record<string, unknown>;
+  const pregame = (raw.pregame ?? {}) as Record<string, unknown>;
+  const rules = (raw.rules ?? {}) as Record<string, unknown>;
   const demo = (raw.demo ?? {}) as Record<string, unknown>;
 
   const set = <K extends string>(path: K, used: boolean): void => {
@@ -303,6 +368,51 @@ export function loadSettings(dataDir: string, overrides: Partial<Flags> = {}): L
   const claim = readNumber(practice.claimSecs, 'practice.claimSecs', 90, { min: 10, max: 3600 }, complaints);
   settings.practice.claimSecs = Math.round(claim.value);
   set('practice.claimSecs', claim.used);
+
+  // Pre-game. `null` and `auto` both mean "no timer", which is the shipped
+  // default — `readAuto` already spells that, and it is the same word
+  // `arenas.max` uses for "work it out", read here as "do not".
+  const autoStart = readAuto(pregame.autoStartMins, 'pregame.autoStartMins', { min: 1, max: 240 }, complaints);
+  settings.pregame.autoStartMins = autoStart.value === null ? null : Math.round(autoStart.value);
+  set('pregame.autoStartMins', autoStart.used);
+
+  const perMin = readNumber(pregame.penaltyPerMin, 'pregame.penaltyPerMin', 1, { min: 0, max: 10 }, complaints);
+  settings.pregame.penaltyPerMin = Math.round(perMin.value);
+  set('pregame.penaltyPerMin', perMin.used);
+
+  // The mercy rule, and the one place `readAuto` is the wrong reader: its
+  // "absent means null" is right for `autoStartMins`, where no timer IS the
+  // default, and exactly wrong here, where absent has to mean the default of
+  // ten rather than "turned off". A venue that never opened this file would
+  // otherwise have no mercy rule at all.
+  if (rules.mercyMargin === undefined) {
+    set('rules.mercyMargin', false);
+  } else if (rules.mercyMargin === null || rules.mercyMargin === 'off') {
+    settings.rules.mercyMargin = null;
+    set('rules.mercyMargin', true);
+  } else {
+    const mercy = readNumber(
+      rules.mercyMargin,
+      'rules.mercyMargin',
+      DEFAULT_MERCY_MARGIN,
+      { min: 1, max: 100 },
+      complaints,
+    );
+    settings.rules.mercyMargin = Math.round(mercy.value);
+    set('rules.mercyMargin', mercy.used);
+  }
+
+  // Half-time. Zero turns it off, which is a venue saying the referee simply
+  // restarts when they are ready — what every match did before this existed.
+  const halfTime = readNumber(
+    rules.halfTimeSeconds,
+    'rules.halfTimeSeconds',
+    DEFAULT_HALF_TIME_SECONDS,
+    { min: 0, max: 1800 },
+    complaints,
+  );
+  settings.rules.halfTimeSeconds = Math.round(halfTime.value);
+  set('rules.halfTimeSeconds', halfTime.used);
 
   // Demo arena — a single, always-on, never-scored child that plays
   // back-to-back matches for the hall screen.
@@ -401,6 +511,14 @@ export function loadSettings(dataDir: string, overrides: Partial<Flags> = {}): L
   settings.demo.gapSeconds = Math.round(demoGap.value);
   set('demo.gapSeconds', demoGap.used);
 
+  if (typeof demo.randomSides === 'boolean') {
+    settings.demo.randomSides = demo.randomSides;
+    set('demo.randomSides', true);
+  } else {
+    if (demo.randomSides !== undefined) complaints.push('demo.randomSides must be true or false; using false');
+    set('demo.randomSides', false);
+  }
+
   applyFlags(settings, sources, overrides);
   return { settings, sources, file, complaints };
 }
@@ -414,6 +532,10 @@ export interface Flags {
   practiceMax: number;
   idleMins: number;
   perTeam: number;
+  autoStartMins: number | null;
+  penaltyPerMin: number;
+  mercyMargin: number | null;
+  halfTimeSeconds: number;
   demoOn: boolean;
   demoBots: string;
   demoHome: string;
@@ -423,6 +545,7 @@ export interface Flags {
   demoHalf: number;
   demoLeague: LeagueId | null;
   demoGap: number;
+  demoRandomSides: boolean;
 }
 
 function applyFlags(
@@ -443,6 +566,10 @@ function applyFlags(
   take(flags.practiceMax, 'practice.max', (v) => (settings.practice.max = v));
   take(flags.idleMins, 'practice.idleMins', (v) => (settings.practice.idleMins = v));
   take(flags.perTeam, 'practice.perTeam', (v) => (settings.practice.perTeam = v));
+  take(flags.autoStartMins, 'pregame.autoStartMins', (v) => (settings.pregame.autoStartMins = v));
+  take(flags.penaltyPerMin, 'pregame.penaltyPerMin', (v) => (settings.pregame.penaltyPerMin = v));
+  take(flags.mercyMargin, 'rules.mercyMargin', (v) => (settings.rules.mercyMargin = v));
+  take(flags.halfTimeSeconds, 'rules.halfTimeSeconds', (v) => (settings.rules.halfTimeSeconds = v));
   take(flags.demoOn, 'demo.on', (v) => (settings.demo.on = v));
   take(flags.demoBots, 'demo.bots', (v) => (settings.demo.bots = v));
   take(flags.demoHome, 'demo.home', (v) => (settings.demo.home = v));
@@ -452,6 +579,7 @@ function applyFlags(
   take(flags.demoHalf, 'demo.halfSeconds', (v) => (settings.demo.halfSeconds = v));
   take(flags.demoLeague, 'demo.league', (v) => (settings.demo.league = v));
   take(flags.demoGap, 'demo.gapSeconds', (v) => (settings.demo.gapSeconds = v));
+  take(flags.demoRandomSides, 'demo.randomSides', (v) => (settings.demo.randomSides = v));
 }
 
 /**

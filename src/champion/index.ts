@@ -7,6 +7,5 @@
 export * from './types';
 export * from './estimator';
 export * from './geometry';
-export * from './striker';
-export * from './goalie';
+export * from './brain';
 export * from './champion';

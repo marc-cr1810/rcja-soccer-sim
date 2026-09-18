@@ -73,6 +73,7 @@ export const EventKindSchema = z
     'paused',
     'resumed',
     'score-corrected',
+    'mercy',
   ])
   .openapi('EventKind');
 export type EventKind = z.infer<typeof EventKindSchema>;
@@ -388,10 +389,37 @@ export const PlayedMatchSchema = z
       .openapi({ description: 'Full match result' }),
     submissions: z
       .record(z.string(), z.string())
-      .openapi({ description: 'Seat id to sha256 hex of the code played' }),
+      .openapi({ description: 'Seat id to sha256 hex of the code each seat started on' }),
+    secondHalf: z
+      .record(z.string(), z.string())
+      .optional()
+      .openapi({ description: 'The same for the second half, present only when half-time changed it' }),
   })
   .openapi('PlayedMatch', { description: 'What played, once it has — held until the hub collects it' });
 export type PlayedMatch = z.infer<typeof PlayedMatchSchema>;
+
+export const LineupSeatSchema = z
+  .object({
+    id: z.string().openapi({ description: 'Seat id — violet-1, lime-2, …' }),
+    status: z.enum(['no-push', 'starting', 'on-field', 'would-not-start']),
+    hash: z
+      .string()
+      .nullable()
+      .openapi({ description: 'sha256 of the copy this seat is running, or null for an empty seat' }),
+  })
+  .openapi('LineupSeat', { description: 'One seat of a fixture arena, as the pre-game checklist reads it' });
+export type LineupSeat = z.infer<typeof LineupSeatSchema>;
+
+export const HalfTimeSchema = z
+  .object({
+    since: z.string().openapi({ description: 'When the first half ended, ISO, in wall time' }),
+    seconds: z.number().openapi({ description: "This venue's half-time, in seconds" }),
+    remaining: z.number().openapi({ description: 'Seconds left of it, floored at 0' }),
+    ready: z.object({ violet: z.boolean(), lime: z.boolean() }),
+    over: z.boolean().openapi({ description: 'Once true a referee may kick off freely' }),
+  })
+  .openapi('HalfTime', { description: 'The break between the halves, while there is one' });
+export type HalfTime = z.infer<typeof HalfTimeSchema>;
 
 export const ArenaStateSchema = z
   .object({
@@ -403,6 +431,15 @@ export const ArenaStateSchema = z
     running: z.boolean(),
     fidelity: z.number().nullable(),
     finished: PlayedMatchSchema.nullable(),
+    lineup: z
+      .array(LineupSeatSchema)
+      .nullable()
+      .openapi({ description: 'Every seat an arrival has started, or null while nobody has' }),
+    lockedAt: z
+      .string()
+      .nullable()
+      .openapi({ description: 'When the lineup was locked, or null while a push can still change it' }),
+    halfTime: HalfTimeSchema.nullable(),
     error: z.string().nullable(),
   })
   .openapi('ArenaState', { description: 'The state of a fixture arena, polled by the hub' });
@@ -462,6 +499,7 @@ export const ViewFrameSchema = z
     half: z.union([z.literal(1), z.literal(2)]),
     running: z.boolean(),
     kickoff: ViewKickoffSchema,
+    halfTime: HalfTimeSchema.optional().openapi({ description: 'Present only between the halves' }),
     score: ScoreSchema,
     ball: ViewBallSchema,
     robots: z.array(ViewRobotSchema),
@@ -686,10 +724,46 @@ export const PlayRequestSchema = z
     halfSeconds: z.number().optional(),
     league: z.enum(['lightweight', 'open']).optional(),
     refereed: z.boolean().optional(),
+    mercyMargin: z
+      .number()
+      .nullable()
+      .optional()
+      .openapi({ description: 'Goal difference that ends the match; null for no limit' }),
+    halfTimeSeconds: z
+      .number()
+      .optional()
+      .openapi({ description: 'Seconds of half-time between the halves; 0 or absent for none' }),
+    penalties: z
+      .object({ violet: z.number(), lime: z.number(), reason: z.string() })
+      .optional()
+      .openapi({ description: 'Goals the pre-game penalty clock awarded before kick-off' }),
     label: z.string().optional().openapi({ description: 'For the arena log — e.g. "round-1:f2 leg 1 of 2"' }),
   })
   .openapi('PlayRequest', { description: 'What the hub asks for: one leg of one fixture' });
 export type PlayRequest = z.infer<typeof PlayRequestSchema>;
+
+export const LockRequestSchema = z
+  .object({
+    teams: z.object({ violet: z.string(), lime: z.string() }),
+    seed: SeedSchema,
+    league: z.enum(['lightweight', 'open']).optional(),
+  })
+  .openapi('LockRequest', { description: 'Which two teams to resolve and copy into the arena' });
+export type LockRequest = z.infer<typeof LockRequestSchema>;
+
+export const LockResponseSchema = z
+  .object({
+    ok: z.literal(true),
+    lineup: z.array(LineupSeatSchema).nullable(),
+    lockedAt: z.string().nullable().openapi({ description: "The arena's own timestamp, so the two never drift" }),
+  })
+  .openapi('LockResponse', { description: 'POST /arena-api/lock' });
+export type LockResponse = z.infer<typeof LockResponseSchema>;
+
+export const ReadyRequestSchema = z
+  .object({ side: z.enum(['violet', 'lime']) })
+  .openapi('ReadyRequest', { description: 'Which side has said they are ready for the second half' });
+export type ReadyRequest = z.infer<typeof ReadyRequestSchema>;
 
 // ─── Error envelope ────────────────────────────────────────────────────────────
 

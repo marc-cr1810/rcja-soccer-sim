@@ -70,6 +70,17 @@ export interface LegRecord {
   seed: SeedInput;
   /** Home played violet, away played lime. */
   result: MatchResult;
+  /**
+   * The code in each seat for the **second half**, when half-time changed it.
+   *
+   * Half-time is the one window in a match where a team may correct their
+   * code, and a referee taking that correction in makes `submissions` — "at
+   * the moment it played" — describe only the first half. When that happens,
+   * this says what played the second. Absent from every match where nothing
+   * changed, which is nearly all of them, so a record without a half-time push
+   * is byte-identical to one written before this existed.
+   */
+  secondHalf?: Record<string, string>;
 }
 
 /**
@@ -88,6 +99,10 @@ export interface FixtureResult {
    * A seat missing from here was filled by the built-in agent, which is what a
    * team that pushed only one robot looks like. Team names cannot stand in for
    * this: a name is re-pointed at new code on every push.
+   *
+   * This is what each seat *started* on. Half-time is the one thing that can
+   * change it inside a match, and when it does, the leg says so in its own
+   * `secondHalf` rather than this being quietly rewritten.
    */
   submissions: Record<string, string>;
   legs: LegRecord[];

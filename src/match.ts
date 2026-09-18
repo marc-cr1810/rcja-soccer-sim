@@ -18,7 +18,7 @@ import { Senses, TeamRadio, type MatchView, type SensedRobot } from './perceptio
 import { foldSeed, streamSeed, toSeed, withWord, type Seed, type SeedInput } from './rand';
 import type { ActuatorFrame } from './protocol';
 import { wrapAngle } from './drive';
-import type { ViewEvent, ViewFrame } from './view';
+import type { HalfTime, ViewEvent, ViewFrame } from './view';
 
 export const PHYSICS_HZ = 100;
 export const CONTROL_HZ = 50;
@@ -57,6 +57,37 @@ const DRIBBLE_GRIP = 0.55;
 const BALL_FRICTION_STREAM = 0x8b;
 /** Motors on a robot, for a seat whose robot is not currently on the field. */
 const MOTOR_COUNT = 4;
+/**
+ * Goal difference at which a match is over, whatever the clock says.
+ *
+ * Not a rule number: the RCJA rules have no mercy rule, and this is a venue's
+ * decision about its own day rather than something 5.x asks for. It is a
+ * default here rather than a setting every caller passes because it applies to
+ * every match that is *played* — fixtures, the hall demo, the batch
+ * `tournament`, a one-off `match`.
+ *
+ * Three callers pass `null`, and they are the three that are not playing a
+ * match at all:
+ *
+ * - **a practice field**, a rehearsal with no result to shorten — ending one
+ *   because the reference agent ran away with it would be taking the field off
+ *   the team who booked it;
+ * - **the bench** and **the ladder**, which are measuring instruments. The
+ *   rule only ever takes goals off whoever is winning, so it moves an
+ *   aggregate-goals comparison asymmetrically and cuts the tail off a score
+ *   distribution — which is the thing both of them exist to look at.
+ */
+export const DEFAULT_MERCY_MARGIN = 10;
+
+/**
+ * Five minutes between the halves, at a venue that has not said otherwise.
+ *
+ * Long enough for a team to walk to their laptop, find the line, push it and
+ * watch their robot come back up; short enough that a referee with eight
+ * fixtures still gets through the day. A referee who does not need it skips it
+ * the moment both teams say they are ready.
+ */
+export const DEFAULT_HALF_TIME_SECONDS = 300;
 
 /** The four seats, in the order everything that iterates them uses. */
 export const SEAT_IDS = ['violet-1', 'violet-2', 'lime-1', 'lime-2'] as const;
@@ -143,6 +174,36 @@ export interface MatchOptions {
    * `run()`, today's `serve` modes — changes at all.
    */
   refereed?: boolean;
+  /**
+   * Goal difference that ends the match, or `null` for no limit.
+   *
+   * Defaults to `DEFAULT_MERCY_MARGIN`. A match ended this way is finished, not
+   * abandoned: it counts, it is written down, and `MatchResult.mercy` says why
+   * it was shorter than the clock.
+   */
+  mercyMargin?: number | null;
+  /**
+   * Seconds of half-time between the two halves, or 0 (the default) for none.
+   *
+   * Zero by default and sent in by the hub from `rules.halfTimeSeconds`, the
+   * same way `mercyMargin` is: a laptop running `--referee` keeps the break it
+   * has always had — as long as the referee takes — and every fixture at a
+   * venue gets the one the venue set, whatever a particular arena was started
+   * with.
+   *
+   * Only a refereed match ever has one. `run()` and `playFast` decide for
+   * themselves when a half ends and have nobody to wait for.
+   */
+  halfTimeSeconds?: number;
+  /**
+   * A scoreline the match starts from, and why.
+   *
+   * Recorded as ordinary score corrections at clock 0, so a match that kicks
+   * off 3-0 carries the reason in its own record rather than starting at a
+   * score nobody can account for. The pre-game penalty clock is the only thing
+   * that sets it; every other caller starts at nil-nil and never passes this.
+   */
+  penalties?: { violet: number; lime: number; reason: string };
   /** Forwarded to `World` directly, independent of `refereed`. Defaults to World's own default (true). */
   autoResolve?: boolean;
   autoDamaged?: boolean;
@@ -232,6 +293,14 @@ export interface MatchResult {
   /** Whether a referee ended the match early rather than it running full time. */
   abandoned: boolean;
   abandonReason?: string;
+  /**
+   * Whether the mercy rule ended it rather than the clock.
+   *
+   * Deliberately not `abandoned`: an abandoned fixture is left unwritten and
+   * replayed, and a mercy result is a finished match that counts. A table
+   * wants to be able to say which of the two a short match was.
+   */
+  mercy?: boolean;
   /** Performance statistics per robot seat. */
   robotStats?: Record<string, RobotStats>;
 }
@@ -315,8 +384,24 @@ export class Match {
   /** Whether this match is driven by referee calls rather than the clock. */
   readonly refereed: boolean;
   private readonly scoreCorrections: ScoreCorrection[] = [];
+  private readonly mercyMargin: number | null;
+  /** See `MatchOptions.halfTimeSeconds`. */
+  private readonly halfTimeSeconds: number;
+  /**
+   * When half-time began, in **wall** milliseconds, or `null` outside one.
+   *
+   * Wall clock rather than match seconds, for the reason the pre-game penalty
+   * clock is (`pregame.ts`): a team walking to a laptop to fix a line of
+   * Python lives in wall time, and the match clock is stopped anyway. It does
+   * not pause, which costs nothing — see `halfTimeHolds`, where the only thing
+   * that happens at zero is that a gate opens.
+   */
+  private halfTimeSince: number | null = null;
+  /** Which sides have said they are ready to play the second half. */
+  private readonly saidReady = { violet: false, lime: false };
   private halfEndRequested = false;
   private ended = false;
+  private mercied = false;
   private abandoned = false;
   private abandonReason: string | undefined;
   private hasKickedOffThisHalf = false;
@@ -346,6 +431,8 @@ export class Match {
   constructor(opts: MatchOptions) {
     const league = getLeague(opts.league ?? 'open');
     this.halfSeconds = opts.halfSeconds ?? 300;
+    this.mercyMargin = opts.mercyMargin === undefined ? DEFAULT_MERCY_MARGIN : opts.mercyMargin;
+    this.halfTimeSeconds = Math.max(0, opts.halfTimeSeconds ?? 0);
     this.teams = opts.teams ?? { violet: 'Violet', lime: 'Lime' };
     this.refereed = opts.refereed ?? false;
     const seed = toSeed(opts.seed ?? 1);
@@ -396,6 +483,18 @@ export class Match {
         id,
         this.makeSlot(id, transport ?? new LocalTransport(agent!, motors), motors),
       );
+    }
+
+    // Goals owed before a ball is kicked. Last, because a correction touches
+    // the world and emits an event, and both have to exist first. Through
+    // `correctScore` rather than straight into the score so the reason travels
+    // with them into the match record — and so the mercy rule sees them, which
+    // is what makes a match nobody can win end before it is played.
+    const owed = opts.penalties;
+    if (owed) {
+      for (const team of ['violet', 'lime'] as const) {
+        if (owed[team] > 0) this.correctScore(team, owed[team], owed.reason);
+      }
     }
   }
 
@@ -744,6 +843,7 @@ export class Match {
         }
       }
     }
+    this.checkMercy();
   }
 
   /**
@@ -926,6 +1026,76 @@ export class Match {
     return requested;
   }
 
+  /**
+   * The break between the halves, named.
+   *
+   * It has always been here — the loop driving a refereed match opens the
+   * second half stopped and waits for a whistle that may be five minutes off —
+   * but nothing said so, nothing timed it, and nothing was allowed to happen
+   * in it. What it is for is the one window in a match where a team may
+   * correct their code, so it needs a clock everybody can see and a gate that
+   * keeps the second half from starting while somebody is still typing.
+   *
+   * Called by the loop, not by a referee: half-time is what the end of the
+   * first half *is*, not something anybody decides.
+   */
+  beginHalfTime(): void {
+    if (this.halfTimeSeconds <= 0 || this.ended) return;
+    this.halfTimeSince = Date.now();
+    this.saidReady.violet = false;
+    this.saidReady.lime = false;
+    this.recordRefereeAction('half-time', `${this.halfTimeSeconds}s`);
+  }
+
+  /** A team saying they are ready to play the second half. */
+  sayReady(team: TeamId): void {
+    if (this.halfTimeSince === null) return;
+    this.saidReady[team] = true;
+    this.recordRefereeAction('ready', `${this.teams[team]} are ready`);
+  }
+
+  /** Half-time is over, because the second half has started. */
+  endHalfTime(): void {
+    this.halfTimeSince = null;
+  }
+
+  /** The break as a screen shows it, or `null` when there is not one. */
+  halfTime(now = Date.now()): HalfTime | null {
+    if (this.halfTimeSince === null) return null;
+    const elapsed = Math.max(0, (now - this.halfTimeSince) / 1000);
+    return {
+      since: new Date(this.halfTimeSince).toISOString(),
+      seconds: this.halfTimeSeconds,
+      remaining: Math.max(0, this.halfTimeSeconds - elapsed),
+      ready: { ...this.saidReady },
+      over: elapsed >= this.halfTimeSeconds,
+    };
+  }
+
+  /**
+   * Why the second half may not kick off yet, or `null` if it may.
+   *
+   * A referee may skip half-time the moment both teams say they are ready, and
+   * once the five minutes are up they may kick off whatever anybody has said.
+   * So this only ever holds the whistle for as long as half-time itself lasts:
+   * it is a gate that opens by itself, not authority taken off a referee.
+   *
+   * A sentence rather than a boolean, because it is answered straight back to
+   * the person who pressed the button.
+   */
+  halfTimeHolds(now = Date.now()): string | null {
+    const halfTime = this.halfTime(now);
+    if (!halfTime || halfTime.over) return null;
+    const waiting = (['violet', 'lime'] as const).filter((team) => !halfTime.ready[team]);
+    if (waiting.length === 0) return null;
+    const names = waiting.map((team) => this.teams[team]).join(' and ');
+    const left = Math.ceil(halfTime.remaining);
+    return (
+      `${names} ${waiting.length > 1 ? 'have' : 'has'} not said they are ready; ` +
+      `half-time has ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')} left`
+    );
+  }
+
   /** End the match after the current half — no second half is played. */
   endMatch(): void {
     this.ended = true;
@@ -944,8 +1114,41 @@ export class Match {
     this.recordRefereeAction('abandon', reason);
   }
 
+  /**
+   * End the match if one side is too far ahead for the rest to be football.
+   *
+   * Called wherever the score moves, which is two places: a goal, and a
+   * referee's correction. Not an abandonment — an abandoned fixture is left
+   * unwritten and replayed, and this is a finished match that counts — so it
+   * sets the same three flags `endMatch()` does and nothing else.
+   *
+   * Once only. A ten-goal lead stays a ten-goal lead, and a second call would
+   * put a second banner on the screen for the same thing.
+   */
+  private checkMercy(): void {
+    if (this.mercyMargin === null || this.mercied || this.ended) return;
+    const margin = Math.abs(this.world.score.violet - this.world.score.lime);
+    if (margin < this.mercyMargin) return;
+    const ahead = this.world.score.violet > this.world.score.lime ? 'violet' : 'lime';
+    this.mercied = true;
+    this.ended = true;
+    this.halfEndRequested = true;
+    this.world.running = false;
+    this.world.emit({
+      kind: 'mercy',
+      rule: '\u2014',
+      team: ahead,
+      message: `${this.teams[ahead]} lead by ${margin} \u2014 the match is over.`,
+    });
+  }
+
   get isEnded(): boolean {
     return this.ended;
+  }
+
+  /** Whether the mercy rule is what ended it. */
+  get isMercied(): boolean {
+    return this.mercied;
   }
 
   get isAbandoned(): boolean {
@@ -960,6 +1163,13 @@ export class Match {
     const from = this.world.score[team];
     this.scoreCorrections.push({ team, from, to, reason, at: this.world.clock });
     this.world.score[team] = to;
+    // And move the goal counter with it. `recordGoals` works off the gap
+    // between the score and what it has already written down, so a correction
+    // that did not say so here manufactured a goal per point awarded — with no
+    // robot attached to any of them — and a correction downwards swallowed the
+    // next real goal instead. Neither was visible from the scoreboard, which is
+    // why it survived: only `MatchResult.goals` was ever wrong.
+    this.lastScore[team] = to;
     this.world.emit({
       kind: 'score-corrected',
       rule: '—',
@@ -967,6 +1177,7 @@ export class Match {
       message: `Score corrected: ${team} ${from} → ${to}. ${reason}`,
     });
     this.recordRefereeAction('correct-score', `${team} ${from} → ${to}: ${reason}`);
+    this.checkMercy();
   }
 
   /**
@@ -993,6 +1204,9 @@ export class Match {
         countdown: this.world.countdownSeconds,
         team: this.world.restart.team,
       },
+      // Carried on the frame rather than fetched, so the referee's console and
+      // the hall screen count the break down off the stream they already have.
+      ...(this.halfTimeSince === null ? {} : { halfTime: this.halfTime()! }),
       score: { ...this.world.score },
       ball: {
         x: this.world.ball.x,
@@ -1037,6 +1251,12 @@ export class Match {
     }
     const dt = 1 / PHYSICS_HZ;
     for (const half of [1, 2] as const) {
+      // Until the mercy rule there was nothing a headless match could do to end
+      // itself, so this loop never asked. `playRefereed` in `server.ts` has
+      // always asked, because a referee could — the check was missing here, in
+      // `playFast` and in the realtime loop for exactly as long as ending early
+      // was a referee's privilege.
+      if (this.ended) break;
       this.world.half = half;
       // Rule 1.4/5.4: the team that did not kick off the first half starts the
       // second, and sides swap. Swapping sides is the reason every pairing is
@@ -1049,7 +1269,7 @@ export class Match {
       // so nothing about them changes.
       if (!this.world.countdownActive) this.world.running = true;
       const until = this.world.clock + this.halfSeconds;
-      while (this.world.clock < until) this.step(dt);
+      while (this.world.clock < until && !this.ended) this.step(dt);
       this.world.running = false;
     }
     return this.result();
@@ -1069,6 +1289,7 @@ export class Match {
       scoreCorrections: [...this.scoreCorrections],
       abandoned: this.abandoned,
       abandonReason: this.abandonReason,
+      ...(this.mercied ? { mercy: true } : {}),
       robotStats: {
         'violet-1': { ...this.ensureStats('violet-1') },
         'violet-2': { ...this.ensureStats('violet-2') },

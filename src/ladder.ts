@@ -81,6 +81,17 @@ export interface LadderOptions {
    * in each round. Eliminates environmental and noise variance when comparing teams.
    */
   twinSeeds?: boolean;
+  /**
+   * Goal difference that ends a match, or `null` for no limit — the default.
+   *
+   * **Off here, unlike a fixture at a venue.** All three of the jobs in this
+   * file's header are measurements, and a cap truncates every one of them: a
+   * ladder of deliberately poor robots is *meant* to produce blowouts, because
+   * that is where the rule detectors are exercised, and "run fifty matches and
+   * look at the distribution of scores" is not a distribution once the tail has
+   * been cut off. Set it only to reproduce a venue's own conditions.
+   */
+  mercyMargin?: number | null;
 }
 
 /**
@@ -143,6 +154,9 @@ export function runLadder(entries: Entry[], opts: LadderOptions = {}): LadderSum
   const rounds = opts.rounds ?? 1;
   const halfSeconds = opts.halfSeconds ?? 300;
   const baseSeed = opts.seed ?? 1;
+  // Off unless a caller asks, which is the opposite of everywhere a match is
+  // actually played. See `LadderOptions.mercyMargin`.
+  const mercyMargin = opts.mercyMargin ?? null;
 
   const table = new Map(entries.map((e) => [e.name, blank(e)]));
   const calls: Record<string, number> = {};
@@ -167,7 +181,7 @@ export function runLadder(entries: Entry[], opts: LadderOptions = {}): LadderSum
         const seed = opts.twinSeeds
           ? deriveSeed(baseSeed, 'ladder-twin', [home.name, away.name].sort().join(':'), round)
           : deriveSeed(baseSeed, 'ladder', home.name, away.name, round);
-        const result = new Match({ agents, halfSeconds, seed }).run();
+        const result = new Match({ agents, halfSeconds, seed, mercyMargin }).run();
         matches++;
         goals += result.score.violet + result.score.lime;
         for (const [kind, n] of Object.entries(result.calls)) {

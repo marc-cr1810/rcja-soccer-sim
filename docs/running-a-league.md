@@ -326,9 +326,11 @@ Each game has its own page at **`/referee/m/<fixture>`**, and that address does
 not change: it works before the match exists, so it is the thing to write on a
 run sheet or send to somebody. Left open, it is where the match begins and then
 where it is run: it grows an **Open pre-game** button when the fixture's turn
-comes, and a **Take the match** link to the console once the pitch is up. An
-arena's own address is no use for this — it is born with the match and is a
-different string next time.
+comes, becomes the pre-game checklist while the teams arrive, offers **Start the
+match**, and then carries a **Take the match** link to the console. (It also
+answers at `/referee/m/<fixture>/setup`, which is the same screen under the name
+the design document gives it.) An arena's own address is no use for any of this
+— it is born with the match and is a different string next time.
 
 A referee is given a fixture from the terminal:
 
@@ -388,6 +390,277 @@ at *waiting for the referee* and play nothing.** Any admin can open any fixture
 from the same page, so the way out is a browser rather than a restart. A server
 run with `--headless` has nobody to ask and plays its fixtures as soon as their
 turn comes, exactly as before.
+
+### Teams turn up, and then the referee starts it
+
+Opening pre-game brings the pitch up and stops there. Nothing kicks off until a
+referee presses **Start the match**, and the twenty minutes in between are the
+ones a competition actually has: teams arriving, robots coming off practice
+fields, and somebody looking at the four seats and deciding that this is the
+code that plays.
+
+A team says they are here from their own page — **We're here**, which appears
+under *Your next match* as soon as the fixture is theirs to play. They can press
+it **before the pitch is free**, which is the point: teams turn up and wait, and
+a referee opening a pitch should find them already standing at it. The hub holds
+the arrival against the fixture and seats their robots by itself the moment the
+arena exists.
+
+The referee's page is the checklist:
+
+```
+Alpha robot 1    — 3f9c1a02 · pushed 14:31                       on the field
+Alpha robot 2    — a71b4e55 · pushed 14:31
+                   — its program would not start                 on the field
+Bravo robot 1    — 0c28ff90 · pushed 13:04 — Bravo have not arrived yet   waiting
+Bravo robot 2    — nothing pushed — Bravo have not pushed robot 2         waiting
+```
+
+The hash is there for one reason: a team that pushed a fix ninety seconds ago
+has to be able to *see* that the fix is the thing loaded. A team name cannot
+tell them, because it is re-pointed at new code on every push. There is no
+separate validation column, and that is not an omission — a push that failed
+validation was never kept, so a robot that is on disk has already passed.
+
+#### The robots start when their team arrives
+
+Pressing **We're here** does not just claim two seats on paper. It starts that
+team's robots on the pitch, in the sandbox they will play in, and the checklist
+says what each program is doing:
+
+| | |
+|---|---|
+| *(nothing said)* | that team has not arrived, so nothing of theirs has been started |
+| **starting** | the program is coming up |
+| **on the field** | it is connected, and standing on its mark |
+| **its program would not start** | it was retried and has stopped being retried |
+
+This exists because of where the alternative put the bad news. Robots used to
+come up at the whistle, so a submission that died at import was discovered ten
+seconds *after* the referee had decided to play — and the fixture then refused
+to play at all, wrote nothing and was replayed into the same wall. The twenty
+minutes in which somebody could have fixed it had already gone.
+
+**A team whose robot will not start has still arrived.** The seat stays
+claimed, the team is still *ready*, and nothing on the penalty clock moves: the
+clock is about people turning up, not about code compiling. What the referee
+gets is the information, in time to use it.
+
+**Pressing *We're here* again is the retry.** A team pushes a fix and presses
+the same button, and only the robots that are *not* on the field are started
+again — one that is already running is left exactly alone. That matters for
+more than tidiness: a match records the hash of the code each seat was
+*started* with, so a robot running since 14:31 is recorded as the code it has
+been running, whatever landed on disk afterwards.
+
+Starting the match with a robot that would not start plays the match without
+it, and the built-in agent fills the seat — the same thing that happens to a
+seat nobody ever pushed to. The referee is told so before they press it.
+
+**A team plays with one robot.** The minimum is one for both sides, so a team
+with one robot pushed and one still being written turns up and plays.
+
+**Start is never refused.** However empty the list is, the referee decides when
+a match starts — a team that never turns up must be able to delay a fixture
+without being able to stop one. A seat nobody filled plays whatever that team
+last pushed, exactly as it did before this phase; a seat with nothing pushed
+behind it is filled by the built-in agent, exactly as it always has been.
+
+Arriving is also what finally makes **one robot, one place** true during a
+match. A fixture has always pulled both teams' robots off their practice fields;
+until now it did not put them anywhere, so a team could walk away from their own
+match and start rehearsing again with both robots. Now the fixture holds them,
+and a practice field will refuse them with the sentence it has always used:
+
+```
+robot 1 is already in the violet-1 seat on your own practice field.
+Take it out of that seat first — each of your two robots can only be in
+one place at a time.
+```
+
+The pre-game room holds its arena and one of the venue's concurrency slots
+while it waits, unlike the *ready* gate before it — a pitch with people standing
+on it is a pitch in use. The terminal prints where to start it:
+
+```
+  pre-game:   ACT Robotics v NSW Lightning
+              nobody kicks off until the referee starts it at
+              http://localhost:8080/referee/m/act-robotics-v-nsw-lightning
+```
+
+A server run with `--headless` has nobody to ask and plays straight through,
+exactly as before.
+
+#### Locking the lineup
+
+**Lock the lineup** is the moment a push stops reaching this match. Until the
+referee presses it, a team can push a fix and press *We're here* again and the
+new code goes on. After it, the four seats are running copies the arena holds,
+and nothing in the submissions tree reaches the football.
+
+Locking is not a flag: each seat's folder is copied into the arena's own
+directory and the program is started from the copy. That is what makes the lock
+real — a push replaces the folder in the submissions tree outright, and a robot
+whose program crashes once is respawned from whatever is at that path *then*.
+Copied, it cannot be.
+
+**Pressing Lock restarts a seat running older code than its team has since
+pushed**, and only such a seat. A robot already running exactly what is on disk
+is left strictly alone, so locking a room where nothing has changed disturbs
+nothing. The checklist says which seats are behind before the lock, too:
+
+```
+ACT Robotics robot 1 — 6d4d7a3c · pushed 4 minutes ago
+  — still running 4c890e74, not the newest push
+```
+
+**There is no unlock, because pressing Lock again is the unlock.** Before
+kick-off a referee may lock as often as they like and each press takes in every
+team's newest code. That keeps the rule to one sentence: *a push reaches a
+locked match only when a referee decides it does.* Once the whistle has gone,
+nothing changes it, with exactly one exception: half-time, below.
+
+**A push into a locked match is kept, and says so.** It is that team's code
+from their next game on, and the push itself tells them rather than leaving
+them to find out:
+
+```
+accepted: ACT Robotics robot 1
+kept — but the lineup for your match against NSW Lightning is already locked,
+so this is not in it. It is what plays from your next game on.
+```
+
+**Starting without locking locks what is on the field.** The whistle is not a
+decision to take anybody's new code in — the referee pressed Start on a
+checklist showing those robots running, so every seat keeps what it is running
+and only the seats nobody has started yet are read off disk. That is the one
+difference between the button and the whistle, and it is deliberate: a working
+robot must never be restarted under a referee who did not ask for it.
+
+Both legs of a tie play the same code, for the same reason: the copies are
+taken once, and a push between the legs cannot reach the second one.
+
+### What a late team costs
+
+Out of the box, nothing. No timer runs, no goals accrue, and the referee starts
+the match when they judge it right — which is the same answer this part of the
+system gives everywhere else. Two things can be turned on when a day is running
+behind, and neither of them takes the decision away from the referee.
+
+**The penalty clock** is a button on the pre-game page, not a timer. Press
+**Start the penalty clock** and the team that is standing at the pitch is
+awarded one goal a minute against the team that is not. The referee starts it
+because the referee is the only person there who can see whether the delay is
+the team's fault or the venue's own network.
+
+Three things about it are worth knowing before you use it at an event:
+
+- **It banks a whole minute at a time,** to whoever was owed it then. A team
+  that arrives four minutes late has cost their opponent four goals and owes
+  nothing from that moment — and those four do not come back when they walk in.
+- **Stopping it keeps what it earned.** A scoreline that could be wound back by
+  turning up would make the clock pointless. Undo one with a score correction on
+  the pitch instead, in front of everybody, with a reason attached.
+- **With nobody there at all it awards nothing,** because there is nobody to
+  award it to. The page says *neither team has arrived* rather than counting,
+  so it stays somebody's decision.
+
+Whatever it awarded travels into the match: the fixture kicks off at that
+scoreline, and the arena's own record carries it as a score correction with the
+reason, so a 3–0 at kick-off is never a number nobody can account for. Only the
+first leg of a two-legged tie is charged — the late team was late once.
+
+**Auto-start** is the timer, and it is off unless you ask for it. Set
+`pregame.autoStartMins` and a pre-game room that nobody has started by then
+starts itself, playing whatever is on disk. The referee's Start is available the
+whole time either way.
+
+```json
+{
+  "pregame": { "autoStartMins": 15, "penaltyPerMin": 1 },
+  "rules": { "mercyMargin": 10, "halfTimeSeconds": 300 }
+}
+```
+
+On `league`, `--auto-start 15|off`, `--penalty-per-min 1`, `--mercy 10|off` and
+`--half-time 300|off` do the same for one run without editing the file.
+(`bench` has a `--mercy` of its own, which works the other way round — see
+below.)
+
+### Half-time
+
+**Five minutes between the halves, and the one window in a match where a team
+may change their code.** It is `rules.halfTimeSeconds`; set it to `0` and a
+match behaves exactly as it did before this existed — the referee simply
+restarts when they are ready.
+
+It begins by itself when the first half ends. Nobody presses anything, and
+nothing about the football changes: the ball, the clock and every rule detector
+stay where the whistle left them, and the four programs keep being polled so
+none of them decides the server has gone.
+
+What is different is that **a push can still reach this match**. A team fixes
+their code, pushes it and waits for their robot to come back up; the referee
+presses **Take the new code in** on the match page, which is the same Lock they
+used before kick-off and takes every team's newest push at once. The push
+itself says so:
+
+```
+accepted: ACT Robotics robot 1
+kept — and your match against NSW Lightning is at half-time, so this can still
+play the second half: tell the referee, and say you are ready once your robot
+is back up.
+```
+
+A restarted robot rejoins the match in progress — it is not sent off under rule
+5.7.1, because a program that stops while the game is stopped has not failed at
+anything. It does take a second or two to come up, so take the code in before
+you kick off rather than after.
+
+**The second half's kick-off is held until both teams say they are ready.**
+Each team presses *We're ready* on their own screen, and the console says who
+is still working. That hold is only ever as long as half-time itself: **when
+the clock runs out both buttons come back**, whatever either team has said, and
+nothing kicks off by itself at any point. The five minutes tell the time; the
+referee decides.
+
+**When half-time changes the code, the record says so.** `submissions` on a
+fixture is what each seat *started* on, and the leg that had the change carries
+a `secondHalf` beside it with what played after. A match nobody pushed to at
+half-time writes exactly the record it always did.
+
+### The mercy rule, and a fixture nobody turned up for
+
+**A match ends at a ten-goal difference**, wherever that difference came from.
+It is not an RCJA rule — the rule book has no mercy rule — so it is
+`rules.mercyMargin` and a venue can change it or set it to `null`.
+
+It applies to every match that is *played*: fixtures, the hall demo, the batch
+`tournament`. Three things opt out, and they are the three that are not playing
+a match — a **practice field**, which is a rehearsal with no result to shorten,
+and **`bench`** and **`ladder`**, which are measuring instruments. The rule only
+ever takes goals off whoever is winning, so it moves an aggregate-goals
+comparison asymmetrically and cuts the tail off a score distribution, which is
+the thing both of those exist to look at. Pass `bench --mercy 10` or
+`runLadder({ mercyMargin: 10 })` to reproduce a venue's conditions deliberately.
+
+A match ended this way is **finished, not abandoned**. It counts, it is written
+down, and its record says the mercy rule is what ended it — which matters,
+because an abandoned fixture is left unwritten and replayed.
+
+The mercy rule is also the ceiling on the penalty clock, and that is why the two
+arrived together. Once the clock has awarded ten there is no match left to play,
+so the fixture is **awarded without being played**: the pitch goes straight back
+to the venue instead of standing empty all afternoon, and the result reads
+
+```
+Alpha 10 — 0 Bravo    Bravo did not arrive — the match was awarded 10-0.
+```
+
+It is an ordinary result in every other respect. It goes to the referee's
+confirmation screen like every other result, which is the thing that makes it
+safe: a team that walks in a minute after the margin was reached is somebody
+pressing **Play it again**, not an argument.
 
 ### One confirmation writes the result
 

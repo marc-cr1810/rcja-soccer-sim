@@ -486,6 +486,28 @@ describe('refereed play: a human starts each half; everything else resolves itse
     ]);
   });
 
+  it('does not manufacture goals out of a score correction', () => {
+    const m = refereedMatch();
+    m.resetAgents();
+    m.kickOff('violet');
+
+    // A referee awarding goals the detector missed. Nothing was kicked, so the
+    // match record must not grow two goals with nobody attached to them —
+    // `recordGoals` works off the difference between the score and what it has
+    // already counted, and a correction moves the score behind its back.
+    m.correctScore('violet', 2, 'Two goals missed while the camera was down.');
+    for (let i = 0; i < 10; i++) m.step(dt);
+    expect(m.result().goals).toEqual([]);
+
+    // And the other way round: taking goals off must not swallow the next real
+    // one, which is the same bookkeeping failing in the opposite direction.
+    m.correctScore('violet', 0, 'Both overturned — the ball had gone out.');
+    m.world.score.violet = 1;
+    for (let i = 0; i < 10; i++) m.step(dt);
+    expect(m.result().goals).toHaveLength(1);
+    expect(m.result().goals[0]!.team).toBe('violet');
+  });
+
   it('abandon ends the match and records the reason', () => {
     const m = refereedMatch();
     m.resetAgents();
@@ -653,5 +675,85 @@ describe('staged matches (Phase 4)', () => {
       expect(typeof stats!.shots).toBe('number');
       expect(typeof stats!.penalties).toBe('number');
     }
+  });
+});
+
+/**
+ * Half-time: the break between the halves, and the one gate on a referee.
+ *
+ * Off unless somebody asks for it, which is what keeps every laptop and every
+ * headless match exactly as it was — a venue turns it on for its fixtures and
+ * nothing else in this repo ever passes it.
+ */
+describe('half-time', () => {
+  function stopped(halfTimeSeconds?: number): Match {
+    return new Match({
+      agents: teams(),
+      halfSeconds: 5,
+      seed: 1,
+      teams: { violet: 'Alpha', lime: 'Bravo' },
+      ...(halfTimeSeconds === undefined ? {} : { halfTimeSeconds }),
+    });
+  }
+
+  it('does not exist unless a venue asked for one', () => {
+    const match = stopped();
+    match.beginHalfTime();
+    expect(match.halfTime()).toBeNull();
+    // And so nothing it does can ever hold a whistle: this is what makes a
+    // laptop running `--referee` behave exactly as it always has.
+    expect(match.halfTimeHolds()).toBeNull();
+    expect(match.snapshot().halfTime).toBeUndefined();
+  });
+
+  it('holds the second half until both teams say they are ready', () => {
+    const match = stopped(300);
+    match.beginHalfTime();
+
+    const both = match.halfTimeHolds();
+    expect(both).toContain('Alpha');
+    expect(both).toContain('Bravo');
+
+    match.sayReady('violet');
+    const one = match.halfTimeHolds();
+    expect(one).toContain('Bravo');
+    expect(one).not.toContain('Alpha');
+
+    match.sayReady('lime');
+    expect(match.halfTimeHolds()).toBeNull();
+  });
+
+  it('lets go by itself when the five minutes are up', () => {
+    const match = stopped(300);
+    match.beginHalfTime();
+    expect(match.halfTimeHolds()).not.toBeNull();
+
+    // The gate a referee cannot be stuck behind: nobody has said anything, and
+    // past the clock both kick-off buttons come back regardless.
+    const later = Date.now() + 300_001;
+    expect(match.halfTime(later)!.over).toBe(true);
+    expect(match.halfTime(later)!.remaining).toBe(0);
+    expect(match.halfTimeHolds(later)).toBeNull();
+  });
+
+  it('is over once the second half has kicked off', () => {
+    const match = stopped(300);
+    match.beginHalfTime();
+    expect(match.snapshot().halfTime).toBeDefined();
+
+    match.endHalfTime();
+    expect(match.halfTime()).toBeNull();
+    expect(match.halfTimeHolds()).toBeNull();
+    // A team pressing their button after the whistle is not an error and is
+    // not a second half-time either.
+    match.sayReady('violet');
+    expect(match.halfTime()).toBeNull();
+  });
+
+  it('has none at all for a match that ended in the first half', () => {
+    const match = stopped(300);
+    match.abandon('the hall lost power');
+    match.beginHalfTime();
+    expect(match.halfTime()).toBeNull();
   });
 });

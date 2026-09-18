@@ -354,6 +354,7 @@ export class ArenaSupervisor {
       halfSeconds: number;
       league: LeagueId | null;
       gapSeconds: number;
+      randomSides?: boolean;
     };
   } = { kind: 'practice' }): Promise<ArenaInfo> {
     const kind = options.kind ?? 'practice';
@@ -394,6 +395,7 @@ export class ArenaSupervisor {
       args.push('--demo-half', String(demo.halfSeconds));
       if (demo.league !== null) args.push('--demo-league', demo.league);
       args.push('--demo-gap', String(demo.gapSeconds));
+      if (demo.randomSides) args.push('--demo-random-sides');
     }
     if (this.opts.submissionsDir) args.push('--submissions', this.opts.submissionsDir);
     if (this.opts.workspacesDir) {

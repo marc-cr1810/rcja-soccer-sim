@@ -71,6 +71,8 @@ export interface FramedBall {
   vx: number;
   vz: number;
   seen: boolean;
+  /** Seconds since the estimate was last corrected by a sighting. */
+  age: number;
   speed(): number;
   /** Where it will be in `seconds`, still in attack-relative coordinates. */
   predict(seconds: number): [number, number];

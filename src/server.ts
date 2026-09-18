@@ -28,6 +28,7 @@ import {
 import { VIEW_HZ, type ViewMessage } from './view';
 import { SEAT_IDS, type SeatId } from './match';
 import type { SeedInput } from './rand';
+import type { LeagueId } from './leagues';
 import type { Agent } from './agent';
 import { defaultSpot } from './world';
 import { AGENT_PATH, AgentGateway, type RemoteTransport } from './gateway';
@@ -820,6 +821,11 @@ export class MatchServer {
     const framePeriod = 1000 / viewHz;
 
     for (const half of [1, 2] as const) {
+      // A match can now end itself — the mercy rule — so this loop has to ask
+      // the same question `playRefereed` always has. It never did, because
+      // until now only a referee could end one early and a referee only ever
+      // drove the refereed loop.
+      if (match.isEnded) break;
       match.world.half = half;
       match.world.kickOff(half === 1 ? 'violet' : 'lime');
       match.resetAgents();
@@ -832,7 +838,7 @@ export class MatchServer {
       let owed = 0;
       let last = Date.now();
 
-      while (match.world.clock < until) {
+      while (match.world.clock < until && !match.isEnded) {
         await sleep(framePeriod);
         const now = Date.now();
         const wall = (now - last) / 1000;
@@ -887,13 +893,16 @@ export class MatchServer {
     const dt = 1 / PHYSICS_HZ;
     const perControl = Math.max(1, Math.round(PHYSICS_HZ / CONTROL_HZ));
     for (const half of [1, 2] as const) {
+      if (match.isEnded) break;
       match.world.half = half;
       match.world.kickOff(half === 1 ? 'violet' : 'lime');
       match.resetAgents();
       if (!match.world.countdownActive) match.world.running = true;
       const until = match.world.clock + match.halfLength;
-      while (match.world.clock < until) {
-        for (let i = 0; i < perControl && match.world.clock < until; i++) match.step(dt);
+      while (match.world.clock < until && !match.isEnded) {
+        for (let i = 0; i < perControl && match.world.clock < until && !match.isEnded; i++) {
+          match.step(dt);
+        }
         await sleep(0);
       }
       match.world.running = false;
@@ -983,6 +992,14 @@ export class MatchServer {
       match.world.running = false;
       this.broadcast({ type: 'frame', frame: match.snapshot() });
       if (match.isEnded) break;
+      // The break between the halves, which this loop has always left and
+      // never named. Only after the first, and only for a match that did not
+      // end in it: `endMatch`, `abandon` and the mercy rule all come through
+      // `isEnded` above, and none of them has a second half to wait for.
+      if (half === 1) {
+        match.beginHalfTime();
+        this.broadcast({ type: 'frame', frame: match.snapshot() });
+      }
     }
 
     const res = match.result();
@@ -1013,6 +1030,15 @@ export class MatchServer {
   async lobby(opts: {
     teams: { violet: string; lime: string };
     seed: SeedInput;
+    /**
+     * The league whose field this is.
+     *
+     * A lobby is a field somebody stands their robot on and looks at, so it
+     * has to be the field the match will be played on — a fixture arena waits
+     * in one before kicking off, and a pre-game pitch of the wrong size is a
+     * rehearsal in the wrong sport.
+     */
+    league?: LeagueId;
     until: () => boolean;
   }): Promise<void> {
     if (opts.until()) return;
@@ -1027,6 +1053,7 @@ export class MatchServer {
     const match = new Match({
       agents: waiting,
       teams: opts.teams,
+      league: opts.league,
       halfSeconds: 300,
       seed: opts.seed,
       idealSensors: this.opts.idealSensors ?? false,
@@ -1267,7 +1294,16 @@ export class MatchServer {
       case 'kickoff': {
         const validated = validateBody(body.payload, KickoffBodySchema, '"team" must be "violet" or "lime"');
         if (!validated.ok) return validated.response;
+        // Half-time holds the second half's whistle until both teams say they
+        // are ready, and lets go by itself when the clock runs out — so this
+        // can refuse a referee, but only for as long as half-time lasts. The
+        // gate is here rather than inside `Match.kickOff` so that the
+        // self-driving loops and every restart after a goal are untouched.
+        const holds = match.halfTimeHolds();
+        if (holds) return Response.json({ ok: false, reason: holds }, { status: 409 });
         match.kickOff(validated.value.team);
+        // Whatever half-time was left is spent: the football has restarted.
+        match.endHalfTime();
         break;
       }
       case 'award-kickoff':

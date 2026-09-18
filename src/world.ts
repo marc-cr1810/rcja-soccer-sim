@@ -150,7 +150,8 @@ export type EventKind =
   | 'illegal-kickoff'
   | 'paused'
   | 'resumed'
-  | 'score-corrected';
+  | 'score-corrected'
+  | 'mercy';
 
 export interface MatchEvent {
   kind: EventKind;

@@ -223,6 +223,38 @@ describe('the areas a visitor may not enter', () => {
     const watching = await fetch(`http://127.0.0.1:${port}/a/${arenaId}/`, { redirect: 'manual' });
     expect(watching.status).not.toBe(404);
   }, 40_000);
+
+  /**
+   * The surface that is not a surface.
+   *
+   * `/arena-api/` is the hub talking to its own children — what to play, what
+   * to lock, who has arrived — and it is held to nothing at the child's door
+   * because nothing but the hub can reach a child. Proxying it made that
+   * untrue: anybody who could read an arena id could take every team's newest
+   * push into a lineup a referee had locked, or start a final. It is not
+   * refused, it is absent, and this is the guard that keeps it that way.
+   */
+  it('does not proxy the hub\'s own arena control, to anybody', async () => {
+    const started = await aTeamAndAnArena();
+    const { port, arenaId, cookie } = started;
+
+    for (const path of ['/arena-api/state', '/arena-api/lock', '/arena-api/play', '/arena-api/ready']) {
+      const guest = await call(port, `/a/${arenaId}${path}`, { method: 'POST' });
+      expect(guest.status).toBe(404);
+      const team = await call(port, `/a/${arenaId}${path}`, { method: 'POST', cookie });
+      expect(team.status).toBe(404);
+    }
+    // `state` is a GET on the child, and a GET is what a curious spectator
+    // would actually send — the 404 above must not be about the method.
+    const read = await fetch(`http://127.0.0.1:${port}/a/${arenaId}/arena-api/state`, {
+      redirect: 'manual',
+    });
+    expect(read.status).toBe(404);
+
+    // Same arena, and it is answering: the hub still polls it on loopback.
+    const watching = await fetch(`http://127.0.0.1:${port}/a/${arenaId}/`, { redirect: 'manual' });
+    expect(watching.status).not.toBe(404);
+  }, 40_000);
 });
 
 /** A signed-in team, and a real arena running on the hub to aim at. */

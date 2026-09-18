@@ -30,6 +30,9 @@ import {
   OkResponseSchema,
   PlaceBodySchema,
   PlayRequestSchema,
+  LockRequestSchema,
+  LockResponseSchema,
+  ReadyRequestSchema,
   PracticeFieldCreatedResponseSchema,
   PracticeFieldsResponseSchema,
   PracticeStateResponseSchema,
@@ -766,6 +769,38 @@ route({
   description: 'The state of a fixture arena, polled by the hub: playing, score, clock, fidelity, result.',
   responses: {
     '200': json(ArenaStateResponseSchema, 'Arena state'),
+  },
+});
+
+route({
+  method: 'post',
+  path: '/arena-api/lock',
+  summary: 'Lock the lineup',
+  description:
+    "A referee saying this is the code that plays: every seat is copied out of the submissions tree into the arena and started from the copy, and any seat running an older push than its team has since made is restarted on the newest. Callable again before kick-off, and once more at half-time — which is the whole of the unlock. Not reachable from a browser: the hub calls this on loopback and refuses to proxy `/arena-api/`.",
+  request: {
+    body: { content: { [JSON]: { schema: LockRequestSchema } } },
+  },
+  responses: {
+    '200': json(LockResponseSchema, 'Locked — the lineup and the arena\'s own timestamp'),
+    '400': error('Bad request — the lock request failed to parse'),
+    '409': error('This match has already started and is not at half-time'),
+  },
+});
+
+route({
+  method: 'post',
+  path: '/arena-api/ready',
+  summary: 'A team is ready for the second half',
+  description:
+    'Forwarded by the hub, which is the only thing that knows whose session this was. The second half\'s kick-off is refused until both sides have said this or half-time has run out.',
+  request: {
+    body: { content: { [JSON]: { schema: ReadyRequestSchema } } },
+  },
+  responses: {
+    '200': json(OkResponseSchema, 'Taken'),
+    '400': error('"side" must be "violet" or "lime"'),
+    '409': error('This match is not at half-time'),
   },
 });
 

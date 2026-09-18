@@ -24,8 +24,7 @@ import {
   WheelEffort,
   YawEstimator,
 } from './estimator';
-import { ChampionStriker } from './striker';
-import { ChampionGoalie } from './goalie';
+import { ChampionBrain, goalieParams, strikerParams } from './brain';
 
 export class ChampionAgent implements Agent {
   readonly name: string;
@@ -49,8 +48,7 @@ export class ChampionAgent implements Agent {
    */
   private readonly goalFrame = new GoalFrame();
 
-  private readonly striker: ChampionStriker;
-  private readonly goalie: ChampionGoalie;
+  private readonly brain: ChampionBrain;
 
   private restarted = false;
 
@@ -60,8 +58,11 @@ export class ChampionAgent implements Agent {
     this.skill = opts.skill ?? 1.0;
     this.name = opts.name ?? `champion-${opts.team}${opts.number}-${this.role}`;
 
-    this.striker = new ChampionStriker(this.drive, this.skill);
-    this.goalie = new ChampionGoalie(this.drive, this.skill);
+    const params = {
+      role: this.role,
+      ...(this.role === 'goalie' ? goalieParams : strikerParams),
+    };
+    this.brain = new ChampionBrain(this.drive, params, this.skill);
   }
 
   reset(): void {
@@ -70,8 +71,7 @@ export class ChampionAgent implements Agent {
     this.compassBias.reset();
     this.yawEst.reset();
     this.effort.reset();
-    this.striker.reset();
-    this.goalie.reset();
+    this.brain.reset();
     this.goalFrame.reset();
     this.restarted = false;
   }
@@ -138,18 +138,7 @@ export class ChampionAgent implements Agent {
     // multiply by, so there is none to forget. The motor command comes back
     // needing no inverse - `mixOmni` is handed `travel - heading`, and both
     // were shifted by the same angle.
-    if (this.role === 'goalie') {
-      return this.goalie.decide(
-        frame,
-        pose,
-        ball,
-        framedHeading,
-        yawRate,
-        this.effort,
-        mateMsg,
-      );
-    }
-    return this.striker.decide(
+    return this.brain.decide(
       frame,
       this.goalFrame,
       pose,
@@ -173,6 +162,7 @@ export class ChampionAgent implements Agent {
       vx,
       vz,
       seen: est.seen,
+      age: est.age,
       speed: () => est.speed(),
       predict: (seconds: number) => gf.toFrame(...est.predict(seconds)),
     };

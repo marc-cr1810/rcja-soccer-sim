@@ -98,6 +98,11 @@ const ROUTES: [RegExp, Route][] = [
   [/^\/admin$/, admin],
   [/^\/referee\/?$/, refereeList],
   [/^\/referee\/m\/([^/]+)$/, (p) => refereeMatch(p[0]!)],
+  // END-STATE.md's own name for the pre-game screen, pointed at the same
+  // renderer: the match page already *is* the checklist while pre-game is open.
+  // Two names rather than two pages, so a referee handed either address by a
+  // colleague or by the terminal lands on the right screen.
+  [/^\/referee\/m\/([^/]+)\/setup$/, (p) => refereeMatch(p[0]!)],
 ];
 
 /** Refreshed while something is live, cleared on every navigation. */
@@ -294,10 +299,131 @@ function liveScoreline(live: Live): string {
  */
 const PUBLIC_STATE: Record<string, string> = {
   confirming: 'full time',
+  pregame: 'teams are arriving',
   due: 'waiting for the referee',
   opening: 'starting',
   upcoming: '',
 };
+
+/** One of the four seats in a fixture, as the hub's checklist sends it. */
+interface Seat {
+  id: string;
+  team: string;
+  slug: string;
+  number: number;
+  arrived: boolean;
+  pushed: { hash: string; at: string } | null;
+  seated: boolean;
+  program?: 'no-push' | 'starting' | 'on-field' | 'would-not-start';
+  /** The code the program is actually running, which `pushed` may have moved past. */
+  loaded?: { hash: string };
+  detail?: string;
+}
+
+/**
+ * The four seats of a fixture, as a checklist.
+ *
+ * One row per seat rather than one per team, because the seats are what the
+ * match actually has and a team with one robot pushed is a real and ordinary
+ * thing. The hash is here for the reason END-STATE gives: a team that pushed a
+ * fix ninety seconds ago has to be able to *see* that the fix is the thing
+ * loaded, and a team name cannot tell them — it is re-pointed at new code on
+ * every push.
+ *
+ * The badge is the seat's *claim* and not its program. A team whose robot will
+ * not start is still here and still ready in every sense the clock cares
+ * about; what their program is doing is the sentence beside it, which is the
+ * thing they can go and fix.
+ */
+function seatRows(seats: Seat[]): string {
+  return `<div class="rows">${seats
+    .map((seat) => {
+      const code = seat.pushed
+        ? `<span class="mono">${esc(seat.pushed.hash.slice(0, 8))}</span> &middot; pushed ${esc(when(seat.pushed.at))}`
+        : 'nothing pushed';
+      const badge = seat.program === 'on-field' ? 'on the field' : seat.seated ? 'ready' : 'waiting';
+      return `<div class="row">
+        <span class="grow">
+          ${esc(seat.team)} robot ${seat.number}
+          <span class="dim">&mdash; ${code}</span>
+          ${seat.detail ? `<span class="dim">&mdash; ${esc(seat.detail)}</span>` : ''}
+        </span>
+        <span class="state ${seat.seated ? 'playing' : ''}">${badge}</span>
+      </div>`;
+    })
+    .join('')}</div>`;
+}
+
+/** Which teams still have nobody standing at the pitch. */
+function missingFrom(seats: Seat[]): string[] {
+  const teams = [...new Set(seats.map((seat) => seat.team))];
+  return teams.filter((team) => !seats.some((seat) => seat.team === team && seat.seated));
+}
+
+/** What a pre-game room is waiting on, and what the waiting has cost so far. */
+interface PregameRoom {
+  since: string;
+  /** When a push stopped reaching this match, or `null` while one still does. */
+  lockedAt: string | null;
+  penalty: {
+    available: boolean;
+    perMin: number;
+    running: boolean;
+    since: string | null;
+    goals: { violet: number; lime: number };
+  };
+  autoStartAt: string | null;
+  nobodyHere: boolean;
+}
+
+/**
+ * The penalty clock, and the two things a referee needs beside it.
+ *
+ * Nothing runs on its own here. The clock is a button, because the referee is
+ * the only one at the pitch who can see whether a delay is the team's fault or
+ * the venue's network — and a room that starts itself does so only because the
+ * venue asked for it in `league.json`, which is worth saying on the page rather
+ * than surprising somebody with.
+ */
+function penaltyPanel(
+  fixture: { home: string; away: string },
+  room: PregameRoom | null,
+): string {
+  if (!room) return '';
+  const { penalty } = room;
+  const owed = [
+    penalty.goals.violet > 0 ? `${esc(fixture.home)} ${penalty.goals.violet}` : '',
+    penalty.goals.lime > 0 ? `${esc(fixture.away)} ${penalty.goals.lime}` : '',
+  ]
+    .filter(Boolean)
+    .join(' and ');
+
+  return `
+    ${
+      room.nobodyHere
+        ? `<p class="dim" style="margin-top:1rem">Neither team has arrived. Nothing is being awarded &mdash; there is nobody to award it to.</p>`
+        : ''
+    }
+    ${
+      penalty.available
+        ? `<p style="margin-top:1rem">
+             <button id="penalty-clock" data-on="${penalty.running}">${
+               penalty.running ? 'Stop the penalty clock' : 'Start the penalty clock'
+             }</button>
+             <span class="dim">&mdash; ${penalty.perMin} goal${penalty.perMin === 1 ? '' : 's'} a minute to whoever is here${
+               penalty.running ? ', running now' : ''
+             }</span>
+           </p>`
+        : ''
+    }
+    ${owed ? `<p class="dim">Awarded so far: ${owed}. Stopping the clock keeps it.</p>` : ''}
+    ${
+      room.autoStartAt
+        ? `<p class="dim">This room starts itself at ${esc(when(room.autoStartAt))} unless somebody starts it first.</p>`
+        : ''
+    }
+  `;
+}
 
 /** A fixture as a line on a sheet: who, the score if there is one, and where it got to. */
 function fixtureRow(card: Card): string {
@@ -1099,6 +1225,15 @@ async function register(): Promise<void> {
 }
 
 /** What a team's own dashboard is told that the public team page is not. */
+/** The break between the halves, as every screen here reads it. */
+interface HalfTime {
+  since: string;
+  seconds: number;
+  remaining: number;
+  ready: { violet: boolean; lime: boolean };
+  over: boolean;
+}
+
 interface Yours {
   fields: {
     id: string;
@@ -1112,10 +1247,38 @@ interface Yours {
   invitations: { arenaId: string; from: string }[];
   robots: {
     number: number;
-    at: { seatId: string; arenaId: string; owner: string | null; url: string } | null;
+    at: {
+      seatId: string;
+      arenaId: string;
+      owner: string | null;
+      url: string;
+      /** In a match rather than on somebody's practice field. */
+      fixture: boolean;
+    } | null;
   }[];
   queue: { position: number; ahead: number; offer: { until: string } | null } | null;
   perTeam: number;
+  /** The match this team is about to play, from `due` onwards. */
+  match: {
+    id: string;
+    home: string;
+    away: string;
+    state: string;
+    arrived: boolean;
+    /** When the referee fixed what plays, or `null` while a push still counts. */
+    lockedAt: string | null;
+    /**
+     * The break between the halves, while their own match is in one.
+     *
+     * The one moment during a match this block exists at all: their screen
+     * goes quiet at kick-off, because until half-time there is nothing they
+     * can do, and comes back for exactly as long as there is.
+     */
+    halfTime: HalfTime | null;
+    /** Which side they are playing, so they can read the register above. */
+    side: 'violet' | 'lime';
+    seats: Seat[];
+  } | null;
 }
 
 /**
@@ -1173,6 +1336,8 @@ async function dashboard(): Promise<void> {
       </div>
     </div>
 
+    ${data.yours?.match ? nextMatchSection(data.yours.match) : ''}
+
     ${data.yours ? practiceSection(data.yours) : ''}
 
     <h2>Your fixtures</h2>
@@ -1180,6 +1345,142 @@ async function dashboard(): Promise<void> {
   `);
 
   if (data.yours) wirePractice(mine.slug, data.yours);
+
+  const match = data.yours?.match ?? null;
+  if (match) {
+    document.getElementById('arrive')?.addEventListener('click', () => {
+      const button = document.getElementById('arrive') as HTMLButtonElement;
+      button.disabled = true;
+      void (async () => {
+        const res = await api<{ ok: boolean; reason?: string; notice?: string }>(
+          `/api/team/match/${encodeURIComponent(match.id)}/arrive`,
+          { method: 'POST' },
+        );
+        // A robot left on a practice field is the refusal worth reading, and
+        // the hub phrases it — it is the only thing that knows which field.
+        if (!res.ok && res.reason) alert(res.reason);
+        else if (res.notice) alert(res.notice);
+        await go('/team', true);
+      })();
+    });
+
+    // Half-time's one button. The whistle is waiting on it, so it says so on
+    // itself the moment it is pressed rather than after the next poll.
+    document.getElementById('ready')?.addEventListener('click', () => {
+      const button = document.getElementById('ready') as HTMLButtonElement;
+      button.disabled = true;
+      button.textContent = 'Told the referee';
+      void (async () => {
+        const res = await api<{ ok: boolean; reason?: string }>(
+          `/api/team/match/${encodeURIComponent(match.id)}/ready`,
+          { method: 'POST' },
+        );
+        if (!res.ok && res.reason) alert(res.reason);
+        await go('/team', true);
+      })();
+    });
+
+    // So a team can leave this open and watch their pitch come up. Quickly at
+    // half-time, where five minutes are running out under a clock on the
+    // screen; slowly otherwise, because the part that moves is one row.
+    repoll(() => void dashboard(), match.halfTime ? 2000 : 5000);
+  }
+}
+
+/**
+ * The match this team is about to play, and the one button they press for it.
+ *
+ * Above practice on purpose: when this block exists it is the most important
+ * thing on the screen, and everything below it is about to be taken away from
+ * them anyway — a fixture pre-empts practice, and both their robots are needed
+ * here.
+ *
+ * Arriving is offered from *due* onwards rather than only once a pitch is
+ * free, because that is how a hall works: teams turn up and wait, and a referee
+ * opening the pitch should find them already standing there. The hub holds the
+ * arrival against the fixture and seats the robots by itself when the arena
+ * comes up.
+ */
+function nextMatchSection(match: NonNullable<Yours['match']>): string {
+  const waiting = match.state === 'due' || match.state === 'opening';
+  const stuck = match.seats.some((seat) => seat.program === 'would-not-start');
+  // Half-time is a different screen, not a different sentence on this one.
+  // Nothing else on this block is true during a match: they have arrived, the
+  // lineup is locked, and the only question left is whether they are ready.
+  if (match.halfTime) return halfTimeSection(match, match.halfTime);
+  return h(`
+    <h2>Your next match</h2>
+    <div class="rows">
+      <div class="row">
+        <span class="grow">${esc(match.home)}<span class="v">v</span>${esc(match.away)}</span>
+        <span class="state">${esc(PUBLIC_STATE[match.state] ?? match.state)}</span>
+      </div>
+    </div>
+    ${match.arrived ? seatRows(match.seats) : ''}
+    <p class="dim" style="margin-top:0.75rem">${
+      // The locked sentence comes before every other one, because once it is
+      // true it changes what all of them mean: a stuck robot can no longer be
+      // fixed by pushing, and a push made now is for the game after this.
+      match.lockedAt
+        ? 'The referee has locked the lineup. This is the code that plays &mdash; a push now is for your next game, and pressing the button below restarts the locked code, not the new one.'
+        : match.arrived
+          ? waiting
+            ? 'You are on the list. Your robots take their seats the moment the referee opens the pitch.'
+            : stuck
+              ? 'Your program is not running. Push a fix and press the button again &mdash; only a robot that is not on the field is started over.'
+              : 'You are at the pitch, and your robots are running on it. The referee starts the match when both teams are ready.'
+          : 'Say you are here and your robots are taken off every practice field, put in their seats for this match, and started.'
+    }</p>
+    <p style="margin-top:0.75rem"><button id="arrive">${
+      // The same button, because to a team it is the same act: this is where
+      // we are. Pressing it again is how a robot that would not start gets
+      // started again, and one that is already on the field is left alone.
+      match.arrived ? 'Start my robots again' : 'We&rsquo;re here'
+    }</button></p>
+  `);
+}
+
+/**
+ * Half-time, from the team's side of the hall.
+ *
+ * Five minutes and one decision. A push made now is not refused and not
+ * hopeless — it reaches the second half if the referee takes it in — so this
+ * says who has to do what, in the order it has to happen: fix it, watch the
+ * robot come back up, then tell the referee.
+ *
+ * The clock is the server's own `remaining`, redrawn on the poll rather than
+ * ticked locally: a countdown that runs on this laptop's clock is a countdown
+ * that disagrees with the referee's, and the whole point of it is that they
+ * are looking at the same number.
+ */
+function halfTimeSection(match: NonNullable<Yours['match']>, halfTime: HalfTime): string {
+  const left = Math.ceil(halfTime.remaining);
+  const ready = halfTime.ready[match.side];
+  const other = match.side === 'violet' ? 'lime' : 'violet';
+  return h(`
+    <h2>Half-time</h2>
+    <div class="rows">
+      <div class="row">
+        <span class="grow">${esc(match.home)}<span class="v">v</span>${esc(match.away)}</span>
+        <span class="state">${
+          halfTime.over
+            ? 'time is up'
+            : `${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')} left`
+        }</span>
+      </div>
+    </div>
+    ${seatRows(match.seats)}
+    <p class="dim" style="margin-top:0.75rem">${
+      ready
+        ? halfTime.ready[other]
+          ? 'Both teams are ready. The referee restarts when they are.'
+          : 'You have told the referee you are ready. They kick off once the other team has too, or when the clock runs out.'
+        : 'This is the one window where you can change your code. Push a fix, wait for your robot to come back up, then say you are ready &mdash; the referee takes every new push in at once when they lock the lineup again.'
+    }</p>
+    <p style="margin-top:0.75rem"><button id="ready"${ready ? ' disabled' : ''}>${
+      ready ? 'You said you are ready' : 'We&rsquo;re ready'
+    }</button></p>
+  `);
 }
 
 /**
@@ -1205,10 +1506,14 @@ function practiceSection(yours: Yours): string {
           <button data-run="${robot.number}">Run it</button>
         </div>`;
       }
-      const whose = robot.at.owner === null ? 'a field' : `${esc(robot.at.owner)}'s field`;
+      // A robot in a fixture's seat is not on anybody's field, and sending a
+      // team to a practice page that does not exist is worse than not linking.
+      const where = robot.at.fixture
+        ? 'in your match'
+        : `on ${robot.at.owner === null ? 'a field' : `${esc(robot.at.owner)}'s field`}`;
       return `<div class="row">
-        <span class="grow">Robot ${robot.number} — in ${esc(robot.at.seatId)} on ${whose}</span>
-        <a href="${esc(robot.at.url)}" data-full>Open</a>
+        <span class="grow">Robot ${robot.number} — in ${esc(robot.at.seatId)} ${where}</span>
+        <a href="${esc(robot.at.url)}" data-full>${robot.at.fixture ? 'Watch' : 'Open'}</a>
       </div>`;
     })
     .join('');
@@ -1434,6 +1739,7 @@ interface RefereeCard {
 const REFEREE_STATE: Record<string, string> = {
   playing: 'on now',
   confirming: 'waiting on you',
+  pregame: 'teams arriving',
   opening: 'opening',
   due: 'ready to open',
   upcoming: 'not started',
@@ -1490,7 +1796,22 @@ async function refereeMatch(fixtureId: string): Promise<void> {
     fixture: { id: string; home: string; away: string };
     state: string;
     live: Live | null;
+    halfTime: HalfTime | null;
     console: string | null;
+    seats: Seat[] | null;
+    pregame: {
+      since: string;
+      lockedAt: string | null;
+      penalty: {
+        available: boolean;
+        perMin: number;
+        running: boolean;
+        since: string | null;
+        goals: { violet: number; lime: number };
+      };
+      autoStartAt: string | null;
+      nobodyHere: boolean;
+    } | null;
     final: { homeScore: number; awayScore: number } | null;
   }>(`/api/referee/match/${encodeURIComponent(fixtureId)}`);
 
@@ -1585,7 +1906,7 @@ async function refereeMatch(fixtureId: string): Promise<void> {
       <div class="empty">${
         waiting
           ? 'Opening the pitch. This takes a moment &mdash; longer if every pitch at the venue is busy.'
-          : 'Nothing is running yet. Opening this starts the pitch and brings both teams&rsquo; robots up.'
+          : 'Nothing is running yet. Opening this starts the pitch and lets both teams take their seats. It does not kick off &mdash; you start the match yourself once they are here.'
       }</div>
       ${waiting ? '' : `<p style="margin-top:1rem"><button id="open-pregame">Open pre-game</button></p>`}
     `);
@@ -1613,14 +1934,174 @@ async function refereeMatch(fixtureId: string): Promise<void> {
     return;
   }
 
+  // Pre-game: the pitch is up, nobody has kicked off, and this is the twenty
+  // minutes the sport actually has. What it shows is what a referee walking up
+  // to a pitch needs to know in one look — is anybody here, and is the code in
+  // front of me the code they think they pushed.
+  if (data.state === 'pregame' && data.seats) {
+    const missing = missingFrom(data.seats);
+    const stuck = data.seats
+      .filter((seat) => seat.program === 'would-not-start')
+      .map((seat) => `${seat.team} robot ${seat.number}`);
+    const room = data.pregame;
+    const clock = room?.penalty ?? null;
+    const owed = clock ? clock.goals.violet + clock.goals.lime : 0;
+    view.innerHTML =
+      head +
+      h(`
+      <p class="dim">Pre-game. Nothing is playing yet.</p>
+      ${seatRows(data.seats)}
+      <p class="dim" style="margin-top:1rem">${
+        missing.length
+          ? `Still waiting on ${esc(missing.join(' and '))}. You can start anyway &mdash; a team that is not here plays whatever they last pushed.`
+          : 'Both teams are here. A team is ready with one robot.'
+      }</p>
+      ${
+        // Said once, plainly, because it is the decision this whole room
+        // exists to inform: a robot that will not come up is one the match
+        // will be played without, and the team can still fix it from here.
+        stuck.length
+          ? `<p class="dim">${esc(stuck.join(' and '))} will not start. Starting now plays the match without ${
+              stuck.length > 1 ? 'them' : 'it'
+            } &mdash; the team can push a fix and say they are here again.</p>`
+          : ''
+      }
+      ${penaltyPanel(data.fixture, room)}
+      <p style="margin-top:1rem">
+        <button id="lock-lineup">${room?.lockedAt ? 'Lock again' : 'Lock the lineup'}</button>
+        <span class="dim">&mdash; ${
+          // There is no unlock, and pressing this again is why there does not
+          // need to be: it takes in whatever has been pushed since. Said here
+          // because a referee holding a locked room and a team with a fix has
+          // to know the way out is this same button.
+          room?.lockedAt
+            ? `locked ${esc(when(room.lockedAt))}. A push since then is not in this match &mdash; press again to take the newest code from every team.`
+            : 'fixes what each robot is running. Until then a team can still push and restart their own.'
+        }</span>
+      </p>
+      <p style="margin-top:1rem"><button id="start-match">Start the match${
+        owed > 0 ? ` at ${clock!.goals.violet}&ndash;${clock!.goals.lime}` : ''
+      }</button></p>
+      ${data.console ? `<p class="dim"><a href="${esc(data.console)}" data-full>Go to the console</a></p>` : ''}
+    `);
+
+    // The clock is a button because the referee is the only one who can see
+    // whether the delay is the team's fault or the venue's network. Stopping it
+    // keeps whatever it earned: a scoreline that could be wound back by turning
+    // up would make it pointless.
+    const penalty = document.getElementById('penalty-clock') as HTMLButtonElement | null;
+    penalty?.addEventListener('click', () => {
+      const on = penalty.dataset.on !== 'true';
+      penalty.disabled = true;
+      void (async () => {
+        const res = await api<{ ok: boolean; reason?: string }>(
+          `/api/referee/match/${encodeURIComponent(fixtureId)}/penalty`,
+          { method: 'POST', body: JSON.stringify({ on }) },
+        );
+        if (!res.ok && res.reason) alert(res.reason);
+        await go(`/referee/m/${encodeURIComponent(fixtureId)}`, true);
+      })();
+    });
+
+    // Locking takes a moment: it restarts every seat running older code than
+    // its team has since pushed, and a sandboxed interpreter takes a second to
+    // come up. Disabled while it does, or a second press lands mid-restart.
+    const lock = document.getElementById('lock-lineup') as HTMLButtonElement | null;
+    lock?.addEventListener('click', () => {
+      lock.disabled = true;
+      lock.textContent = 'Locking…';
+      void (async () => {
+        const res = await api<{ ok: boolean; reason?: string }>(
+          `/api/referee/match/${encodeURIComponent(fixtureId)}/lock`,
+          { method: 'POST' },
+        );
+        if (!res.ok && res.reason) alert(res.reason);
+        await go(`/referee/m/${encodeURIComponent(fixtureId)}`, true);
+      })();
+    });
+
+    // Never disabled, however empty the list is. A referee decides when a match
+    // starts, and a team that never turns up has to be able to delay a fixture
+    // without being able to stop one.
+    const start = document.getElementById('start-match') as HTMLButtonElement | null;
+    start?.addEventListener('click', () => {
+      start.disabled = true;
+      start.textContent = 'Starting…';
+      void (async () => {
+        const res = await api<{ ok: boolean; reason?: string }>(
+          `/api/referee/match/${encodeURIComponent(fixtureId)}/start`,
+          { method: 'POST' },
+        );
+        if (!res.ok && res.reason) alert(res.reason);
+        await go(`/referee/m/${encodeURIComponent(fixtureId)}`, true);
+      })();
+    });
+
+    // Quickly: this list changes under the referee while they read it, as each
+    // team presses their own button on the other side of the hall.
+    repoll(() => void refereeMatch(fixtureId), 2000);
+    return;
+  }
+
   if (data.state === 'playing' && data.live && data.console) {
+    // Half-time is the one part of a match this page has a decision on. The
+    // whistle stays on the console, where a referee watching the football
+    // already is; what is here is the thing the console deliberately does not
+    // have — taking a team's correction in, which has a capability behind it
+    // and an audit line after it, exactly as it does before kick-off.
+    const halfTime = data.halfTime;
+    const left = halfTime ? Math.ceil(halfTime.remaining) : 0;
+    const waiting = halfTime
+      ? (['violet', 'lime'] as const)
+          .filter((team) => !halfTime.ready[team])
+          .map((team) => (team === 'violet' ? data.fixture.home : data.fixture.away))
+      : [];
     view.innerHTML =
       head +
       h(`
       ${liveScoreline(data.live)}
+      ${
+        halfTime
+          ? `<h2 style="margin-top:1.4rem">Half-time <span class="dim">${
+              halfTime.over
+                ? '&mdash; time is up'
+                : `&mdash; ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')} left`
+            }</span></h2>
+        <p class="dim">${
+          waiting.length
+            ? `Waiting on ${esc(waiting.join(' and '))}. The console holds the kick-off until both teams say they are ready, or until the clock runs out.`
+            : 'Both teams are ready. Kick off from the console whenever you are.'
+        }</p>
+        ${data.seats ? seatRows(data.seats) : ''}
+        <p style="margin-top:1rem">
+          <button id="lock-lineup">Take the new code in</button>
+          <span class="dim">&mdash; restarts any robot whose team has pushed a fix since the match started. It takes a second to come back up, so do it before you kick off.</span>
+        </p>`
+          : ''
+      }
       <p style="margin-top:1rem"><a href="${esc(data.console)}" data-full>Take the match</a></p>
     `);
-    repoll(() => void refereeMatch(fixtureId), 3000);
+
+    // The same press as in pre-game, and the same reason it is disabled while
+    // it works: a sandboxed interpreter takes a second to come up, and a
+    // second press lands mid-restart.
+    const relock = document.getElementById('lock-lineup') as HTMLButtonElement | null;
+    relock?.addEventListener('click', () => {
+      relock.disabled = true;
+      relock.textContent = 'Taking it in…';
+      void (async () => {
+        const res = await api<{ ok: boolean; reason?: string }>(
+          `/api/referee/match/${encodeURIComponent(fixtureId)}/lock`,
+          { method: 'POST' },
+        );
+        if (!res.ok && res.reason) alert(res.reason);
+        await go(`/referee/m/${encodeURIComponent(fixtureId)}`, true);
+      })();
+    });
+
+    // Quickly at half-time — there is a clock on the screen and two teams
+    // pressing a button on the other side of the hall.
+    repoll(() => void refereeMatch(fixtureId), halfTime ? 2000 : 3000);
     return;
   }
 

@@ -1,0 +1,9 @@
+# champion measured from the WORKING TREE (champion rewrite uncommitted)
+#   - duel won 114-84 over seeds 1-20 at 2026-09-17 UTC
+#   - HEAD while measuring: 0da893c
+#
+# To promote: commit src/champion/brain.ts and src/champion/utility.ts (and
+# the striker/goalie fold with it), then run:
+#   scratch/duel-champion.sh 1-20
+# and replace the sha below with the new HEAD once it clears the gate again.
+0da893caf2d61ff73dcf38a3b4171eca3fe4e8d8

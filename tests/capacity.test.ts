@@ -181,6 +181,43 @@ describe('league.json', () => {
     expect(complaints.join(' ')).toContain('must be between');
   });
 
+  it('keeps the mercy rule when a file says nothing about it', () => {
+    const where = dir();
+    // The one setting where "absent" and "null" are different answers.
+    // `autoStartMins` absent means no timer, which is right; `mercyMargin`
+    // absent has to mean ten, or a venue that never opened this file would
+    // silently have no mercy rule at all — read with the same helper, it did.
+    writeFileSync(join(where, 'league.json'), '{ "arenas": { "max": 6 } }');
+    const { settings, sources, complaints } = loadSettings(where);
+    expect(settings.rules.mercyMargin).toBe(10);
+    expect(sources['rules.mercyMargin']).toBe('default');
+    expect(settings.pregame.autoStartMins).toBeNull();
+    expect(complaints).toEqual([]);
+  });
+
+  it('lets a venue turn the mercy rule off, and say so on purpose', () => {
+    const where = dir();
+    writeFileSync(join(where, 'league.json'), '{ "rules": { "mercyMargin": null } }');
+    const off = loadSettings(where);
+    expect(off.settings.rules.mercyMargin).toBeNull();
+    expect(off.sources['rules.mercyMargin']).toBe('file');
+
+    writeFileSync(join(where, 'league.json'), '{ "rules": { "mercyMargin": 6 } }');
+    expect(loadSettings(where).settings.rules.mercyMargin).toBe(6);
+  });
+
+  it('reads the pre-game clock, and clamps a silly one', () => {
+    const where = dir();
+    writeFileSync(
+      join(where, 'league.json'),
+      '{ "pregame": { "autoStartMins": 15, "penaltyPerMin": 99 } }',
+    );
+    const { settings, complaints } = loadSettings(where);
+    expect(settings.pregame.autoStartMins).toBe(15);
+    expect(settings.pregame.penaltyPerMin).toBe(10);
+    expect(complaints.join(' ')).toContain('penaltyPerMin');
+  });
+
   it('lets a flag override the file for one run, and says which it was', () => {
     const where = dir();
     saveSettings(where, settingsWith((s) => (s.arenas.max = 6)));

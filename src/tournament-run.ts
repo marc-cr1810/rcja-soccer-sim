@@ -53,6 +53,8 @@ export interface PlayedLeg {
   result: MatchResult;
   /** sha256 per seat id, for whichever seats a real submission filled. */
   submissions: Record<string, string>;
+  /** The same for the second half, when half-time changed it. See `LegRecord`. */
+  secondHalf?: Record<string, string>;
 }
 
 /** A referee's answer at full time: write this down, or play it again. */
@@ -209,7 +211,14 @@ export async function runDraw(
         const why = played.result.abandonReason ?? 'no reason given';
         throw new Error(`the match was abandoned (${why})`);
       }
-      legs.push({ seed: seed!, result: played.result });
+      legs.push({
+        seed: seed!,
+        result: played.result,
+        ...(played.secondHalf ? { secondHalf: played.secondHalf } : {}),
+      });
+      // The code each seat *started* on, which is what the fixture-level map
+      // has always meant. A half-time change lives on the leg it happened in,
+      // because that is the only place it is true of.
       submissions = played.submissions;
     }
 

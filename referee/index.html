@@ -47,6 +47,16 @@
       <div id="standdown" class="standdown" hidden></div>
 
       <aside id="panel" class="panel">
+        <!-- Half-time: the one window in a match where a team may change
+             their code. Hidden entirely outside one, so a match at a venue
+             that does not run half-time looks exactly as it always did. -->
+        <section class="group" id="half-time" hidden>
+          <h2>Half-time</h2>
+          <div class="ht-clock"><span id="ht-left">5:00</span> <span class="dim">left</span></div>
+          <div id="ht-ready" class="ht-ready"></div>
+          <p class="ht-note" id="ht-note"></p>
+        </section>
+
         <section class="group">
           <h2>Kick off</h2>
           <div class="row">

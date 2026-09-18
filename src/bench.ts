@@ -28,6 +28,7 @@ import { MOUNT_RADIUS } from './drive';
 import { formatSeedValue, type SeedInput } from './rand';
 import type { MatchAgents } from './match';
 import type { TeamId, World } from './world';
+import type { Transport } from './agent';
 
 // ------------------------------------------------------------------- options
 
@@ -53,6 +54,19 @@ export interface BenchOptions {
   spawn?: string;
   /** How long to wait for the seats to fill, seconds. */
   connectTimeout: number;
+  /**
+   * Goal difference that ends a match, or `null` for no limit — the default.
+   *
+   * **Off here, unlike everywhere else.** The bench is a measuring instrument
+   * rather than a competition, and the mercy rule truncates the thing it
+   * measures: it only ever takes goals off whoever is winning, so an
+   * aggregate-goals comparison moves asymmetrically the moment it fires. The
+   * duel rig in `scratch/` gates a champion on exactly such a ratio, and a
+   * result measured under a cap is not comparable with one measured without.
+   *
+   * Set it to turn the rule on for a run that wants a venue's conditions.
+   */
+  mercyMargin?: number | null;
 }
 
 /**
@@ -72,6 +86,7 @@ export const DEFAULT_OPTIONS: BenchOptions = {
   idealSensors: false,
   port: 0,
   connectTimeout: 30,
+  mercyMargin: null,
 };
 
 // --------------------------------------------------------------- telemetry
@@ -888,6 +903,7 @@ export async function runBench(
         halfSeconds: opts.halfSeconds,
         seed,
         idealSensors: opts.idealSensors,
+        mercyMargin: opts.mercyMargin ?? null,
         observe: (match) => sampler.step(match),
       });
 
@@ -924,18 +940,29 @@ export async function runBench(
   }
 }
 
-/** Wait for exactly these seat ids to connect — not necessarily all four. */
+/**
+ * Wait for exactly these seat ids to connect — not necessarily all four.
+ *
+ * "Connected", not "present". A seat outlives the socket that claimed it,
+ * because during a match a program going quiet is rule 5.7's business rather
+ * than a withdrawal — so a caller that restarts a program and then waits for
+ * its seat was answered instantly by the seat the *old* program left behind,
+ * and went on to play a match against a transport with nothing on the end of
+ * it. Waiting for a live one is what every caller here already meant.
+ */
 export function waitForSeats(server: MatchServer, seats: string[], timeout: number): Promise<void> {
   const deadline = Date.now() + timeout * 1000;
+  const live = (have: Partial<Record<string, Transport>>, id: string): boolean =>
+    have[id] !== undefined && have[id]!.connected !== false;
   return new Promise((ok, fail) => {
     const poll = (): void => {
       const have = server.agents.transports();
-      if (seats.every((s) => have[s])) {
+      if (seats.every((s) => live(have, s))) {
         ok();
         return;
       }
       if (Date.now() > deadline) {
-        const missing = seats.filter((s) => !have[s]);
+        const missing = seats.filter((s) => !live(have, s));
         fail(new Error(`no program connected for ${missing.join(', ')} within ${timeout}s`));
         return;
       }

@@ -75,6 +75,12 @@ if result.get("ok"):
     if result.get("token"):
         print(f"token: {result['token']}", file=sys.stderr)
         print("keep this - it's what lets a program join as this robot", file=sys.stderr)
+    # Said last so it is the line still on the screen: a league server adds
+    # this when the team's own next match has already locked its lineup, or is
+    # at half-time and can still take this in. "accepted" on its own would be
+    # read as "in the game about to start", which in both cases it is not.
+    if result.get("notice"):
+        print(result["notice"], file=sys.stderr)
 else:
     print(f"rejected: {result.get('reason', 'unknown reason')}", file=sys.stderr)
     sys.exit(1)

@@ -57,6 +57,16 @@ export interface TeamApiOptions {
   submissionsDir: string;
   /** The repo's `python/` directory. Without one, nothing can be validated. */
   pythonLibDir: string | null;
+  /**
+   * Anything a successful push needs told, beyond that it was accepted.
+   *
+   * There is exactly one caller and one sentence: a league server saying the
+   * team's next match has already locked its lineup, so this push is their
+   * code from the game after that one. It is a hook rather than a lookup in
+   * here because a push knows nothing about draws, fixtures or referees and
+   * should go on knowing nothing — a laptop running `serve` supplies none.
+   */
+  noticeFor?: (team: string, robot: RobotNumber) => string | null | Promise<string | null>;
 }
 
 export class TeamApi {
@@ -197,7 +207,13 @@ export class TeamApi {
       }
 
       await this.keep(scratch, manifest.team, manifest.robot);
-      return Response.json({ ok: true, team: manifest.team, robot: manifest.robot });
+      const notice = await this.opts.noticeFor?.(manifest.team, manifest.robot);
+      return Response.json({
+        ok: true,
+        team: manifest.team,
+        robot: manifest.robot,
+        ...(notice ? { notice } : {}),
+      });
     } finally {
       await rm(scratch, { recursive: true, force: true }).catch(() => {});
     }
@@ -296,7 +312,14 @@ export class TeamApi {
       }
 
       const token = await this.keep(scratch, manifest.team, manifest.robot);
-      return Response.json({ ok: true, team: manifest.team, robot: manifest.robot, token });
+      const notice = await this.opts.noticeFor?.(manifest.team, manifest.robot);
+      return Response.json({
+        ok: true,
+        team: manifest.team,
+        robot: manifest.robot,
+        token,
+        ...(notice ? { notice } : {}),
+      });
     } finally {
       await rm(scratch, { recursive: true, force: true }).catch(() => {});
     }

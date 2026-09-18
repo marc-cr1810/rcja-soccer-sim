@@ -123,6 +123,20 @@ describe('a practice field', () => {
     expect(session.state().running).toBe(false);
   });
 
+  it('keeps going past a ten-goal difference, because a rehearsal has no result', async () => {
+    // The mercy rule ends every other match in this repository at ten. A field
+    // is the one exception: there is nothing to shorten, and stopping one
+    // because the built-in agent ran away with it would be taking the field
+    // off the team who booked it.
+    const session = await field();
+    session.start();
+    session.match.world.score.violet = 12;
+    run(session, 1);
+
+    expect(session.match.isEnded).toBe(false);
+    expect(session.state().running).toBe(true);
+  });
+
   it('plays on from a kick-off of only the robots in the situation', async () => {
     const session = await field();
     await session.setSeat('violet-2', { kind: 'empty' });

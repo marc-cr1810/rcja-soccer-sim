@@ -12,11 +12,12 @@
  * a fixture id typed into the address bar is not a way around it.
  */
 
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
 import { LeagueServer } from '../src/league';
+import type { PregameVerdict } from '../src/pregame';
 import { makeDraw } from '../src/tournament';
 import { saveDraw } from '../src/tournament-store';
 
@@ -35,6 +36,8 @@ interface Started {
   server: LeagueServer;
   port: number;
   drawId: string;
+  /** Where a seeded push goes, for the tests that need code on disk. */
+  submissionsDir: string;
 }
 
 /**
@@ -62,7 +65,7 @@ async function start(withDraw = true): Promise<Started> {
     world: { realtime: false, submissionsDir, workspacesDir, pythonLibDir: PYTHON_LIB_DIR },
   });
   servers.push(server);
-  return { server, port: await server.listen(), drawId: draw.id };
+  return { server, port: await server.listen(), drawId: draw.id, submissionsDir };
 }
 
 async function signIn(started: Started, role: 'referee' | 'admin', name: string): Promise<string> {
@@ -76,6 +79,26 @@ async function signIn(started: Started, role: 'referee' | 'admin', name: string)
   });
   const raw = res.headers.get('set-cookie');
   if (!raw) throw new Error(`${name} could not sign in`);
+  return raw.split(';')[0]!;
+}
+
+/**
+ * A team account, signed in.
+ *
+ * `signIn` above takes only the two roles a referee's page cares about; the
+ * pre-game room is the first thing here a team does anything on.
+ */
+async function signInTeam(started: Started, displayName: string): Promise<string> {
+  const made = started.server.accounts.createAccount({ role: 'team', displayName, password: PASSWORD });
+  if (!made.ok) throw new Error(made.reason);
+  const res = await fetch(`http://127.0.0.1:${started.port}/auth/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name: made.value.slug, password: PASSWORD }),
+    redirect: 'manual',
+  });
+  const raw = res.headers.get('set-cookie');
+  if (!raw) throw new Error(`${displayName} could not sign in`);
   return raw.split(';')[0]!;
 }
 
@@ -504,5 +527,241 @@ describe('opening the match', () => {
       target: `${started.drawId}:alpha-v-bravo`,
       detail: 'opened pre-game',
     });
+  });
+});
+
+/**
+ * A fixture with a pitch under it, waiting for its teams — exactly as the draw
+ * runner leaves it once a referee has opened pre-game.
+ *
+ * No arena is spawned here. The gate is about who may end pre-game and what
+ * the checklist says while it is open, and a child process holding four
+ * sandboxed interpreters proves none of that. The half that is about robots
+ * actually moving is `tests/pregame-join.test.ts`, which does spawn them.
+ */
+function inPregame(
+  started: Started,
+  fixtureId: string,
+  arenaId = 'test-arena',
+): Promise<PregameVerdict> {
+  const [home, away] = fixtureId.split('-v-');
+  return started.server.awaitLineup(
+    { id: fixtureId, home: home!, away: away!, seeds: [1] } as never,
+    started.drawId,
+    arenaId,
+  );
+}
+
+/** A robot on disk, the way a validated push leaves one. */
+async function push(started: Started, slug: string, robot: 1 | 2): Promise<void> {
+  const dir = join(started.submissionsDir, slug, String(robot));
+  await mkdir(dir, { recursive: true });
+  await Bun.write(join(dir, 'manifest.json'), JSON.stringify({ team: slug, robot, entry: 'robot.py' }));
+  await Bun.write(join(dir, 'robot.py'), `# ${slug} robot ${robot}\n`);
+  // The token is what `resolveLineup` refuses a folder for the lack of, so a
+  // seeded push without one is not a push at all.
+  await Bun.write(join(dir, 'token'), `token-${slug}-${robot}`);
+}
+
+describe('the pre-game room', () => {
+  it('lists four seats and says who is not here yet', async () => {
+    const started = await start();
+    const cookie = await signIn(started, 'referee', 'Sam Referee');
+    give(started, 'sam-referee', 'alpha-v-bravo');
+    await push(started, 'alpha', 1);
+    await push(started, 'alpha', 2);
+    await push(started, 'bravo', 1);
+
+    void inPregame(started, 'alpha-v-bravo').catch(() => {});
+    const { payload } = await get(started, '/api/referee/match/alpha-v-bravo', cookie);
+
+    expect(payload.state).toBe('pregame');
+    expect(payload.seats.map((s: any) => s.id)).toEqual(['violet-1', 'violet-2', 'lime-1', 'lime-2']);
+    // Nobody has arrived, so nothing is seated — the negative that makes the
+    // checklist worth reading at all.
+    expect(payload.seats.every((s: any) => s.seated === false)).toBe(true);
+    // Which code would play is answered before anybody turns up, because that
+    // is the question a team asks ninety seconds after pushing a fix.
+    expect(payload.seats.find((s: any) => s.id === 'violet-1').pushed.hash).toMatch(/^[0-9a-f]{64}$/);
+    // And a robot nobody has pushed says so rather than showing a hash.
+    expect(payload.seats.find((s: any) => s.id === 'lime-2').pushed).toBeNull();
+    expect(payload.seats.find((s: any) => s.id === 'lime-2').detail).toContain('have not pushed');
+  });
+
+  it('seats an arrived team and leaves the one that has not arrived', async () => {
+    const started = await start();
+    const referee = await signIn(started, 'referee', 'Sam Referee');
+    const alpha = await signInTeam(started, 'Alpha');
+    give(started, 'sam-referee', 'alpha-v-bravo');
+    await push(started, 'alpha', 1);
+    await push(started, 'alpha', 2);
+    await push(started, 'bravo', 1);
+
+    void inPregame(started, 'alpha-v-bravo').catch(() => {});
+    const arrived = await post(started, '/api/team/match/alpha-v-bravo/arrive', alpha);
+    expect(arrived.status).toBe(200);
+    expect(arrived.payload.ready).toBe(true);
+
+    const { payload } = await get(started, '/api/referee/match/alpha-v-bravo', referee);
+    const seated = payload.seats.filter((s: any) => s.seated).map((s: any) => s.id);
+    expect(seated).toEqual(['violet-1', 'violet-2']);
+    expect(payload.seats.find((s: any) => s.id === 'lime-1').detail).toContain('have not arrived');
+    // The ledger is the thing that actually changed: Alpha's robots are in this
+    // fixture's seats, which is what stops them being in a practice field's.
+    expect(started.server.occupancy.where('alpha', 1)?.seatId).toBe('violet-1');
+    expect(started.server.occupancy.where('bravo', 1)).toBeNull();
+  });
+
+  it('is ready with one robot, which is the minimum for both teams', async () => {
+    const started = await start();
+    const alpha = await signInTeam(started, 'Alpha');
+    // One robot pushed and one still being written — the ordinary case, not an
+    // edge one, and a team in that state turns up and plays.
+    await push(started, 'alpha', 2);
+
+    void inPregame(started, 'alpha-v-bravo').catch(() => {});
+    const arrived = await post(started, '/api/team/match/alpha-v-bravo/arrive', alpha);
+    expect(arrived.payload.ready).toBe(true);
+    expect(arrived.payload.seats.filter((s: any) => s.seated).map((s: any) => s.id)).toEqual(['violet-2']);
+  });
+
+  it('starts the match when the referee says so, empty seats and all', async () => {
+    const started = await start();
+    const cookie = await signIn(started, 'referee', 'Sam Referee');
+    give(started, 'sam-referee', 'alpha-v-bravo');
+
+    let started_ = false;
+    void inPregame(started, 'alpha-v-bravo')
+      .then(() => {
+        started_ = true;
+      })
+      .catch(() => {});
+    expect((await get(started, '/api/referee/match/alpha-v-bravo', cookie)).payload.state).toBe('pregame');
+
+    // Nobody arrived. A referee decides when a match starts, and a team that
+    // never turns up must be able to delay a fixture without stopping one.
+    const res = await post(started, '/api/referee/match/alpha-v-bravo/start', cookie);
+    expect(res.status).toBe(200);
+    await new Promise((t) => setTimeout(t, 5));
+    expect(started_).toBe(true);
+  });
+
+  it('will not let a referee start somebody else’s match', async () => {
+    const started = await start();
+    const sam = await signIn(started, 'referee', 'Sam Referee');
+    const alex = await signIn(started, 'referee', 'Alex Referee');
+    give(started, 'sam-referee', 'alpha-v-bravo');
+    give(started, 'alex-referee', 'charlie-v-delta');
+
+    let begun = false;
+    void inPregame(started, 'alpha-v-bravo')
+      .then(() => {
+        begun = true;
+      })
+      .catch(() => {});
+
+    expect((await post(started, '/api/referee/match/alpha-v-bravo/start', alex)).status).toBe(403);
+    await new Promise((t) => setTimeout(t, 5));
+    expect(begun).toBe(false);
+    // Still Sam's to start — a refusal must not consume the fixture.
+    expect((await get(started, '/api/referee/match/alpha-v-bravo', sam)).payload.state).toBe('pregame');
+    expect((await post(started, '/api/referee/match/alpha-v-bravo/start', sam)).status).toBe(200);
+  });
+
+  it('lets an admin start a fixture nobody was assigned', async () => {
+    const started = await start();
+    const cookie = await signIn(started, 'admin', 'Marc Admin');
+    let begun = false;
+    void inPregame(started, 'alpha-v-bravo')
+      .then(() => {
+        begun = true;
+      })
+      .catch(() => {});
+    expect((await post(started, '/api/referee/match/alpha-v-bravo/start', cookie)).status).toBe(200);
+    await new Promise((t) => setTimeout(t, 5));
+    expect(begun).toBe(true);
+  });
+
+  it('answers a match that is not in pre-game with a 404', async () => {
+    const started = await start();
+    const cookie = await signIn(started, 'admin', 'Marc Admin');
+    expect((await post(started, '/api/referee/match/alpha-v-bravo/start', cookie)).status).toBe(404);
+  });
+
+  it('will not let a referee lock somebody else’s lineup', async () => {
+    const started = await start();
+    const alex = await signIn(started, 'referee', 'Alex Referee');
+    give(started, 'alex-referee', 'charlie-v-delta');
+    void inPregame(started, 'alpha-v-bravo').catch(() => {});
+
+    // The same targeted check as Start, because it is the same job: deciding
+    // what is about to be played rather than controlling the football.
+    expect((await post(started, '/api/referee/match/alpha-v-bravo/lock', alex)).status).toBe(403);
+  });
+
+  it('has nothing to lock for a match that is neither in pre-game nor at half-time', async () => {
+    const started = await start();
+    const cookie = await signIn(started, 'admin', 'Marc Admin');
+    const refused = await post(started, '/api/referee/match/alpha-v-bravo/lock', cookie);
+    expect(refused.status).toBe(404);
+    // Both rooms named, because a referee holding a team's fix has to know
+    // which of the two they are waiting for.
+    expect(refused.payload.reason).toContain('half-time');
+  });
+
+  it('has nobody to be ready for a match that is not at half-time', async () => {
+    const started = await start();
+    const team = await signInTeam(started, 'Alpha');
+    const refused = await post(started, '/api/team/match/alpha-v-bravo/ready', team);
+    expect(refused.status).toBe(404);
+    expect(refused.payload.reason).toContain('not at half-time');
+  });
+
+  it('leaves the lineup unlocked when the arena does not answer', async () => {
+    const started = await start();
+    const cookie = await signIn(started, 'admin', 'Marc Admin');
+    void inPregame(started, 'alpha-v-bravo').catch(() => {});
+
+    // There is no arena behind this room — the gate is driven directly here.
+    // A lock the football would not keep must not be one the referee is shown,
+    // so it fails outright rather than half-locking.
+    const refused = await post(started, '/api/referee/match/alpha-v-bravo/lock', cookie);
+    expect(refused.status).toBe(502);
+    expect((await get(started, '/api/referee/match/alpha-v-bravo', cookie)).payload.pregame.lockedAt).toBeNull();
+  });
+
+  it('records who started it, against the fixture', async () => {
+    const started = await start();
+    const cookie = await signIn(started, 'referee', 'Sam Referee');
+    give(started, 'sam-referee', 'alpha-v-bravo');
+    void inPregame(started, 'alpha-v-bravo').catch(() => {});
+    await post(started, '/api/referee/match/alpha-v-bravo/start', cookie);
+
+    const rows = started.server.accounts.audit(10);
+    // `fixture.setup` rather than `match.control`: the capability table has
+    // carried it since Phase 6 and this is the thing it was named for.
+    expect(rows[0]).toMatchObject({
+      capability: 'fixture.setup',
+      target: `${started.drawId}:alpha-v-bravo`,
+      detail: 'started the match',
+    });
+  });
+
+  it('lets go rather than hanging when the server stops', async () => {
+    const started = await start();
+    const waiting = inPregame(started, 'alpha-v-bravo');
+    await started.server.close();
+    servers.length = 0;
+    await expect(waiting).rejects.toThrow(/stopped before the match was started/);
+  });
+
+  it('keeps a team out of another team’s seat', async () => {
+    const started = await start();
+    const charlie = await signInTeam(started, 'Charlie');
+    void inPregame(started, 'alpha-v-bravo').catch(() => {});
+    // Not their fixture. `match.join` is `own`, so this is the ordinary
+    // scope check rather than a rule invented for pre-game.
+    const res = await post(started, '/api/team/match/alpha-v-bravo/arrive', charlie);
+    expect(res.status).toBe(403);
   });
 });

@@ -117,6 +117,86 @@ describe('the demo arena, from the inside', () => {
   }, 60_000);
 });
 
+describe('the demo arena, when the example robots change sides', () => {
+  /**
+   * A seat outlives the program that sat in it, and the demo used to hand the
+   * whole gateway to the next match.
+   *
+   * `randomSides` moves the Python examples from one side to the other between
+   * matches. The seats they leave behind are never released — during a match a
+   * program going quiet is rule 5.7's business, not a withdrawal — so they
+   * stayed in `agents.transports()` with a closed socket behind them, and
+   * `seatExamples` returned that whole map. A transport beats the built-in
+   * agent for the same seat id, so from the first change of sides onwards the
+   * *other* team was two robots wired to a dead socket: they answered nothing,
+   * every control cycle of every match went down as missed, and they stood on
+   * the field being shoved around by the ball for the rest of the demo.
+   *
+   * The name in the match record is what tells the two apart, so that is what
+   * this asserts. A remote program is `Team/seat-id`; a built-in agent is its
+   * own name. Both sides being remote means a side that has no program is
+   * wearing the leftovers of one.
+   */
+  it('leaves the other side to its own built-in agents', async () => {
+    let demoRef: InstanceType<typeof DemoArena> | null = null;
+    const server = new MatchServer({
+      port: 0,
+      realtime: true,
+      // Two seconds of football per match, so the sides turn over while a test
+      // watches; there is nothing about a kick-off countdown being tested here.
+      kickoffCountdown: 0,
+      control: (req, url) => demoRef?.handle(req, url) ?? null,
+    });
+    servers.push(server);
+    const port = await server.listen();
+
+    // Every finished match says who actually drove each seat.
+    const summaries: Record<string, { name: string }>[] = [];
+    const viewer = new WebSocket(`ws://127.0.0.1:${port}/`);
+    viewer.onmessage = (event) => {
+      const message = JSON.parse(String(event.data)) as {
+        type: string;
+        result?: { slots: Record<string, { name: string }> };
+      };
+      if (message.type === 'summary' && message.result) summaries.push(message.result.slots);
+    };
+
+    const logs: string[] = [];
+    const demo = new DemoArena(server, {
+      teams: { violet: 'Purple', lime: 'Green' },
+      homeBots: 'reference',
+      awayBots: 'examples',
+      randomSides: true,
+      halfSeconds: 1,
+      gapSeconds: 0,
+      log: (line) => logs.push(line),
+    });
+    demoRef = demo;
+    demo.start(port);
+
+    const spawned = (side: string): boolean =>
+      logs.some((line) => line.includes(`spawned example robots (${side})`));
+    // Both sides means the examples have moved at least once, which is the
+    // only way to leave a seat behind.
+    await waitFor(() => spawned('violet') && spawned('lime'), 90_000, 'the examples to change sides');
+    const before = summaries.length;
+    await waitFor(() => summaries.length > before, 40_000, 'a match played after the change of sides');
+    demo.stop();
+    viewer.close();
+
+    const slots = summaries[summaries.length - 1]!;
+    const remote = Object.keys(slots).filter((id) => slots[id]!.name.includes('/'));
+    // Exactly one side is the examples. The other is the reference agent, by
+    // name, with nothing left over from where the examples used to sit.
+    expect(remote.length).toBe(2);
+    expect(new Set(remote.map((id) => id.split('-')[0])).size).toBe(1);
+    for (const id of Object.keys(slots)) {
+      if (remote.includes(id)) continue;
+      expect(slots[id]!.name).toStartWith('reference-');
+    }
+  }, 150_000);
+});
+
 describe('a demo arena, supervised', () => {
   it('opens a real child that answers as an always-playing world', async () => {
     const arenas = new ArenaSupervisor({ log: () => {} });
@@ -182,5 +262,38 @@ describe('a demo arena, supervised', () => {
     expect(payload.ok).toBe(true);
     expect(payload.state.teams.violet).toBe('Reference');
     expect(payload.state.teams.lime).toBe('Rehearsal');
+  }, 60_000);
+
+  it('supports randomSides to alternate home and away assignments across matches', async () => {
+    let demoRef: InstanceType<typeof DemoArena> | null = null;
+    const server = new MatchServer({
+      port: 0,
+      realtime: true,
+      control: (req, url) => demoRef?.handle(req, url) ?? null,
+    });
+    servers.push(server);
+    const port = await server.listen();
+
+    const seenOrientations = new Set<string>();
+    const demo = new DemoArena(server, {
+      teams: { violet: 'Purple', lime: 'Green' },
+      homeBots: 'champion',
+      awayBots: 'reference',
+      randomSides: true,
+      halfSeconds: 1,
+      gapSeconds: 0,
+      log: () => {
+        const t = demo.state().teams;
+        if (t) seenOrientations.add(`${t.violet} vs ${t.lime}`);
+      },
+    });
+    demoRef = demo;
+    demo.start(port);
+
+    // Run until both permutations (Purple vs Green and Green vs Purple) are observed
+    await waitFor(() => seenOrientations.size >= 2, 40_000, 'both side orientations seen with randomSides');
+    expect(seenOrientations.has('Purple vs Green')).toBe(true);
+    expect(seenOrientations.has('Green vs Purple')).toBe(true);
+    demo.stop();
   }, 60_000);
 });

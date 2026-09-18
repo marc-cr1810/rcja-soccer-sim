@@ -230,6 +230,29 @@ html, body {
   color: var(--dim);
 }
 .group.danger h2 { color: var(--danger); }
+
+/* Half-time. Hidden outside one, so a console watching an ordinary match is
+   the console it has always been. */
+#half-time[hidden] { display: none; }
+.ht-clock {
+  font-variant-numeric: tabular-nums;
+  font-size: 1.6rem;
+  line-height: 1.1;
+}
+.ht-clock .dim { font-size: 0.8rem; color: var(--dim); }
+.ht-ready { display: flex; flex-direction: column; gap: 0.2rem; }
+.ht-row {
+  font-size: 0.82rem;
+  color: var(--dim);
+  border-left: 3px solid rgba(242, 245, 240, 0.18);
+  padding-left: 0.5rem;
+}
+.ht-row.ready { color: var(--ink); }
+.ht-row.violet.ready { border-left-color: var(--violet); }
+.ht-row.lime.ready { border-left-color: var(--lime); }
+.ht-note { margin: 0.2rem 0 0; font-size: 0.78rem; color: var(--dim); }
+.panel button:disabled { opacity: 0.45; cursor: not-allowed; }
+.panel button:disabled:hover { background: rgba(242, 245, 240, 0.04); }
 .row { display: flex; gap: 0.4rem; }
 .row > * { flex: 1; }
 

@@ -136,6 +136,8 @@ describe('OpenAPI spec content', () => {
       '/workspace-api/submit',
       '/arena-api/state',
       '/arena-api/play',
+      '/arena-api/lock',
+      '/arena-api/ready',
     ];
     for (const p of expected) {
       expect(paths[p]).toBeDefined();

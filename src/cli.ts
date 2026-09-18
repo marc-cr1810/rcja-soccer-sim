@@ -29,6 +29,7 @@ import { hashSubmission } from './submission';
 import { formatTable, makeDraw, type Draw, type Fixture, type FixtureResult } from './tournament';
 import { listEntrants, loadDraw, loadResults, saveDraw } from './tournament-store';
 import { runDraw } from './tournament-run';
+import { walkoverResult, type PregameVerdict } from './pregame';
 import { getVersion } from './version';
 import {
   bumpSeedValue,
@@ -454,6 +455,10 @@ async function arena(flags: Map<string, string>): Promise<void> {
 
   fixture = new FixtureArena(server, {
     pythonLibDir: pythonLibDir() ?? null,
+    // Resolved, not passed through: this arena is spawned with the hub's own
+    // working directory, and a relative path that happens to work today is the
+    // bug this repo has now had three times.
+    runRoot: flags.has('scratch') ? resolve(flags.get('scratch')!) : null,
     seatCpuPercent: flags.has('seat-cpu') ? num(flags, 'seat-cpu', 50) : undefined,
     seatMemoryMb: flags.has('seat-mem') ? num(flags, 'seat-mem', 512) : undefined,
     log: (line) => console.log(`  ${line}`),
@@ -475,6 +480,7 @@ async function demoArena(flags: Map<string, string>): Promise<void> {
   const bots = flags.get('demo-bots') ?? 'reference';
   const homeBots = flags.get('demo-home-bots');
   const awayBots = flags.get('demo-away-bots');
+  const randomSides = flags.has('demo-random-sides') ? flags.get('demo-random-sides') !== 'false' : false;
 
   const teams = {
     violet: flags.get('demo-home') ?? 'Violet',
@@ -507,6 +513,7 @@ async function demoArena(flags: Map<string, string>): Promise<void> {
     halfSeconds: num(flags, 'demo-half', 300),
     league: leagueFrom(flags, 'demo-league'),
     gapSeconds: num(flags, 'demo-gap', 10),
+    randomSides,
     log: (line) => console.log(`  ${line}`),
   });
 
@@ -684,6 +691,10 @@ async function bench(flags: Map<string, string>): Promise<void> {
         port: num(flags, 'port', 0),
         spawn: flags.get('spawn'),
         connectTimeout: num(flags, 'wait', 30),
+        // Off unless asked for. The bench measures; the mercy rule truncates
+        // what it measures.
+        mercyMargin:
+          flags.has('mercy') && flags.get('mercy') !== 'off' ? num(flags, 'mercy', 0) : null,
       },
       (line) => {
         if (!toStdout) console.error(line);
@@ -1737,6 +1748,15 @@ async function league(flags: Map<string, string>): Promise<void> {
 
   if (!made) return;
 
+  /**
+   * Fixtures the pre-game room decided without football, by fixture id.
+   *
+   * A walkover is awarded for the tie, not for a leg: only the first leg goes
+   * through pre-game, and playing the second as a real match against a team
+   * that is still not there would be worse than not playing it at all.
+   */
+  const walkovers = new Map<string, PregameVerdict>();
+
   const results = await runDraw(root, made, {
     // Several at once, from the budget. A fixture never queues behind a
     // rehearsal because those slots were never shared with practice.
@@ -1805,7 +1825,39 @@ async function league(flags: Map<string, string>): Promise<void> {
       // The hub plays no football. It opens an arena — a child process running
       // the same binary a team runs on a laptop — and tells it what to play;
       // the arena resolves its own lineup and spawns its own sandboxed robots.
-      const arenaId = server.liveFor(fixture.id)?.arenaId ?? (await server.openFixture(fixture, made!.id));
+      let arenaId = server.liveFor(fixture.id)?.arenaId;
+      // What pre-game decided, if it has been through it. A fixture awarded
+      // against a team that never turned up is awarded for the whole tie, not
+      // for one leg of it: playing the second leg would be a real match against
+      // a team that is still not there.
+      let verdict = walkovers.get(fixture.id) ?? null;
+      if (arenaId === undefined) {
+        arenaId = await server.openFixture(fixture, made!.id);
+        // Pre-game: the pitch is up and nobody has been asked to play yet.
+        // Only on the leg that opened the arena — the second leg of a
+        // two-legged tie is not a second twenty minutes of teams arriving —
+        // and only when there is a referee to ask, the same condition as the
+        // gates either side of it.
+        if (refereed) {
+          console.log(`  pre-game:   ${fixture.home} v ${fixture.away}`);
+          console.log(`              nobody kicks off until the referee starts it at`);
+          console.log(`              http://localhost:${port}/referee/m/${fixture.id}`);
+          verdict = await server.awaitLineup(fixture, made!.id, arenaId);
+        }
+      }
+
+      if (verdict?.kind === 'walkover') {
+        // Decided without football, so nothing is asked of the arena at all —
+        // and the pitch goes back to the venue rather than sitting through a
+        // match that is not going to happen. It still passes the referee's
+        // confirmation like every other result, which is what makes it safe:
+        // a team arriving a minute late is somebody pressing "play it again".
+        walkovers.set(fixture.id, verdict);
+        console.log(`  walkover:   ${fixture.home} v ${fixture.away} — ${verdict.reason}`);
+        server.closeFixture(fixture.id);
+        return { result: walkoverResult(verdict), submissions: {} };
+      }
+
       if (made!.legs > 1) {
         console.log(`    leg ${leg + 1} of ${made!.legs}  (seed ${formatSeedValue(seed)})`);
       }
@@ -1819,6 +1871,21 @@ async function league(flags: Map<string, string>): Promise<void> {
         league: made!.league,
         halfSeconds: made!.halfSeconds,
         refereed,
+        mercyMargin: settings.rules.mercyMargin,
+        // The venue's, not the arena's: a child left to its own default has
+        // none at all, which is what a laptop wants and a venue does not.
+        halfTimeSeconds: settings.rules.halfTimeSeconds,
+        // Only on the leg that went through pre-game. A second leg starts level
+        // — the late team was late once, and charging them again for the same
+        // twenty minutes would be charging them twice.
+        ...(leg === 0 && verdict && (verdict.penalties.violet > 0 || verdict.penalties.lime > 0)
+          ? {
+              penalties: {
+                ...verdict.penalties,
+                reason: `Awarded in the pre-game room before kick-off.`,
+              },
+            }
+          : {}),
         label: `${fixture.id} leg ${leg + 1}`,
       });
     },
@@ -1934,8 +2001,10 @@ async function arenasCommand(flags: Map<string, string>, args: string[]): Promis
 }
 
 /** Budget and demo settings given on the command line, for this run only. */
-function budgetFlags(flags: Map<string, string>): Record<string, number | string | boolean> {
-  const out: Record<string, number | string | boolean> = {};
+function budgetFlags(
+  flags: Map<string, string>,
+): Record<string, number | string | boolean | null> {
+  const out: Record<string, number | string | boolean | null> = {};
   if (flags.has('arenas-max')) out.arenasMax = num(flags, 'arenas-max', 0);
   if (flags.has('concurrent-fixtures')) out.concurrentFixtures = num(flags, 'concurrent-fixtures', 0);
   if (flags.has('seat-cpu')) out.seatCpuPercent = num(flags, 'seat-cpu', 0);
@@ -1957,7 +2026,20 @@ function budgetFlags(flags: Map<string, string>): Record<string, number | string
       process.exit(1);
     }
   }
+  // `off` rather than a magic number, because the thing being turned off is a
+  // timer and a rule — neither of which has a sensible "zero".
+  if (flags.has('auto-start')) {
+    out.autoStartMins = flags.get('auto-start') === 'off' ? null : num(flags, 'auto-start', 0);
+  }
+  if (flags.has('penalty-per-min')) out.penaltyPerMin = num(flags, 'penalty-per-min', 0);
+  if (flags.has('mercy')) {
+    out.mercyMargin = flags.get('mercy') === 'off' ? null : num(flags, 'mercy', 0);
+  }
+  if (flags.has('half-time')) {
+    out.halfTimeSeconds = flags.get('half-time') === 'off' ? 0 : num(flags, 'half-time', 0);
+  }
   if (flags.has('demo-gap')) out.demoGap = num(flags, 'demo-gap', 0);
+  if (flags.has('demo-random-sides')) out.demoRandomSides = flags.get('demo-random-sides') !== 'false';
   return out;
 }
 
@@ -2085,6 +2167,10 @@ where the folders are kept (default ./workspaces). Needs bun run
                     the reference team cannot score at all against a keeper
                     with exact ball data, and a seed varies a noise-free match
                     far less than a noisy one
+    --mercy 10      end a match at this goal difference. Off here by default,
+                    unlike a real fixture: the rule only ever takes goals off
+                    whoever is winning, so it would move an aggregate-goals
+                    comparison asymmetrically
     --json FILE     write the full numbers as JSON (- for stdout)
     --baseline FILE compare against a JSON written earlier
 

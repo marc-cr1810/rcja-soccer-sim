@@ -254,6 +254,10 @@ export class PracticeSession {
       halfSeconds: PRACTICE_HALF_SECONDS,
       seed: opts.seed ?? 1,
       idealSensors: opts.idealSensors ?? false,
+      // The one caller that opts out of the mercy rule. A field is a rehearsal
+      // with no result to shorten, and ending one because the reference agent
+      // ran away with it would be taking the field off the team using it.
+      mercyMargin: null,
     });
     this.workspaces = opts.workspacesDir ? new WorkspaceStore({ dir: opts.workspacesDir }) : null;
     // What somebody spent twenty minutes dragging into place, if this field has

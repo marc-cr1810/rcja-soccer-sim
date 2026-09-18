@@ -78,6 +78,26 @@ export interface ViewKickoff {
 }
 
 /**
+ * The break between the halves, while there is one.
+ *
+ * The one window in a match where a team may correct their code, so it is on
+ * the frame: a referee's console and a hall screen both want to count it down,
+ * and both already have the stream.
+ */
+export interface HalfTime {
+  /** When the first half ended, ISO, in wall time. */
+  since: string;
+  /** How long this venue's half-time is, in seconds. */
+  seconds: number;
+  /** Seconds left of it, floored at 0. It keeps counting past zero as 0. */
+  remaining: number;
+  /** Which sides have said they are ready to play on. */
+  ready: { violet: boolean; lime: boolean };
+  /** Whether the five minutes are up. From here a referee may kick off freely. */
+  over: boolean;
+}
+
+/**
  * The frame a viewer draws.
  *
  * Sent at a rate the eye needs rather than the rate the physics runs at: the
@@ -92,6 +112,8 @@ export interface ViewFrame {
   half: 1 | 2;
   running: boolean;
   kickoff: ViewKickoff;
+  /** Present only between the halves of a refereed match that has one. */
+  halfTime?: HalfTime;
   score: { violet: number; lime: number };
   ball: ViewBall;
   robots: ViewRobot[];

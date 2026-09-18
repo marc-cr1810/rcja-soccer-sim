@@ -47,6 +47,14 @@ const kickoffTeam = kickoffCountdown.querySelector('.ko-team')!;
 let countdownRingStart = 3;
 let countdownFadeTimer: number | undefined;
 const skipCountdown = document.querySelector('button[data-action="skip-kickoff-countdown"]') as HTMLButtonElement | null;
+const kickoffButtons = [
+  ...document.querySelectorAll<HTMLButtonElement>('button[data-action="kickoff"]'),
+];
+
+const halfTimePanel = document.getElementById('half-time')!;
+const halfTimeLeft = document.getElementById('ht-left')!;
+const halfTimeReady = document.getElementById('ht-ready')!;
+const halfTimeNote = document.getElementById('ht-note')!;
 
 const abandonReason = document.getElementById('abandon-reason') as HTMLInputElement;
 const correctTeam = document.getElementById('correct-team') as HTMLSelectElement;
@@ -191,6 +199,50 @@ function updateKickoff(frame: ViewFrame): void {
   if (skipCountdown) skipCountdown.disabled = !(countdown > 0);
 }
 
+/**
+ * Half-time, and why the second half's whistle is held.
+ *
+ * The server refuses the kick-off itself — this only says so first, because a
+ * button that refuses without warning is a referee pressing it twice and then
+ * reading a log. The gate opens by itself when the clock runs out, so nothing
+ * here can leave a referee stuck: at zero both buttons come back whatever
+ * either team has said.
+ */
+function updateHalfTime(frame: ViewFrame): void {
+  const halfTime = frame.halfTime;
+  if (!halfTime) {
+    halfTimePanel.hidden = true;
+    for (const button of kickoffButtons) {
+      button.disabled = false;
+      button.title = '';
+    }
+    return;
+  }
+
+  halfTimePanel.hidden = false;
+  const left = Math.ceil(halfTime.remaining);
+  halfTimeLeft.textContent = `${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`;
+
+  const waiting = (['violet', 'lime'] as const).filter((team) => !halfTime.ready[team]);
+  halfTimeReady.replaceChildren(
+    ...(['violet', 'lime'] as const).map((team) => {
+      const row = document.createElement('div');
+      row.className = `ht-row ${team}${halfTime.ready[team] ? ' ready' : ''}`;
+      row.textContent = `${frame.teams[team]} — ${halfTime.ready[team] ? 'ready' : 'still working'}`;
+      return row;
+    }),
+  );
+
+  const held = waiting.length > 0 && !halfTime.over;
+  halfTimeNote.textContent = held
+    ? 'Kick off once both teams say they are ready, or when the clock runs out. A push made now goes in when you lock the lineup again, from the match page.'
+    : 'Half-time is over as far as the whistle is concerned — kick off when you are ready.';
+  for (const button of kickoffButtons) {
+    button.disabled = held;
+    button.title = held ? `waiting on ${waiting.map((team) => frame.teams[team]).join(' and ')}` : '';
+  }
+}
+
 function updateBoard(frame: ViewFrame): void {
   board.violetName.textContent = frame.teams.violet;
   board.limeName.textContent = frame.teams.lime;
@@ -297,6 +349,7 @@ function draw(): void {
   updateBoard(latest);
   updateStandDown(latest);
   updateKickoff(latest);
+  updateHalfTime(latest);
 }
 
 function receive(message: ViewMessage): void {
