@@ -57,6 +57,11 @@ jobs:
             --define APP_VERSION="\"$VER\"" \
             --outfile=dist/bin/rcja-soccer-sim-darwin-arm64 ./src/cli.ts
 
+      - name: Build Python Package (Wheel and SDist)
+        run: |
+          python3 -m pip install --upgrade build
+          python3 -m build python/ --wheel --sdist --outdir dist/python/
+
       - name: Package Release Tarball
         env:
           VER: ${{ steps.vars.outputs.VERSION }}
@@ -75,5 +80,7 @@ jobs:
             dist/bin/rcja-soccer-sim-linux-x64
             dist/bin/rcja-soccer-sim-linux-arm64
             dist/bin/rcja-soccer-sim-darwin-arm64
+            dist/python/*.whl
+            dist/python/*.tar.gz
             rcja-soccer-sim-*-linux-x64.tar.gz
           generate_release_notes: true

@@ -28,7 +28,7 @@ export interface ValidateOptions {
   tickTimeoutMs?: number;
 }
 
-const ALLOWED_EXTRA = new Set(['rcja_soccer']);
+const ALLOWED_EXTRA = new Set(['rcja_soccer', 'machine', 'utime']);
 
 /**
  * A fingerprint of the code in a submission folder, for the match record.
@@ -121,7 +121,7 @@ async function checkStatic(
       }
       return fail(
         `${file} imports "${mod}", which is not available at a venue with no internet and ` +
-        'no pip. Only the standard library, rcja_soccer, and files in this same folder are.',
+        'no pip. Only the standard library, rcja_soccer, machine, utime, and files in this same folder are.',
       );
     }
   }

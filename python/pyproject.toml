@@ -4,13 +4,20 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rcja-soccer"
-version = "0.1.0"
-description = "Write a robot for the RCJA Soccer Simulation league"
+version = "0.2.0"
+description = "Write a robot for the RCJA Soccer Simulation league and MicroPython robots"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
 # Deliberately empty, and worth keeping that way. See rcja_soccer/_ws.py.
 dependencies = []
 
+[project.scripts]
+rcja-join = "rcja_soccer.join:main"
+rcja-submit = "rcja_soccer.submit:main"
+
 [tool.setuptools.packages.find]
-include = ["rcja_soccer*"]
+include = ["rcja_soccer*", "machine*"]
+
+[tool.setuptools]
+py-modules = ["utime", "join", "submit"]

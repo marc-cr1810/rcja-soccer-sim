@@ -57,6 +57,11 @@ from .sense import (
 )
 from .transport import Channel, TransportError, use_join, use_transport
 
+try:
+    import machine  # noqa: F401
+except ImportError:
+    pass
+
 __all__ = [
     "DEFAULT_URL",
     "PROTOCOL_VERSION",

@@ -171,4 +171,26 @@ robot.run(args.url)
     });
     expect(result).toMatchObject({ ok: false, reason: expect.stringContaining('did not connect') });
   }, 15000);
+
+  it('accepts a pure MicroPython robot using machine and utime', async () => {
+    const dir = await folder({
+      'manifest.json': manifest('main.py'),
+      'main.py': `
+from machine import Pin, PWM, ADC
+import time
+
+m0 = PWM(Pin(12))
+m0_dir = Pin(13, Pin.OUT)
+ball = ADC(Pin(4))
+
+while True:
+    val = ball.read_u16()
+    m0_dir.value(0)
+    m0.duty_u16(10000)
+    time.sleep_ms(20)
+`,
+    });
+    const result = await validateSubmission(dir, { pythonLibDir: PYTHON_LIB_DIR });
+    expect(result).toMatchObject({ ok: true, value: { team: 'Test Team', robot: 1, entry: 'main.py' } });
+  }, 15000);
 });

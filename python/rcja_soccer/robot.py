@@ -137,13 +137,40 @@ class Robot:
 
     def __init__(
         self,
-        team: str,
-        number: int,
+        team: str | None = None,
+        number: int | None = None,
         name: str | None = None,
         *,
         motors: int = 4,
         token: str | None = None,
     ) -> None:
+        if team is None or number is None:
+            # Check sys.argv for flags
+            args = sys.argv[1:] if len(sys.argv) > 1 else []
+            i = 0
+            while i < len(args):
+                arg = args[i]
+                if arg == "--team" and i + 1 < len(args) and team is None:
+                    team = args[i + 1]
+                    i += 2
+                elif arg == "--number" and i + 1 < len(args) and number is None:
+                    try:
+                        number = int(args[i + 1])
+                    except ValueError:
+                        pass
+                    i += 2
+                elif arg == "--name" and i + 1 < len(args) and name is None:
+                    name = args[i + 1]
+                    i += 2
+                elif arg == "--token" and i + 1 < len(args) and token is None:
+                    token = args[i + 1]
+                    i += 2
+                else:
+                    i += 1
+
+        team = team if team is not None else "violet"
+        number = number if number is not None else 1
+
         if team not in ("violet", "lime"):
             raise ValueError(f'team must be "violet" or "lime", not {team!r}')
         if number not in (1, 2):

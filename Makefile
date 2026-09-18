@@ -5,7 +5,7 @@ ARGS ?=
 TAG_VERSION = v$$(date +'%y.%-m')-$$(git rev-parse --short=6 HEAD 2>/dev/null || echo dev)
 
 .PHONY: help install link \
-	build build-all build-bin build-viewer build-referee build-practice build-workspace build-site \
+	build build-all build-bin build-py build-viewer build-referee build-practice build-workspace build-site \
 	dev-viewer dev-referee dev-practice dev-workspace dev-site \
 	serve serve-agents serve-referee practice league league-setup arena capacity \
 	play play-violet play-lime \
@@ -21,7 +21,8 @@ help:
 	@echo "  make link                   Expose 'rcja-soccer-sim' on PATH (bun link)"
 	@echo "  make build                  Build all web frontends (viewer, referee, practice, workspace, site)"
 	@echo "  make build-bin              Build standalone binary (dist/bin/rcja-soccer-sim)"
-	@echo "  make build-all              Build all frontends and standalone binary"
+	@echo "  make build-py               Build Python package wheels and sdist (dist/python/)"
+	@echo "  make build-all              Build all frontends, standalone binary, and python wheel"
 	@echo "  make build-<target>         Build single frontend (viewer | referee | practice | workspace | site)"
 	@echo "  make dev-<target>           Start Vite dev server (viewer | referee | practice | workspace | site)"
 	@echo ""
@@ -178,6 +179,10 @@ tournament-serve: check-name build-viewer
 table: check-name
 	bun run cli table --name "$(NAME)" $(ARGS)
 
+build-py:
+	mkdir -p dist/python
+	python3 -m build python/ --wheel --sdist --outdir dist/python/
+
 ## --- Verification & Quality ---
 check: typecheck check-py
 
@@ -185,7 +190,7 @@ typecheck:
 	bun run typecheck
 
 check-py:
-	python3 -m py_compile python/rcja_soccer/*.py python/examples/*.py python/submit.py
+	python3 -m py_compile python/rcja_soccer/*.py python/machine/*.py python/utime.py python/examples/*.py python/*.py
 
 test:
 	bun test
@@ -195,6 +200,7 @@ test-watch:
 
 clean:
 	rm -rf dist dist-*
+	rm -rf python/build python/dist python/*.egg-info
 	rm -f scratch/*.jsonl scratch/locframes.json
 	rm -rf scratch/frames scratch/rotframes
 	find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
