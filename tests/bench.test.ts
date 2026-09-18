@@ -386,18 +386,19 @@ function skeleton(): BenchResult {
  */
 function inlineAgent(forward: number, sideways: number): string {
   const body = `
-const WebSocket = require('ws');
+const WS = globalThis.WebSocket || require('ws');
 const url = process.env.URL;
 for (const robot of [1, 2]) {
-  const ws = new WebSocket(url);
-  ws.on('open', () => ws.send(JSON.stringify({ type: 'join', protocol: ${PROTOCOL_VERSION}, team: 'violet', robot, name: 'T' })));
-  ws.on('message', (d) => {
-    const m = JSON.parse(String(d));
+  const ws = new WS(url);
+  ws.addEventListener('open', () => ws.send(JSON.stringify({ type: 'join', protocol: ${PROTOCOL_VERSION}, team: 'violet', robot, name: 'T' })));
+  ws.addEventListener('message', (d) => {
+    const raw = typeof d.data === 'string' ? d.data : d.data ? d.data.toString() : String(d);
+    const m = JSON.parse(raw);
     if (m.type !== 'sensors') return;
     const f = ${forward}, s = ${sideways};
     ws.send(JSON.stringify({ type: 'command', frame: { motors: [f - s, -f - s, -f + s, f + s], dribbler: 1 } }));
   });
-  ws.on('error', () => {});
+  ws.addEventListener('error', () => {});
 }
 `;
   return body.replaceAll('\n', ' ').replaceAll('"', '\\"');
@@ -406,12 +407,12 @@ for (const robot of [1, 2]) {
 /** Connects, joins, and then never answers a single frame. */
 function silentAgent(): string {
   const body = `
-const WebSocket = require('ws');
+const WS = globalThis.WebSocket || require('ws');
 const url = process.env.URL;
 for (const robot of [1, 2]) {
-  const ws = new WebSocket(url);
-  ws.on('open', () => ws.send(JSON.stringify({ type: 'join', protocol: ${PROTOCOL_VERSION}, team: 'violet', robot, name: 'T' })));
-  ws.on('error', () => {});
+  const ws = new WS(url);
+  ws.addEventListener('open', () => ws.send(JSON.stringify({ type: 'join', protocol: ${PROTOCOL_VERSION}, team: 'violet', robot, name: 'T' })));
+  ws.addEventListener('error', () => {});
 }
 `;
   return body.replaceAll('\n', ' ').replaceAll('"', '\\"');
