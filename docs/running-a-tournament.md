@@ -35,6 +35,9 @@ measures the robots. Three entrants is six fixtures, four is twelve.
 | `--half 300` | seconds per half |
 | `--seed 1` | the draw's base seed. A decimal or a `0x…` 64-bit seed (16 hex digits). Without it the draw draws one fresh per tournament, which is what a competition wants; with it the same command makes the same draw, for reproduction |
 | `--headless` | make a tournament that never waits for a referee |
+| `--start 09:00` | kick-off of the first round, written into the draw |
+| `--every 12` | minutes between rounds; defaults to as long as a fixture takes |
+| `--pitches 3` | how many tables the hall has, so that many fixtures share a kick-off |
 
 **A draw is written once and never rewritten.** Re-running `draw` with the same
 name fails rather than quietly replacing a fixture list an organiser has already
@@ -51,6 +54,52 @@ It is worth the three times the match time when a table has to mean something.
 A single meeting is mostly noise — separating a reference agent at skill 1.0
 from one at 0.35 took sixteen matches, which is recorded in the Phase 0 test —
 so a table built from single matches is partly a table of luck.
+
+### Kick-off times
+
+A draw can carry a programme:
+
+```bash
+bun run serve -- draw --name state-round-1 --start 09:00 --every 12 --pitches 3
+```
+
+Three fixtures kick off at 09:00, three at 09:12, and so on. **No team is ever
+given two pitches at once** — a fixture whose teams are already in a round is
+deferred to the next one, so the programme you print is one the hall can
+actually run. `--start` takes `09:00` for today, or a whole `2026-09-20T09:00`.
+
+A time is **a statement of intent and nothing more.** A fixture is *due* at its
+time; it still waits at `/referee` for somebody to open it, and nothing starts
+because a clock said so. What times do change is order: the draw everyone reads
+is in time order, so that is the order fixtures are offered in.
+
+Times show up wherever a fixture does — the front page, the schedule, a
+referee's list, a team's own page — rendered in the reader's own timezone.
+
+### Moving them afterwards
+
+The draw file is never rewritten, so a change of plan is an appended record
+beside it — `amend` writes those, and every verb of it needs a `--why`, because
+an amendment without a reason is an edit:
+
+```bash
+# one fixture, because their bus is late
+bun run serve -- amend schedule --draw state-round-1 \
+  --fixture act-v-qld --at 14:20 --why "their bus is late"
+
+# the rest of the day, because the morning overran
+bun run serve -- amend schedule --draw state-round-1 \
+  --start 13:40 --every 12 --pitches 3 --why "the morning overran"
+```
+
+The second form re-lays every fixture that has **not been played**, from
+`--from <fixture>` onwards if you name one. A played fixture is never given a
+time: it has already happened, and timing it would sort the past to the front
+of the list.
+
+A league server that is already running picks either up within a few seconds,
+with no restart — it re-reads the draw on its own clock, because `amend` is a
+different process and there is nothing to notify.
 
 ## Playing it
 

@@ -96,6 +96,7 @@ const ROUTES: [RegExp, Route][] = [
   [/^\/team$/, dashboard],
   [/^\/team\/settings$/, settings],
   [/^\/admin$/, admin],
+  [/^\/admin\/tournaments$/, adminTournaments],
   [/^\/referee\/?$/, refereeList],
   [/^\/referee\/m\/([^/]+)$/, (p) => refereeMatch(p[0]!)],
   // END-STATE.md's own name for the pre-game screen, pointed at the same
@@ -195,10 +196,15 @@ interface Card {
   id: string;
   home: string;
   away: string;
-  homeGoals?: number;
-  awayGoals?: number;
+  // `resultCard` on the server spells these `…Score`; a `FixtureVerdict`'s own
+  // goal totals are the ones called `…Goals`, and reading one shape with the
+  // other's names is why every played fixture on this sheet read 0-0.
+  homeScore?: number;
+  awayScore?: number;
   completedAt?: string;
   state?: string;
+  /** When it is due. A programme, not a countdown — nothing starts by itself. */
+  playAt?: string;
 }
 
 interface Live {
@@ -431,8 +437,9 @@ function fixtureRow(card: Card): string {
   const state = card.state ?? '';
   return h(`
     <a class="row" href="/m/${encodeURIComponent(card.id)}">
+      ${card.playAt ? `<span class="at">${esc(when(card.playAt))}</span>` : ''}
       <span class="grow">${esc(card.home)}<span class="v">v</span>${esc(card.away)}</span>
-      ${played ? `<span class="score">${card.homeGoals ?? 0}&ndash;${card.awayGoals ?? 0}</span>` : ''}
+      ${played ? `<span class="score">${card.homeScore ?? 0}&ndash;${card.awayScore ?? 0}</span>` : ''}
       <span class="state ${state === 'playing' ? 'playing' : ''}">${
         played ? esc(when(card.completedAt ?? '')) : esc(PUBLIC_STATE[state] ?? state)
       }</span>
@@ -1731,8 +1738,11 @@ interface RefereeCard {
   home: string;
   away: string;
   state: string;
+  playAt?: string;
   live?: Live;
   console?: string;
+  /** The draw no longer has this fixture, but this room is still standing. */
+  voided?: boolean;
 }
 
 /** What a state is called on a referee's own list. */
@@ -1766,8 +1776,11 @@ async function refereeList(): Promise<void> {
         ? `<div class="rows">${fixtures
             .map(
               (fixture) => `<a class="row" href="/referee/m/${encodeURIComponent(fixture.id)}">
+                ${fixture.playAt ? `<span class="at">${esc(when(fixture.playAt))}</span>` : ''}
                 <span class="grow">${esc(fixture.home)} v ${esc(fixture.away)}</span>
-                <span class="state">${esc(REFEREE_STATE[fixture.state] ?? fixture.state)}</span>
+                <span class="state">${
+                  fixture.voided ? 'voided' : esc(REFEREE_STATE[fixture.state] ?? fixture.state)
+                }</span>
               </a>`,
             )
             .join('')}</div>`
@@ -1793,8 +1806,10 @@ async function refereeMatch(fixtureId: string): Promise<void> {
   const data = await api<{
     ok: boolean;
     reason?: string;
-    fixture: { id: string; home: string; away: string };
+    fixture: { id: string; home: string; away: string; playAt?: string };
     state: string;
+    /** The draw no longer has this fixture; see `heldButVoided` on the server. */
+    voided?: boolean;
     live: Live | null;
     halfTime: HalfTime | null;
     console: string | null;
@@ -1827,6 +1842,17 @@ async function refereeMatch(fixtureId: string): Promise<void> {
   const head = h(`
     <p class="dim"><a href="/referee">Refereeing</a></p>
     <h1>${esc(data.fixture.home)}<span class="v">v</span>${esc(data.fixture.away)}</h1>
+    ${data.fixture.playAt ? `<p class="dim">Due ${esc(when(data.fixture.playAt))}.</p>` : ''}
+    ${
+      // The room outlives the draw that named it, so this page keeps working
+      // and says why rather than pretending nothing happened. Nobody pulls a
+      // pitch out from under a whistle: ending it is still this referee's.
+      data.voided
+        ? `<p class="warn">An organiser has taken this fixture out of the draw. Whatever happens
+           here will not count. The pitch is still yours &mdash; abandon the match when you are
+           ready and it gives the pitch back.</p>`
+        : ''
+    }
   `);
 
   // Full time, and nothing is on disk yet. This is the one page in the site that
@@ -2148,6 +2174,14 @@ async function admin(): Promise<void> {
     ${budgetPanel(load)}
     ${arenaRows(load)}
 
+    <h2>The draw</h2>
+    <div class="rows">
+      <a class="row" href="/admin/tournaments">
+        <span class="grow">Correct the draw</span>
+        <span class="state">move, void, withdraw, play it again</span>
+      </a>
+    </div>
+
     <h2>Invite somebody</h2>
     <form class="panel" id="form">
       <label for="role">Role</label>
@@ -2302,6 +2336,265 @@ function arenaRows(load: AdminArenas): string {
           </div>`;
         })
         .join('')}
+    </div>
+  `);
+}
+
+
+// ------------------------------------------------- administering a draw
+
+interface AdminFixture extends Card {
+  /** Held by a referee right now, so not an organiser's to correct. */
+  theirs?: boolean;
+  /** The draw no longer has it, but a room is still standing on it. */
+  voided?: boolean;
+  /** Why the schedule gave up on it. Present only on an abandoned fixture. */
+  stalled?: string;
+}
+
+interface AdminAmendment {
+  n: number;
+  kind: string;
+  at: string;
+  by: { id: string | null; slug: string };
+  reason: string;
+  fixtureId?: string;
+  team?: string;
+  replacement?: string;
+  goals?: number;
+  times?: Record<string, string>;
+}
+
+/** The correction an organiser has started but not yet confirmed, if any. */
+let pending: { kind: string; fixtureId?: string; team?: string; title: string } | null = null;
+
+/** What each correction is called where a person has to choose it. */
+const AMEND_TITLE: Record<string, string> = {
+  void: 'Take this fixture out of the draw',
+  restore: 'Put this fixture back',
+  schedule: 'Move this fixture',
+  replay: 'Play this fixture again',
+  withdraw: 'Withdraw this team from the draw',
+  substitute: 'Put somebody else in their place',
+};
+
+/**
+ * The draw, and every correction that can be made to it.
+ *
+ * The terminal has been able to do all of this since Slice B; this is the same
+ * records through the same writer, for the organiser who has a laptop open and
+ * no shell on it. Two sections, because the corrections divide cleanly: one
+ * acts on a fixture, the other on a team across the whole draw, and a button
+ * that withdraws a team does not belong among twelve that void one match.
+ */
+async function adminTournaments(): Promise<void> {
+  if (!me.can.admin) return void go('/login?next=%2Fadmin%2Ftournaments');
+  const data = await api<{
+    ok: boolean;
+    tournament: { name: string; fixturesTotal: number } | null;
+    entrants: string[];
+    fixtures: AdminFixture[];
+    amendments: AdminAmendment[];
+    scheduleRunning?: boolean;
+  }>('/api/admin/tournament');
+
+  if (!data.tournament) {
+    view.innerHTML = h(`
+      <p class="dim"><a href="/admin">Administration</a></p>
+      <h1>The draw</h1>
+      <div class="empty">This server is not running a tournament.</div>
+    `);
+    return;
+  }
+
+  view.innerHTML = h(`
+    <p class="dim"><a href="/admin">Administration</a></p>
+    <h1>The draw</h1>
+    <p class="dim">${esc(data.tournament.name)} &middot; ${
+      data.scheduleRunning
+        ? 'the schedule is running'
+        : 'nothing is being offered &mdash; put a fixture back and it starts again'
+    }</p>
+
+    <h2>Programme</h2>
+    <div class="rows">${data.fixtures.map(fixtureAdminRow).join('')}</div>
+
+    <h2>Entrants</h2>
+    <div class="rows">${data.entrants.map(entrantAdminRow).join('')}</div>
+
+    <h2>Corrections</h2>
+    ${
+      data.amendments.length
+        ? `<div class="rows">${data.amendments.map(amendmentRow).join('')}</div>`
+        : `<div class="empty">This draw has never been amended.</div>`
+    }
+  `);
+
+  for (const button of view.querySelectorAll<HTMLButtonElement>('button[data-act]')) {
+    button.addEventListener('click', () => {
+      const kind = button.dataset.act!;
+      pending = {
+        kind,
+        fixtureId: button.dataset.fixture,
+        team: button.dataset.team,
+        title: AMEND_TITLE[kind] ?? kind,
+      };
+      void adminTournaments();
+    });
+  }
+  const cancel = view.querySelector<HTMLButtonElement>('#amend-cancel');
+  cancel?.addEventListener('click', () => {
+    pending = null;
+    void adminTournaments();
+  });
+  if (pending) form('#amend-form', submitAmend);
+  view.querySelector<HTMLInputElement>('#amend-why')?.focus();
+}
+
+/**
+ * Nothing is written without a reason typed here.
+ *
+ * The same rule the terminal keeps — an amendment without a reason is an edit —
+ * and the reason a browser needs it more, not less: a button is much easier to
+ * press by accident than a command is to type.
+ */
+async function submitAmend(): Promise<string | null> {
+  if (!pending) return null;
+  const reason = value('#amend-why');
+  if (!reason) return 'Say why. An amendment without a reason is an edit.';
+
+  const path =
+    pending.kind === 'replay' ? '/api/admin/tournament/replay' : '/api/admin/tournament/amend';
+  const body: Record<string, unknown> =
+    pending.kind === 'replay'
+      ? { fixtureId: pending.fixtureId, reason }
+      : {
+          kind: pending.kind,
+          reason,
+          ...(pending.fixtureId ? { fixtureId: pending.fixtureId } : {}),
+          ...(pending.team ? { team: pending.team } : {}),
+          ...(pending.kind === 'schedule' ? { playAt: new Date(value('#amend-at')).toISOString() } : {}),
+          ...(pending.kind === 'substitute' ? { replacement: value('#amend-with') } : {}),
+        };
+
+  if (pending.kind === 'schedule' && Number.isNaN(Date.parse(value('#amend-at')))) {
+    return 'That is not a time.';
+  }
+  if (pending.kind === 'substitute' && !value('#amend-with')) {
+    return 'Who takes their place?';
+  }
+
+  const res = await api<{ ok: boolean; reason?: string }>(path, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) return res.reason ?? 'that did not work';
+  pending = null;
+  await adminTournaments();
+  return null;
+}
+
+/** The panel that asks for a reason, under whichever row it belongs to. */
+function amendPanel(): string {
+  if (!pending) return '';
+  return h(`
+    <form class="panel amend" id="amend-form">
+      <strong>${esc(pending.title)}</strong>
+      ${
+        pending.kind === 'schedule'
+          ? `<label for="amend-at">Kick-off</label><input id="amend-at" type="datetime-local" />`
+          : ''
+      }
+      ${
+        pending.kind === 'substitute'
+          ? `<label for="amend-with">Who takes their place</label><input id="amend-with" />`
+          : ''
+      }
+      <label for="amend-why">Why</label>
+      <input id="amend-why" placeholder="their bus did not arrive" />
+      <div>
+        <button class="primary" type="submit">Record it</button>
+        <button class="quiet" type="button" id="amend-cancel">Cancel</button>
+      </div>
+      <div class="error" id="error" hidden></div>
+    </form>
+  `);
+}
+
+/** Whether the panel currently open belongs under this row. */
+function panelFor(what: { fixtureId?: string; team?: string }): string {
+  if (!pending) return '';
+  const mine =
+    (what.fixtureId !== undefined && pending.fixtureId === what.fixtureId) ||
+    (what.team !== undefined && pending.team === what.team);
+  return mine ? amendPanel() : '';
+}
+
+/** One fixture, with whichever corrections apply to the state it is in. */
+function fixtureAdminRow(card: AdminFixture): string {
+  const played = card.state === 'played';
+  const buttons = card.theirs
+    ? // The reach rule, said rather than enforced silently: a match somebody is
+      // standing at belongs to its referee until they end it.
+      `<span class="state">a referee has it</span>`
+    : card.voided
+      ? `<button class="quiet" data-act="restore" data-fixture="${esc(card.id)}">Restore</button>`
+      : [
+          played || card.stalled
+            ? `<button class="quiet" data-act="replay" data-fixture="${esc(card.id)}">Play it again</button>`
+            : '',
+          `<button class="quiet" data-act="schedule" data-fixture="${esc(card.id)}">Move</button>`,
+          `<button class="stop" data-act="void" data-fixture="${esc(card.id)}">Void</button>`,
+        ].join('');
+  return h(`
+    <div class="row">
+      ${card.playAt ? `<span class="at">${esc(when(card.playAt))}</span>` : ''}
+      <span class="grow">${esc(card.home)}<span class="v">v</span>${esc(card.away)}</span>
+      ${played ? `<span class="score">${card.homeScore ?? 0}&ndash;${card.awayScore ?? 0}</span>` : ''}
+      <span class="state">${
+        card.stalled
+          ? // Already a sentence — `runDraw` reports "the match was abandoned
+            // (why)" — so prefixing it would say abandoned twice.
+            esc(card.stalled)
+          : card.voided
+            ? 'voided'
+            : esc(PUBLIC_STATE[card.state ?? ''] ?? card.state ?? '')
+      }</span>
+      ${buttons}
+    </div>
+    ${panelFor({ fixtureId: card.id })}
+  `);
+}
+
+/** One entrant, with the two corrections that act on a team rather than a match. */
+function entrantAdminRow(team: string): string {
+  return h(`
+    <div class="row">
+      <a class="grow" href="/t/${encodeURIComponent(slug(team))}">${esc(team)}</a>
+      <button class="quiet" data-act="substitute" data-team="${esc(team)}">Substitute</button>
+      <button class="stop" data-act="withdraw" data-team="${esc(team)}">Withdraw</button>
+    </div>
+    ${panelFor({ team })}
+  `);
+}
+
+/** One appended correction: what, who, when and why. */
+function amendmentRow(record: AdminAmendment): string {
+  const about =
+    record.kind === 'substitute'
+      ? `${record.team} → ${record.replacement}`
+      : record.kind === 'withdraw'
+        ? `${record.team} (${record.goals}–0)`
+        : record.kind === 'schedule'
+          ? `${Object.keys(record.times ?? {}).length} fixture(s)`
+          : (record.fixtureId ?? '');
+  return h(`
+    <div class="row">
+      <span class="at">${String(record.n).padStart(4, '0')}</span>
+      <span class="grow">${esc(record.kind)} &middot; ${esc(about)}
+        <br /><span class="dim">${esc(record.reason)}</span></span>
+      <span class="state">${esc(record.by.slug)}${record.by.id ? '' : ' (terminal)'}</span>
+      <span class="state">${esc(when(record.at))}</span>
     </div>
   `);
 }

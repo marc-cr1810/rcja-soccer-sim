@@ -20,14 +20,22 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync } from '
 import { spawnSync } from 'node:child_process';
 import { checkLatestRelease, formatUpdateBanner, performUpgrade, GITHUB_REPO } from './update';
 import { randomBytes } from 'node:crypto';
-import { homedir, networkInterfaces } from 'node:os';
+import { homedir, networkInterfaces, userInfo } from 'node:os';
 import { join, resolve } from 'node:path';
 import { DEFAULT_OPTIONS, formatBench, runBench, type BenchResult } from './bench';
 import { slugifyTeam } from './manifest';
 import { isLeagueId, type LeagueId } from './leagues';
 import { hashSubmission } from './submission';
-import { formatTable, makeDraw, type Draw, type Fixture, type FixtureResult } from './tournament';
-import { listEntrants, loadDraw, loadResults, saveDraw } from './tournament-store';
+import {
+  defaultKickoffMinutes,
+  formatTable,
+  kickoffTimes,
+  makeDraw,
+  type Draw,
+  type Fixture,
+  type FixtureResult,
+} from './tournament';
+import { listEntrants, loadTournament, saveDraw } from './tournament-store';
 import { runDraw } from './tournament-run';
 import { walkoverResult, type PregameVerdict } from './pregame';
 import { getVersion } from './version';
@@ -86,6 +94,67 @@ function num(flags: Map<string, string>, name: string, fallback: number): number
   if (raw === undefined) return fallback;
   const value = Number(raw);
   return Number.isFinite(value) ? value : fallback;
+}
+
+/**
+ * A kick-off time as a person types it, returned as an ISO stamp.
+ *
+ * `09:00` is that time today, in the timezone of the machine writing it, which
+ * is the machine standing in the hall. A full `2026-09-20T09:00` or a
+ * `"2026-09-20 09:00"` says which day as well. The answer is always UTC on
+ * disk and every screen renders it back into its own reader's locale, so a
+ * team looking at their phone and an organiser looking at the projector agree
+ * without either of them having to think about it.
+ *
+ * Refuses anything else by name. A time that quietly became `Invalid Date`
+ * would be written into a programme and discovered by a hall.
+ */
+export function parseKickoff(raw: string, base = new Date()): string {
+  const trimmed = raw.trim();
+  const clock = /^(\d{1,2}):(\d{2})$/.exec(trimmed);
+  if (clock) {
+    const hour = Number(clock[1]);
+    const minute = Number(clock[2]);
+    if (hour > 23 || minute > 59) throw new Error(`"${raw}" is not a time of day`);
+    const at = new Date(base);
+    at.setHours(hour, minute, 0, 0);
+    return at.toISOString();
+  }
+  // A space where a `T` belongs is what a person types, and what a shell hands
+  // over once they have quoted it.
+  const parsed = new Date(trimmed.replace(' ', 'T'));
+  if (Number.isNaN(parsed.getTime())) {
+    throw new Error(`"${raw}" is not a time. Try 09:00, or 2026-09-20T09:00`);
+  }
+  return parsed.toISOString();
+}
+
+/**
+ * An ISO stamp as a terminal shows it: local time of day, with the date when
+ * it is not today. The browser's `when()` does the same job for a phone.
+ */
+function clockOf(iso: string): string {
+  const at = new Date(iso);
+  if (Number.isNaN(at.getTime())) return '';
+  const hhmm = `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`;
+  const today = new Date();
+  const sameDay =
+    at.getDate() === today.getDate() &&
+    at.getMonth() === today.getMonth() &&
+    at.getFullYear() === today.getFullYear();
+  return sameDay ? hhmm : `${at.toISOString().slice(0, 10)} ${hhmm}`;
+}
+
+/** A `--start`/`--at` flag as an ISO stamp, or exit saying why it is not one. */
+function kickoffFlag(flags: Map<string, string>, name: string): string | null {
+  const raw = flags.get(name);
+  if (raw === undefined || raw === 'true') return null;
+  try {
+    return parseKickoff(raw);
+  } catch (error) {
+    console.error(`\n  ${(error as Error).message}\n`);
+    process.exit(1);
+  }
 }
 
 /**
@@ -258,7 +327,7 @@ async function serve(flags: Map<string, string>): Promise<void> {
       .then((info) => {
         if (info?.updateAvailable) console.log(formatUpdateBanner(info));
       })
-      .catch(() => {});
+      .catch(() => { });
   }
   if (!root) {
     console.log(`  (no viewer built yet — run: bun run build:viewer)`);
@@ -347,7 +416,7 @@ async function serve(flags: Map<string, string>): Promise<void> {
     console.error(`  ${(err as Error).message}`);
     process.exit(1);
   }
-  for (;;) {
+  for (; ;) {
     if (waitForAgents) {
       // Not `whenReady()` on its own any more. That returned the same answer
       // but showed nothing while it waited — an empty page and four silent
@@ -381,7 +450,7 @@ async function serve(flags: Map<string, string>): Promise<void> {
     });
     console.log(
       `  full time: ${teams.violet} ${result.score.violet} — ${result.score.lime} ${teams.lime}` +
-        `   (${server.watching} watching)`,
+      `   (${server.watching} watching)`,
     );
     if (waitForAgents) {
       for (const [id, seat] of Object.entries(server.agents.report())) {
@@ -750,26 +819,34 @@ async function draw(flags: Map<string, string>): Promise<void> {
   const entrants =
     teamsFlag && teamsFlag !== 'true'
       ? teamsFlag
-          .split(',')
-          .map((t) => t.trim())
-          .filter(Boolean)
+        .split(',')
+        .map((t) => t.trim())
+        .filter(Boolean)
       : await listEntrants(submissionsDir);
 
   if (entrants.length < 2) {
     console.error(
       `\n  need at least two entrants, found ${entrants.length} in ${submissionsDir}` +
-        `\n  push some robots first, or name them yourself: --teams "ACT,QLD,VIC"\n`,
+      `\n  push some robots first, or name them yourself: --teams "ACT,QLD,VIC"\n`,
     );
     process.exit(1);
   }
 
   const refereed = flags.get('headless') !== 'true';
+  const halfSeconds = num(flags, 'half', 300);
+  const legs = num(flags, 'legs', 1);
+  const startAt = kickoffFlag(flags, 'start');
+  // Said out loud below rather than left to be discovered: a programme whose
+  // spacing nobody chose is one nobody has checked.
+  const everyMinutes = num(flags, 'every', defaultKickoffMinutes(legs, halfSeconds));
+  const pitches = num(flags, 'pitches', 1);
   const made = makeDraw(entrants, {
     name,
-    halfSeconds: num(flags, 'half', 300),
-    legs: num(flags, 'legs', 1),
+    halfSeconds,
+    legs,
     seed: seedOption(flags, matchSeed()),
     refereed,
+    ...(startAt ? { startAt, everyMinutes, pitches } : {}),
   });
 
   let dir: string;
@@ -780,7 +857,7 @@ async function draw(flags: Map<string, string>): Promise<void> {
     if (code === 'EEXIST') {
       console.error(
         `\n  a draw called "${made.id}" already exists.` +
-          `\n  a draw is never rewritten — delete it by hand, or pick another --name\n`,
+        `\n  a draw is never rewritten — delete it by hand, or pick another --name\n`,
       );
       process.exit(1);
     }
@@ -790,9 +867,23 @@ async function draw(flags: Map<string, string>): Promise<void> {
   console.log(`\n  ${made.name}  (${made.id})`);
   console.log(`  ${made.entrants.length} entrants, ${made.fixtures.length} fixtures, ${made.legs} leg(s) each`);
   console.log(`  ${refereed ? 'refereed, wall-clock' : 'headless, unattended'}  ·  ${made.halfSeconds}s halves`);
+  if (startAt) {
+    console.log(
+      `  kick-off ${clockOf(startAt)}, ${pitches} pitch(es), ${everyMinutes} min between rounds` +
+      `  ·  a time says when a fixture is due, nothing starts by itself`,
+    );
+  }
   console.log(`  written to ${dir}\n`);
+  let round = '';
   for (const fixture of made.fixtures) {
-    console.log(`    ${fixture.home} v ${fixture.away}   seeds ${fixture.seeds.map(formatSeedValue).join(', ')}`);
+    // A blank line between rounds, so the shape of the day is visible rather
+    // than merely recorded.
+    if (fixture.playAt && fixture.playAt !== round) {
+      if (round) console.log('');
+      round = fixture.playAt;
+    }
+    const at = fixture.playAt ? `${clockOf(fixture.playAt)}  ` : '';
+    console.log(`    ${at}${fixture.home} v ${fixture.away}   seeds ${fixture.seeds.map(formatSeedValue).join(', ')}`);
   }
   console.log(`\n  play it:  bun run serve -- tournament --name ${made.id}\n`);
 }
@@ -812,13 +903,7 @@ async function tournament(flags: Map<string, string>): Promise<void> {
   const root = tournamentsRoot(flags);
   const id = slugifyTeam(requireName(flags));
 
-  let made: Draw;
-  try {
-    made = await loadDraw(root, id);
-  } catch {
-    console.error(`\n  no draw called "${id}" under ${root}` + `\n  make one:  bun run serve -- draw --name "${id}"\n`);
-    process.exit(1);
-  }
+  const { draw: made } = await openTournament(root, id, true);
 
   // The draw says whether this tournament is refereed; --headless overrides it
   // for this run only, because realtime is a property of the server and cannot
@@ -929,7 +1014,7 @@ export function defaultStorageDir(
       if (pkg.name === 'rcja-soccer-sim') {
         return resolve(cwd, 'data', subdir);
       }
-    } catch {}
+    } catch { }
   }
 
   // 2. Otherwise use XDG user data directory (~/.local/share/rcja-soccer-sim/<subdir>)
@@ -943,6 +1028,37 @@ function leagueData(flags: Map<string, string>): string {
 
 function tournamentsRoot(flags?: Map<string, string>): string {
   return flags?.has('tournaments') ? resolve(flags.get('tournaments')!) : defaultStorageDir('tournaments');
+}
+
+/**
+ * A tournament as it actually stands, or a message and an exit.
+ *
+ * Everything that reads a draw goes through here, so every command sees the
+ * same effective draw — `draw.json` folded with whatever corrections have been
+ * appended beside it. A missing draw and an amendment that will not parse are
+ * different problems and print different sentences: the second one used to be
+ * reported as "no draw called that", which would send somebody looking in
+ * entirely the wrong place.
+ */
+async function openTournament(
+  root: string,
+  id: string,
+  makeHint = false,
+): Promise<{ draw: Draw; results: FixtureResult[] }> {
+  try {
+    const { draw, results } = await loadTournament(root, id);
+    return { draw, results };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      console.error(
+        `\n  no draw called "${id}" under ${root}` +
+        (makeHint ? `\n  make one:  bun run serve -- draw --name "${id}"\n` : '\n'),
+      );
+    } else {
+      console.error(`\n  "${id}" cannot be read — ${(error as Error).message}\n`);
+    }
+    process.exit(1);
+  }
 }
 
 function submissionsRoot(flags?: Map<string, string>): string {
@@ -1168,14 +1284,22 @@ async function assign(flags: Map<string, string>): Promise<void> {
       process.exit(1);
     }
 
-    let draw: Draw;
-    try {
-      draw = await loadDraw(tournamentsRoot(flags), drawId);
-    } catch {
-      console.error(`\n  no draw called "${drawId}" under ${tournamentsRoot(flags)}\n`);
-      process.exit(1);
+    const { draw } = await openTournament(tournamentsRoot(flags), drawId);
+    const fixture = draw.fixtures.find((one) => one.id === fixtureId);
+    // A fixture that has been voided is gone from the effective draw, and
+    // nobody should be given one to referee. Taking an assignment *back* still
+    // has to work, though — voiding a fixture does not unassign anybody, and an
+    // assignment nobody can remove is a row that outlives its reason.
+    if (!fixture && flags.get('remove') === 'true') {
+      const had = accounts.unassign({ accountId: account!.id, drawId, fixtureId });
+      if (!had) {
+        console.error(`\n  ${account!.displayName} was not assigned "${fixtureId}"\n`);
+        process.exit(1);
+      }
+      accounts.record(null, 'referee.assign', `${drawId}:${fixtureId}`, `unassigned ${account!.slug}`);
+      console.log(`\n  ${account!.displayName} no longer has "${fixtureId}"\n`);
+      return;
     }
-    const fixture = draw!.fixtures.find((one) => one.id === fixtureId);
     if (!fixture) {
       console.error(`\n  "${drawId}" has no fixture "${fixtureId}". It has:\n`);
       for (const one of draw!.fixtures) console.error(`    ${one.id.padEnd(28)}  ${one.home} v ${one.away}`);
@@ -1201,6 +1325,308 @@ async function assign(flags: Map<string, string>): Promise<void> {
   } finally {
     accounts.close();
   }
+}
+
+/**
+ * Correcting a draw from a terminal, without rewriting one.
+ *
+ * `draw.json` is written once and never modified, so every correction is an
+ * appended record and the draw everybody reads is the two folded together —
+ * see `amendments.ts`. This is the hatch that writes those records: the same
+ * promise this repository keeps for workspaces, submissions and results, which
+ * is that an organiser with a shell can fix the thing at eleven at night.
+ *
+ * Every verb needs a reason. That is not politeness: an amendment without one
+ * is an edit, and the whole argument for appending a record rather than editing
+ * a file is that the why survives beside the change.
+ *
+ * A running league server hears about this within a few seconds, by looking —
+ * these are separate processes, so there is nothing to notify. What it cannot
+ * do is reach into a match that is already being refereed: a fixture in
+ * pre-game or on the pitch belongs to whoever is standing at it, and voiding
+ * one records the void, leaves the football alone, and simply does not count
+ * the result when it arrives.
+ */
+async function amend(flags: Map<string, string>, args: string[]): Promise<void> {
+  const { appendAmendment, loadAmendments, loadResults, loadDraw } = await import('./tournament-store');
+  const { foldTournament } = await import('./amendments');
+  const verb = args[0] ?? '';
+  const root = tournamentsRoot(flags);
+  const drawId = flags.get('draw');
+
+  const usage = () => {
+    console.error(`
+  amend void        --draw <id> --fixture <id>                --why "..."
+  amend restore     --draw <id> --fixture <id>                --why "..."
+  amend substitute  --draw <id> --team <name> --with <name>   --why "..."
+  amend withdraw    --draw <id> --team <name> [--goals <n>]   --why "..."
+  amend void-result --draw <id> --fixture <id> [--at <time>]  --why "..."
+  amend schedule    --draw <id> --fixture <id> --at <time>    --why "..."
+  amend schedule    --draw <id> --start <time> [--every <n>] [--pitches <n>] [--from <id>]  --why "..."
+  amend list        --draw <id>
+`);
+    process.exit(1);
+  };
+
+  if (!drawId || drawId === 'true') usage();
+  const id = slugifyTeam(drawId!);
+  const before = await openTournament(root, id);
+
+  if (verb === 'list') {
+    const records = await loadAmendments(root, id);
+    if (records.length === 0) {
+      console.log(`\n  "${id}" has never been amended\n`);
+      return;
+    }
+    console.log('');
+    for (const record of records) {
+      const about =
+        record.kind === 'substitute'
+          ? `${record.team} → ${record.replacement}`
+          : record.kind === 'withdraw'
+            ? `${record.team} (${record.goals}-0)`
+            : record.kind === 'schedule'
+              ? `${Object.keys(record.times).length} fixture(s)`
+              : record.fixtureId;
+      console.log(`  ${String(record.n).padStart(4, '0')}  ${record.kind.padEnd(12)}  ${about}`);
+      console.log(`        ${record.at}  by ${record.by.slug}`);
+      console.log(`        ${record.reason}`);
+    }
+    console.log('');
+    return;
+  }
+
+  const why = flags.get('why');
+  if (!why || why === 'true') {
+    console.error('\n  --why is required. An amendment without a reason is an edit.\n');
+    process.exit(1);
+  }
+
+  /** Whose hands these were. A null id means the terminal rather than an account. */
+  const by = { id: null, slug: userInfo().username || 'terminal' };
+  const at = new Date().toISOString();
+
+  const fixtureFlag = (): string => {
+    const wanted = flags.get('fixture');
+    if (!wanted || wanted === 'true') {
+      console.error('\n  which fixture? pass --fixture <id>\n');
+      process.exit(1);
+    }
+    return wanted;
+  };
+  const teamFlag = (name: string): string => {
+    const wanted = flags.get(name);
+    if (!wanted || wanted === 'true') {
+      console.error(`\n  which team? pass --${name} <name>\n`);
+      process.exit(1);
+    }
+    // Held to a team that is actually in this draw, because the fold matches on
+    // the name and a typo would silently amend nothing at all.
+    const known = before.draw.entrants.find((one) => slugifyTeam(one) === slugifyTeam(wanted));
+    if (!known) {
+      console.error(`\n  "${id}" has no entrant called "${wanted}". It has:`);
+      for (const one of before.draw.entrants) console.error(`    ${one}`);
+      console.error('');
+      process.exit(1);
+    }
+    return known;
+  };
+
+  let record: Parameters<typeof appendAmendment>[2];
+
+  switch (verb) {
+    case 'void':
+    case 'restore': {
+      const fixtureId = fixtureFlag();
+      const here = before.draw.fixtures.some((f) => f.id === fixtureId);
+      // A draw folded with its amendments is the only honest way to ask "is
+      // this already void?", and it answers both verbs at once.
+      if (verb === 'void' && !here) {
+        const real = (await loadDraw(root, id)).fixtures.some((f) => f.id === fixtureId);
+        console.error(
+          real
+            ? `\n  ${fixtureId} is already void\n`
+            : `\n  "${id}" has no fixture "${fixtureId}". It has:\n` +
+            before.draw.fixtures.map((f) => `    ${f.id.padEnd(28)}  ${f.home} v ${f.away}`).join('\n') +
+            '\n',
+        );
+        process.exit(1);
+      }
+      if (verb === 'restore' && here) {
+        console.error(`\n  ${fixtureId} is not void — there is nothing to restore\n`);
+        process.exit(1);
+      }
+      record = { kind: verb, fixtureId, at, by, reason: why };
+      break;
+    }
+    case 'substitute': {
+      const team = teamFlag('team');
+      const replacement = flags.get('with');
+      if (!replacement || replacement === 'true') {
+        console.error('\n  who takes their place? pass --with <name>\n');
+        process.exit(1);
+      }
+      record = { kind: 'substitute', team, replacement, at, by, reason: why };
+      break;
+    }
+    case 'withdraw': {
+      const team = teamFlag('team');
+      // The venue's own mercy margin, which is the margin a no-show walkover
+      // already arrives at in pre-game — and it is written into the record so
+      // that the fold stays pure over the disk, whatever league.json says next
+      // season.
+      const { loadSettings } = await import('./settings');
+      const { settings } = loadSettings(leagueData(flags));
+      const fallback = settings.rules.mercyMargin ?? 10;
+      const goals = flags.has('goals') ? num(flags, 'goals', fallback) : fallback;
+      record = { kind: 'withdraw', team, goals, at, by, reason: why };
+      break;
+    }
+    case 'schedule': {
+      const times: Record<string, string> = {};
+      const played = new Set(before.results.map((r) => r.fixtureId));
+      const one = kickoffFlag(flags, 'at');
+      const start = kickoffFlag(flags, 'start');
+
+      if (one && flags.has('fixture')) {
+        const fixtureId = fixtureFlag();
+        if (!before.draw.fixtures.some((f) => f.id === fixtureId)) {
+          console.error(
+            `\n  "${id}" has no fixture "${fixtureId}". It has:\n` +
+            before.draw.fixtures.map((f) => `    ${f.id.padEnd(28)}  ${f.home} v ${f.away}`).join('\n') +
+            '\n',
+          );
+          process.exit(1);
+        }
+        times[fixtureId] = one;
+      } else if (start) {
+        // Re-laying the rest of the day, which is the shape the afternoon
+        // actually takes: the morning overran, push everything left back.
+        const from = flags.get('from');
+        const rest = before.draw.fixtures.filter((f) => !played.has(f.id));
+        const at = from && from !== 'true' ? rest.findIndex((f) => f.id === from) : 0;
+        if (at < 0) {
+          console.error(
+            `\n  "${id}" has no unplayed fixture "${from}". It has:\n` +
+            rest.map((f) => `    ${f.id.padEnd(28)}  ${f.home} v ${f.away}`).join('\n') +
+            '\n',
+          );
+          process.exit(1);
+        }
+        // Only fixtures with no result. Timing a played one would sort the
+        // past to the front of the list, because the fold puts timed fixtures
+        // ahead of untimed ones.
+        const laid = kickoffTimes(
+          rest.slice(at),
+          start,
+          num(flags, 'every', defaultKickoffMinutes(before.draw.legs, before.draw.halfSeconds)),
+          num(flags, 'pitches', 1),
+        );
+        for (const [fixtureId, when] of laid) times[fixtureId] = when;
+      } else {
+        console.error(
+          '\n  when? pass --fixture <id> --at <time> to move one,' +
+          '\n  or --start <time> to re-lay the rest of the programme\n',
+        );
+        process.exit(1);
+      }
+
+      if (Object.keys(times).length === 0) {
+        console.error('\n  there is nothing left to schedule — every fixture has been played\n');
+        process.exit(1);
+      }
+      record = { kind: 'schedule', times, at, by, reason: why };
+      break;
+    }
+    case 'void-result': {
+      const fixtureId = fixtureFlag();
+      const raw = await loadDraw(root, id);
+      const onDisk = (await loadResults(root, raw)).find((r) => r.fixtureId === fixtureId);
+      const completedAt = flags.get('at') ?? onDisk?.completedAt;
+      if (!completedAt || completedAt === 'true') {
+        console.error(`\n  ${fixtureId} has no result to void\n`);
+        process.exit(1);
+      }
+      record = { kind: 'void-result', fixtureId, completedAt, at, by, reason: why };
+      break;
+    }
+    default:
+      usage();
+      return;
+  }
+
+  const written = await appendAmendment(root, id, record!);
+  const after = foldTournament(
+    await loadDraw(root, id),
+    await loadResults(root, await loadDraw(root, id)),
+    await loadAmendments(root, id),
+  );
+
+  const { Accounts } = await import('./accounts');
+  const accounts = new Accounts({ file: join(leagueData(flags), 'league.db') });
+  try {
+    accounts.record(null, 'tournament.amend', `${id}:${written.kind}`, `${why} (by ${by.slug})`);
+  } finally {
+    accounts.close();
+  }
+
+  console.log(`\n  amendment ${String(written.n).padStart(4, '0')} — ${written.kind}`);
+  console.log(`  ${why}\n`);
+  console.log(
+    `  fixtures:  ${before.draw.fixtures.length} → ${after.draw.fixtures.length}` +
+    `     results: ${before.results.length} → ${after.results.length}`,
+  );
+  // What actually changed, fixture by fixture, because "5 → 5" is not an answer
+  // to "did the thing I meant happen".
+  for (const fixture of after.draw.fixtures) {
+    const was = before.draw.fixtures.find((f) => f.id === fixture.id);
+    if (!was) console.log(`    back:      ${fixture.home} v ${fixture.away}`);
+    else if (was.home !== fixture.home || was.away !== fixture.away) {
+      console.log(`    now:       ${fixture.home} v ${fixture.away}   (was ${was.home} v ${was.away})`);
+    }
+  }
+  for (const fixture of before.draw.fixtures) {
+    if (!after.draw.fixtures.some((f) => f.id === fixture.id)) {
+      console.log(`    gone:      ${fixture.home} v ${fixture.away}`);
+    }
+  }
+  const walkovers = after.results.filter(
+    (r) => !before.results.some((b) => b.fixtureId === r.fixtureId && b.completedAt === r.completedAt),
+  );
+  for (const walkover of walkovers) {
+    const score = walkover.legs[0]!.result.score;
+    console.log(`    awarded:   ${walkover.home} v ${walkover.away}   ${score.violet}-${score.lime}`);
+  }
+  for (const gone of before.results) {
+    if (!after.results.some((r) => r.fixtureId === gone.fixtureId && r.completedAt === gone.completedAt)) {
+      console.log(`    uncounted: ${gone.home} v ${gone.away}`);
+    }
+  }
+  for (const fixture of after.draw.fixtures) {
+    const was = before.draw.fixtures.find((f) => f.id === fixture.id);
+    if (was && was.playAt !== fixture.playAt) {
+      const from = was.playAt ? ` (was ${clockOf(was.playAt)})` : '';
+      console.log(`    at:        ${clockOf(fixture.playAt!)}  ${fixture.home} v ${fixture.away}${from}`);
+    }
+  }
+
+  // A schedule record reorders the draw, so a diff is not the answer — the
+  // whole programme is. It is also the thing an organiser wants to look at
+  // after moving anything in it.
+  if (written.kind === 'schedule') {
+    console.log('\n  the programme now reads:');
+    let round = '';
+    for (const fixture of after.draw.fixtures) {
+      if (fixture.playAt && fixture.playAt !== round) {
+        console.log('');
+        round = fixture.playAt;
+      }
+      const at = fixture.playAt ? `${clockOf(fixture.playAt)}  ` : '  —     ';
+      const done = after.results.some((r) => r.fixtureId === fixture.id) ? '  (played)' : '';
+      console.log(`    ${at}${fixture.home} v ${fixture.away}${done}`);
+    }
+  }
+  console.log('\n  a running league server picks this up within a few seconds\n');
 }
 
 /** Non-loopback IPv4 addresses on this machine, for displaying venue LAN URLs. */
@@ -1365,10 +1791,10 @@ async function teamCommand(flags: Map<string, string>, words: string[]): Promise
         const subs = [sub1 ? 'bot 1' : null, sub2 ? 'bot 2' : null].filter(Boolean).join(', ') || 'none';
         console.log(
           '  ' +
-            t.displayName.padEnd(24) +
-            t.slug.padEnd(20) +
-            String(keys.length).padEnd(8) +
-            subs,
+          t.displayName.padEnd(24) +
+          t.slug.padEnd(20) +
+          String(keys.length).padEnd(8) +
+          subs,
         );
       }
       console.log('');
@@ -1643,15 +2069,21 @@ async function league(flags: Map<string, string>): Promise<void> {
   const name = flags.get('name');
   const id = name && name !== 'true' ? slugifyTeam(name) : null;
 
+  /**
+   * The effective draw, read once here — and re-read by everything that uses it.
+   *
+   * This value is only the starting point. `runDraw` folds the draw again at
+   * the top of every pass and every screen folds on every read, so a correction
+   * appended at eleven in the morning reaches a schedule that started at nine:
+   * a voided fixture stops being offered, a withdrawal's walkovers appear in
+   * the table, and an offer already standing is recalled by `sweepDue`.
+   *
+   * What this value is still needed for is the things that are fixed for the
+   * life of the run — the league, the half length, whether there is a referee —
+   * and as the draw a result is written against.
+   */
   let made: Draw | null = null;
-  if (id) {
-    try {
-      made = await loadDraw(root, id);
-    } catch {
-      console.error(`\n  no draw called "${id}" under ${root}` + `\n  make one:  bun run serve -- draw --name "${id}"\n`);
-      process.exit(1);
-    }
-  }
+  if (id) made = (await openTournament(root, id, true)).draw;
 
   const refereed = (made?.refereed ?? true) && flags.get('headless') !== 'true';
   const site = siteRoot();
@@ -1708,13 +2140,13 @@ async function league(flags: Map<string, string>): Promise<void> {
       .then((info) => {
         if (info?.updateAvailable) console.log(formatUpdateBanner(info));
       })
-      .catch(() => {});
+      .catch(() => { });
   }
   if (!site) console.log(`  (no site built yet — run: bun run build:site)`);
   console.log(
     `  arenas:      up to ${budget.max}` +
-      (budget.set ? '' : ` (computed; this machine guarantees ${budget.guaranteed})`) +
-      ` · ${budget.fixtures} for fixtures · ${budget.practice} for practice`,
+    (budget.set ? '' : ` (computed; this machine guarantees ${budget.guaranteed})`) +
+    ` · ${budget.fixtures} for fixtures · ${budget.practice} for practice`,
   );
   for (const warning of budget.warnings) console.log(`\n  ${warning}`);
   if (made) console.log(`  playing:     ${made.name} — ${made.fixtures.length} fixtures`);
@@ -1757,7 +2189,7 @@ async function league(flags: Map<string, string>): Promise<void> {
    */
   const walkovers = new Map<string, PregameVerdict>();
 
-  const results = await runDraw(root, made, {
+  const playing: Parameters<typeof runDraw>[2] = {
     // Several at once, from the budget. A fixture never queues behind a
     // rehearsal because those slots were never shared with practice.
     slots: budget.fixtures,
@@ -1776,29 +2208,35 @@ async function league(flags: Map<string, string>): Promise<void> {
     // for one would never be played at all.
     ...(refereed
       ? {
-          openPregame: (fixture: Fixture) => server.awaitPregame(fixture, made!.id),
-        }
+        openPregame: (fixture: Fixture) => server.awaitPregame(fixture, made!.id),
+      }
       : {}),
     onFixtureDue: (fixture) => {
       console.log(`  ready:      ${fixture.home} v ${fixture.away}`);
       console.log(`              no pitch is running until the referee opens it at`);
       console.log(`              http://localhost:${port}/referee/m/${fixture.id}`);
     },
+    // Somebody appended a correction while this was sitting in the queue. Said
+    // on the console as well as in the log, because the person who ran `amend`
+    // in the next terminal is usually the person watching this one.
+    onFixtureDropped: (fixture) => {
+      console.log(`  recalled:   ${fixture.home} v ${fixture.away} — the draw has been amended`);
+    },
     // The referee agrees the score, and that is what writes it. Installed only
     // when there is a referee to ask: a headless run has nobody, and waiting
     // for a confirmation that can never arrive would stop the draw dead.
     ...(refereed
       ? {
-          confirmResult: async (fixture: Fixture, result: FixtureResult) => {
-            const score = result.legs
-              .map((leg) => `${leg.result.score.violet}-${leg.result.score.lime}`)
-              .join(', ');
-            console.log(`  full time:  ${fixture.home} v ${fixture.away}  ${score}`);
-            console.log(`              nothing is recorded until it is confirmed at`);
-            console.log(`              http://localhost:${port}/referee/m/${fixture.id}`);
-            return await server.awaitConfirmation(fixture, made!.id, result);
-          },
-        }
+        confirmResult: async (fixture: Fixture, result: FixtureResult) => {
+          const score = result.legs
+            .map((leg) => `${leg.result.score.violet}-${leg.result.score.lime}`)
+            .join(', ');
+          console.log(`  full time:  ${fixture.home} v ${fixture.away}  ${score}`);
+          console.log(`              nothing is recorded until it is confirmed at`);
+          console.log(`              http://localhost:${port}/referee/m/${fixture.id}`);
+          return await server.awaitConfirmation(fixture, made!.id, result);
+        },
+      }
       : {}),
     onFixtureDone: (fixture, result) => {
       server.closeFixture(fixture.id);
@@ -1816,10 +2254,13 @@ async function league(flags: Map<string, string>): Promise<void> {
     },
     onFixtureFailed: (fixture, error) => {
       // Left unwritten on purpose: an unfinished fixture is exactly what an
-      // abandoned one looks like, and it replays as itself on the next run.
+      // abandoned one looks like. What is new is that it no longer waits for
+      // the next boot — the server holds it, an organiser sees it on
+      // /admin/tournaments, and one press puts it back in the schedule.
       server.closeFixture(fixture.id);
+      server.markStalled(fixture.id, error.message);
       console.log(`  could not play ${fixture.home} v ${fixture.away}: ${error.message}`);
-      console.log(`  nothing was recorded; it will be played again on the next run\n`);
+      console.log(`  nothing was recorded — play it again from http://localhost:${port}/admin/tournaments\n`);
     },
     playLeg: async (fixture, seed, leg) => {
       // The hub plays no football. It opens an arena — a child process running
@@ -1880,24 +2321,54 @@ async function league(flags: Map<string, string>): Promise<void> {
         // twenty minutes would be charging them twice.
         ...(leg === 0 && verdict && (verdict.penalties.violet > 0 || verdict.penalties.lime > 0)
           ? {
-              penalties: {
-                ...verdict.penalties,
-                reason: `Awarded in the pre-game room before kick-off.`,
-              },
-            }
+            penalties: {
+              ...verdict.penalties,
+              reason: `Awarded in the pre-game room before kick-off.`,
+            },
+          }
           : {}),
         label: `${fixture.id} leg ${leg + 1}`,
       });
     },
-  });
+  };
 
-  console.log(`\n${formatTable(made, results)}`);
-  // And then it keeps serving. A tournament is a batch job and stops when the
-  // last fixture is played; a league server is a venue's front door, and the
-  // moment the final ends is the moment everyone goes to look at the table.
-  // Closing here took the front page, the schedule and every login down with
-  // it — caught by playing the draw out rather than by any test.
-  console.log(`  every fixture has been played — the site stays up until ctrl-c\n`);
+  /**
+   * A draw that is finished is not a draw that is closed.
+   *
+   * `runDraw` is a batch job: it plays what it can and returns. That used to be
+   * the end of the day — the server kept serving a front page while nothing
+   * could ever put a fixture back into the schedule, so an abandoned match
+   * needed a restart and a `void-result` appended afterwards corrected every
+   * table in the building without anything replaying the match.
+   *
+   * So the run is what ends, not the schedule. `awaitWork` holds here until
+   * there is something to play — an organiser pressing *play it again*, or a
+   * `restore` typed into another terminal — and returns false only when the
+   * server is closing.
+   *
+   * `skip` carries "already given up on" into the next run. Without it every
+   * abandoned fixture would be retried the instant anything else woke the
+   * loop, which is the forever-retry `failed` exists to prevent.
+   */
+  for (;;) {
+    server.scheduleRunning = true;
+    const results = await runDraw(root, made, {
+      ...playing,
+      skip: server.stalledIds(),
+      poke: () => server.awaitPoke(),
+    });
+    server.scheduleRunning = false;
+    console.log(`\n${formatTable(made, results)}`);
+    // And then it keeps serving. A tournament is a batch job and stops when the
+    // last fixture is played; a league server is a venue's front door, and the
+    // moment the final ends is the moment everyone goes to look at the table.
+    // Closing here took the front page, the schedule and every login down with
+    // it — caught by playing the draw out rather than by any test.
+    console.log(`  nothing left to play — the site stays up until ctrl-c`);
+    console.log(`  put a fixture back:  http://localhost:${port}/admin/tournaments\n`);
+    if (!(await server.awaitWork())) return;
+    console.log(`  there is something to play again — carrying on\n`);
+  }
 }
 
 /** The table as it stands, without playing anything. */
@@ -2046,14 +2517,8 @@ function budgetFlags(
 async function table(flags: Map<string, string>): Promise<void> {
   const root = tournamentsRoot(flags);
   const id = slugifyTeam(requireName(flags));
-  let made: Draw;
-  try {
-    made = await loadDraw(root, id);
-  } catch {
-    console.error(`\n  no draw called "${id}" under ${root}\n`);
-    process.exit(1);
-  }
-  console.log(`\n${formatTable(made, await loadResults(root, made))}\n`);
+  const { draw: made, results } = await openTournament(root, id);
+  console.log(`\n${formatTable(made, results)}\n`);
 }
 
 /** "1-5", "1,4,9", "7", or a mix with 0x… 64-bit seeds — a range, a list, or one. */
@@ -2088,7 +2553,7 @@ function usage(): void {
     ladder    play every bot against every other              [--half --rounds --seed]
     bench     measure your robot program and say what is wrong
 
-    draw        write a fixture list for a tournament          [--name --teams --legs --half --seed --headless]
+    draw        write a fixture list for a tournament          [--name --teams --legs --half --seed --headless --start --every --pitches]
     tournament  play a draw through, resumably                 [--name --headless --port --referee-token]
     table       print a tournament's table as it stands        [--name]
 
@@ -2100,6 +2565,7 @@ function usage(): void {
     account       make or repair an account                               [--create --passwd --list --role --name --data]
     invite        issue a single-use registration code                    [--role --team --list --data]
     assign        give a referee the fixture they are to run              [--referee --draw --fixture --remove --list]
+    amend         correct a draw without rewriting it     [void|restore|substitute|withdraw|void-result|schedule|list --draw --fixture --team --with --goals --at --start --why]
     service       manage systemd user background service (Linux)          [install|status|restart|stop|logs|uninstall]
     upgrade       check for and install latest release from GitHub
 
@@ -2184,13 +2650,20 @@ where the folders are kept (default ./workspaces). Needs bun run
                     on tournament, play this run unattended whatever the draw
                     says. Without it, every fixture waits at /referee for a
                     kick-off and plays at wall-clock so a hall can watch
+    --start 09:00   kick-off of the first round, written into the draw. With
+                    --pitches N, N fixtures share a kick-off and no team is
+                    ever given two at once; --every N sets the minutes between
+                    rounds (default: as long as a fixture takes). Times are a
+                    programme, not a trigger — a fixture is due at its time and
+                    still waits for its referee. Move them afterwards with
+                    amend schedule
 
   A draw is written once and never rewritten, and a fixture's result is written
   only when the whole fixture is done — so ctrl-c and re-run carries on at the
   fixture that did not finish, and never counts one twice.
 
   Run a tournament:
-    bun run serve -- draw --name state-round-1 --legs 3
+    bun run serve -- draw --name state-round-1 --legs 3 --start 09:00 --pitches 3
     bun run serve -- tournament --name state-round-1
     bun run serve -- table --name state-round-1
 
@@ -2267,6 +2740,9 @@ if (import.meta.main) {
       break;
     case 'assign':
       await assign(flags);
+      break;
+    case 'amend':
+      await amend(flags, words);
       break;
     case 'service':
     case 'systemd':

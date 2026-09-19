@@ -73,16 +73,19 @@ import {
   type Fixture,
   type FixtureResult,
 } from './tournament';
-import { loadDraw, loadResults } from './tournament-store';
+import { appendAmendment, loadAmendments, loadTournament } from './tournament-store';
+import type { Amendment, DraftAmendment } from './amendments';
 import type { Confirmation } from './tournament-run';
 import { handleDocs } from './api/docs';
 import {
+  AmendBodySchema,
   CreateInviteBodySchema,
   CreateKeyBodySchema,
   LoginBodySchema,
   RegisterBodySchema,
   InviteTeamBodySchema,
   ResetPasswordBodySchema,
+  ReplayBodySchema,
   RunBodySchema,
   SeatActionBodySchema,
   SeatBodySchema,
@@ -229,7 +232,15 @@ interface AwaitingPregame {
   drawId: string;
   /** When it became due, for a page that wants to say how long it has waited. */
   since: string;
-  settle: () => void;
+  /**
+   * Let it be opened, or recall the offer.
+   *
+   * `'dropped'` is what a correction looks like from in here: the fixture has
+   * been voided, or it is no longer between these two teams, so nobody is going
+   * to referee this one. The runner takes it off the schedule without failing
+   * it and asks the corrected draw what to offer instead.
+   */
+  settle: (verdict?: 'dropped') => void;
   fail: (why: Error) => void;
 }
 
@@ -431,13 +442,33 @@ export class LeagueServer {
   /** A demo arena, if one has been opened to fill a hall screen. */
   private demoArena: { arenaId: string; state: ArenaState | null } | null = null;
   private demoPoll: ReturnType<typeof setInterval> | null = null;
+  /**
+   * Fixtures the schedule has given up on, and why.
+   *
+   * A referee abandoning a match makes `runDraw` throw, which leaves the
+   * fixture unwritten — correct, because half a match is not a result — and
+   * takes it out of the run for good, which is also correct: a fixture that
+   * fails for a reason that has not gone away must not be retried forever.
+   *
+   * What was missing is anywhere to *say* so. This is that: the one piece of
+   * schedule state that was only ever in a loop's local variable, kept where a
+   * screen can read it and an organiser can act on it. `requestReplay` is the
+   * act.
+   */
+  private readonly stalled = new Map<string, string>();
+  /** Fixtures an organiser has asked to see played again, since the last ask. */
+  private readonly replayWanted = new Set<string>();
+  /** Woken by `requestReplay`; see `awaitWork`. */
+  private wake: (() => void) | null = null;
+  /** Loops waiting to be told to look again; see `awaitPoke`. */
+  private pokeWaiters: (() => void)[] = [];
   /** Runs only while a pre-game room is open. See `startPregameClock`. */
   private pregameTick: ReturnType<typeof setInterval> | null = null;
   /** True once `close()` has been called, to avoid reopening a demo on shutdown. */
   private closingLeague = false;
 
   constructor(private readonly opts: LeagueOptions) {
-    this.log = opts.log ?? (() => {});
+    this.log = opts.log ?? (() => { });
     this.siteRoot = opts.siteRoot ? resolve(opts.siteRoot) : null;
     this.workspaceRoot = opts.world.workspaceRoot ? resolve(opts.world.workspaceRoot) : null;
     this.submissionsDirectory = resolve(opts.world.submissionsDir ?? 'submissions');
@@ -586,23 +617,23 @@ export class LeagueServer {
         open: (ws) => {
           const { upstream, queue } = ws.data;
           upstream.onmessage = (e) => {
-            try { ws.send(e.data as string | Uint8Array); } catch {}
+            try { ws.send(e.data as string | Uint8Array); } catch { }
           };
           upstream.onclose = () => {
-            try { ws.close(); } catch {}
+            try { ws.close(); } catch { }
           };
           upstream.onerror = () => {
-            try { ws.close(); } catch {}
+            try { ws.close(); } catch { }
           };
           for (const msg of (queue ?? []).splice(0)) {
-            try { ws.send(msg as string | Uint8Array); } catch {}
+            try { ws.send(msg as string | Uint8Array); } catch { }
           }
         },
         message: (ws, data) => {
-          try { ws.data.upstream.send(data as string); } catch {}
+          try { ws.data.upstream.send(data as string); } catch { }
         },
         close: (ws) => {
-          try { ws.data.upstream.close(); } catch {}
+          try { ws.data.upstream.close(); } catch { }
           ws.data.release?.();
         },
       },
@@ -616,6 +647,10 @@ export class LeagueServer {
 
   async close(): Promise<void> {
     this.closingLeague = true;
+    // A schedule waiting for work has to be told, or the loop around `runDraw`
+    // sits through a five-second tick it has no reason to wait for.
+    this.wake?.();
+    for (const settle of this.pokeWaiters.splice(0)) settle();
     this.stopDemoPoll();
     // A hub going down with a fixture unconfirmed writes nothing, which is the
     // same answer as a hub killed mid-match: the fixture replays as itself. It
@@ -701,7 +736,7 @@ export class LeagueServer {
       if (!claim.ok) {
         this.log(
           `[fixture ${fixture.id}] ${slug}'s robot ${number} is in ${claim.held.arenaId}` +
-            ` and could not take the ${side}-${number} seat`,
+          ` and could not take the ${side}-${number} seat`,
         );
       }
     }
@@ -857,8 +892,8 @@ export class LeagueServer {
    * Costs the venue nothing while it waits — that is the difference between
    * this gate and the one at full time.
    */
-  awaitPregame(fixture: Fixture, drawId: string): Promise<void> {
-    return new Promise<void>((settle, fail) => {
+  awaitPregame(fixture: Fixture, drawId: string): Promise<void | 'dropped'> {
+    return new Promise<void | 'dropped'>((settle, fail) => {
       this.due.set(fixture.id, {
         fixture,
         drawId,
@@ -867,6 +902,11 @@ export class LeagueServer {
         fail,
       });
       this.log(`[fixture ${fixture.id}] ready — waiting for a referee to open it`);
+      // Somebody has to watch for a correction appended by another process —
+      // `amend` is a terminal on the same machine, not this one. The clock that
+      // already sweeps pre-game rooms does it, and stops again when there is
+      // nothing waiting.
+      this.startPregameClock();
     });
   }
 
@@ -971,12 +1011,177 @@ export class LeagueServer {
   }
 
   private stopPregameClock(): void {
-    if (this.pregameTick === null || this.pregames.size > 0) return;
+    // Two things ride this clock now: the pre-game rooms and the fixtures
+    // waiting to be opened, which are watched for corrections appended from
+    // outside this process. It stops when both are empty and not before.
+    if (this.pregameTick === null || this.pregames.size > 0 || this.due.size > 0) return;
     clearInterval(this.pregameTick);
     this.pregameTick = null;
   }
 
+  /**
+   * Take back an offer the draw no longer makes.
+   *
+   * A void arrives as a file appended by `amend`, in another process, so the
+   * only way this server hears about it is by looking. A fixture nobody has
+   * opened is the whole of what an amendment reaches: it has no arena, no
+   * referee in front of it and no teams on a pitch, so recalling it costs
+   * nothing and interrupts nobody.
+   *
+   * A room already in pre-game is deliberately left alone. It belongs to its
+   * referee, and a correction that wanted it stopped is a conversation, not a
+   * button.
+   */
+  async sweepDue(): Promise<void> {
+    if (this.due.size === 0) return;
+    const loaded = await this.tournament();
+    if (!loaded) return;
+
+    for (const [id, waiting] of [...this.due]) {
+      const still = loaded.draw.fixtures.find((f) => f.id === id);
+      const settled = loaded.results.some((r) => r.fixtureId === id);
+      const same =
+        still && !settled && still.home === waiting.fixture.home && still.away === waiting.fixture.away;
+      if (same) continue;
+      this.due.delete(id);
+      waiting.settle('dropped');
+      this.log(
+        !still
+          ? `[fixture ${id}] recalled — it is no longer in the draw`
+          : settled
+            ? // A withdrawal decides a fixture without anybody playing it. The
+            // offer has to go with it, or a referee opens a pitch for a match
+            // that already has a score against it.
+            `[fixture ${id}] recalled — it has been decided without football`
+            : `[fixture ${id}] recalled — it is now ${still.home} v ${still.away}`,
+      );
+    }
+    this.stopPregameClock();
+  }
+
+  // ------------------------------------------------------- playing it again
+
+  /**
+   * A fixture the schedule gave up on, said out loud.
+   *
+   * Called by whoever is running the draw when `runDraw` reports a failure —
+   * a referee abandoning a match, an arena that would not come up. Nothing
+   * about the fixture changes: it is unwritten, which is exactly what an
+   * abandoned fixture should look like. What changes is that the venue can now
+   * see it and ask for it.
+   */
+  markStalled(fixtureId: string, why: string): void {
+    this.stalled.set(fixtureId, why);
+  }
+
+  /**
+   * Fixtures the schedule is not to offer again unless somebody asks.
+   *
+   * The register itself, not a copy: `runDraw` asks it on every pass, so
+   * `requestReplay` deleting from it puts a fixture back into the run that is
+   * going on right now rather than the one after it.
+   */
+  stalledIds(): { has(fixtureId: string): boolean } {
+    return this.stalled;
+  }
+
+  /**
+   * Put a fixture back into the schedule.
+   *
+   * The other half of `markStalled`, and the only way out of it: an abandoned
+   * match is abandoned for a reason, so nothing here happens on a timer. The
+   * draw runner picks it up on its next pass, or — if the day had already been
+   * played out and the loop had drained — `awaitWork` starts a fresh one.
+   */
+  requestReplay(fixtureId: string): void {
+    this.stalled.delete(fixtureId);
+    this.replayWanted.add(fixtureId);
+    this.log(`[fixture ${fixtureId}] an organiser has asked for it to be played again`);
+    // Both ends: a schedule that has drained is woken by `awaitWork`, and one
+    // still going is told to look again rather than waiting for the next match
+    // to end. Without the second, a press at half past ten takes effect
+    // whenever the afternoon happens to free a pitch.
+    this.wake?.();
+    for (const settle of this.pokeWaiters.splice(0)) settle();
+  }
+
+  /**
+   * Resolves the next time somebody asks for a fixture to be played again.
+   *
+   * Raced by `runDraw` against the fixtures in flight — see its `poke` option.
+   */
+  awaitPoke(): Promise<void> {
+    return new Promise<void>((settle) => this.pokeWaiters.push(settle));
+  }
+
+  /**
+   * Whether a draw runner is inside `runDraw` at this moment.
+   *
+   * Set by whoever is running the draw. A venue that has played its last
+   * fixture is still serving — the front page, the table, every login — but
+   * nothing is going to be offered until work appears, and an admin screen
+   * that did not say so would look broken rather than finished.
+   */
+  scheduleRunning = false;
+
+  /**
+   * Wait until there is something for a drained schedule to play.
+   *
+   * A `runDraw` is a batch job: it plays what it can and returns, and until now
+   * that was the end of the day — the server stayed up serving a front page
+   * while nothing could ever put a fixture back into the schedule. A
+   * `void-result` appended at that point corrected every table in the building
+   * and nothing replayed the match.
+   *
+   * Two ways work arrives, and they are deliberately different:
+   *
+   * - **Somebody asked.** `requestReplay` wakes this at once, because that is
+   *   this process and there is nothing to poll for.
+   * - **Work appeared.** A `restore` or a `void-result` typed into a terminal
+   *   is another process appending a file, so the only way to hear about it is
+   *   to look — the same reason `sweepDue` exists. A fixture that is merely
+   *   *stalled* does not count as work: it already failed, and a loop that
+   *   retried it on a timer would spend the afternoon reopening a broken pitch.
+   *
+   * Resolves `false` only when the server is closing, which is what ends the
+   * caller's loop.
+   */
+  awaitWork(): Promise<boolean> {
+    if (this.closingLeague) return Promise.resolve(false);
+    return new Promise<boolean>((resolve) => {
+      let timer: ReturnType<typeof setInterval> | null = null;
+      const finish = (answer: boolean): void => {
+        if (timer !== null) clearInterval(timer);
+        this.wake = null;
+        // Every request outstanding has now been handed to a run that is about
+        // to start. Holding them would wake the next wait instantly, forever.
+        if (answer) this.replayWanted.clear();
+        resolve(answer);
+      };
+      this.wake = () => finish(!this.closingLeague);
+      timer = setInterval(() => {
+        if (this.closingLeague) return finish(false);
+        void this.workWaiting().then((yes) => {
+          if (yes) finish(true);
+        });
+      }, PREGAME_TICK_MS);
+      // Never the reason this process stays up: a venue with nothing left to
+      // play and nobody at the keyboard should still be able to exit.
+      timer.unref?.();
+    });
+  }
+
+  /** Whether the effective draw has a fixture to play that nothing gave up on. */
+  private async workWaiting(): Promise<boolean> {
+    if (this.replayWanted.size > 0) return true;
+    const loaded = await this.tournament();
+    if (!loaded) return false;
+    const played = new Set(loaded.results.map((r) => r.fixtureId));
+    return loaded.draw.fixtures.some((f) => !played.has(f.id) && !this.stalled.has(f.id));
+  }
+
   async sweepPregames(): Promise<void> {
+    await this.sweepDue();
     const autoAfter = this.settings.pregame.autoStartMins;
     const margin = this.settings.rules.mercyMargin;
     for (const [id, waiting] of [...this.pregames]) {
@@ -1097,12 +1302,12 @@ export class LeagueServer {
         const entry = resolved[id];
         const pushed: PregameSeat['pushed'] = entry
           ? {
-              hash: await hashSubmission(entry.dir),
-              // No push time is recorded anywhere, so the manifest's own mtime
-              // is the honest answer: it is rewritten by every push and by
-              // nothing else.
-              at: new Date(Bun.file(join(entry.dir, 'manifest.json')).lastModified).toISOString(),
-            }
+            hash: await hashSubmission(entry.dir),
+            // No push time is recorded anywhere, so the manifest's own mtime
+            // is the honest answer: it is rewritten by every push and by
+            // nothing else.
+            at: new Date(Bun.file(join(entry.dir, 'manifest.json')).lastModified).toISOString(),
+          }
           : null;
         const at = this.occupancy.where(slug, number);
         const seated = at !== null && at.arenaId === arenaId && at.seatId === id;
@@ -1139,13 +1344,13 @@ export class LeagueServer {
                     ? { detail: `its program is starting` }
                     : stale
                       ? {
-                          // Which code, not when it was pushed: the folder the
-                          // old push came in has been replaced, so its time is
-                          // gone and the hash is the only honest handle left.
-                          detail:
-                            `still running ${loaded.slice(0, 8)}, not the newest push` +
-                            ` — the referee takes a newer one in by locking the lineup`,
-                        }
+                        // Which code, not when it was pushed: the folder the
+                        // old push came in has been replaced, so its time is
+                        // gone and the hash is the only honest handle left.
+                        detail:
+                          `still running ${loaded.slice(0, 8)}, not the newest push` +
+                          ` — the referee takes a newer one in by locking the lineup`,
+                      }
                       : {}),
         });
       }
@@ -1288,7 +1493,7 @@ export class LeagueServer {
       throw new Error(`the arena would not start the match (${started.status})`);
     }
 
-    for (;;) {
+    for (; ;) {
       await new Promise((done) => setTimeout(done, POLL_MS));
       // An arena that has gone is a fixture that did not finish. Saying so is
       // what lets the draw runner leave it unwritten and replay it, rather than
@@ -1394,7 +1599,7 @@ export class LeagueServer {
           // be let go here or the arena is held open by a connection that was
           // never made — and a held arena is never swept.
           release?.();
-          try { upstream.close(); } catch {}
+          try { upstream.close(); } catch { }
           return new Response('could not open the stream', { status: 400 });
         }
         return;
@@ -2360,6 +2565,21 @@ export class LeagueServer {
    * the failure most likely to happen under pressure.
    */
   private async handleAdmin(req: Request, path: string, actor: Actor): Promise<Response> {
+    // Administering a draw is its own capability, checked before the one that
+    // guards accounts: an organiser who may correct a schedule is not thereby
+    // somebody who may reset passwords, and the table has said so since Phase 6
+    // even though nothing until now asked.
+    if (path === 'tournament' && req.method === 'GET') {
+      if (!can(actor, 'tournament.amend')) return this.refuse(req, actor, '/admin');
+      return Response.json(await this.adminTournament());
+    }
+    if (path === 'tournament/amend' && req.method === 'POST') {
+      return await this.handleAmend(req, actor);
+    }
+    if (path === 'tournament/replay' && req.method === 'POST') {
+      return await this.handleReplay(req, actor);
+    }
+
     if (!can(actor, 'account.manage')) return this.refuse(req, actor, '/admin');
     const admin = actor.id;
 
@@ -2415,6 +2635,235 @@ export class LeagueServer {
     return Response.json({ ok: false, reason: 'no such admin action' }, { status: 404 });
   }
 
+  // ------------------------------------------------------ administering a draw
+
+  /**
+   * The draw as an organiser has to see it to act on it.
+   *
+   * Everything the public schedule shows, plus the three things only somebody
+   * about to change something needs: which fixtures the schedule gave up on,
+   * which are held by a referee and therefore not theirs to touch, and every
+   * correction already appended with who made it and why.
+   */
+  private async adminTournament(): Promise<unknown> {
+    const loaded = await this.tournament();
+    if (!loaded) return { ok: true, tournament: null, fixtures: [], entrants: [], amendments: [] };
+    const { draw, results } = loaded;
+    const byId = new Map(results.map((r) => [r.fixtureId, r]));
+    const held = new Set(this.heldButVoided(draw).map((f) => f.id));
+
+    const fixtures = [...draw.fixtures, ...this.heldButVoided(draw)].map((f) => {
+      const result = byId.get(f.id);
+      const state = this.stateOf(f.id, result !== undefined);
+      return {
+        id: f.id,
+        home: f.home,
+        away: f.away,
+        state,
+        ...(f.playAt ? { playAt: f.playAt } : {}),
+        ...(held.has(f.id) ? { voided: true } : {}),
+        // Nobody's to correct while somebody is standing at it. Said in the
+        // payload rather than worked out again in a browser, because it is the
+        // same rule `heldButVoided` and `sweepDue` keep and it should have one
+        // statement.
+        theirs: state === 'pregame' || state === 'playing' || state === 'confirming' || state === 'opening',
+        ...(this.stalled.has(f.id) ? { stalled: this.stalled.get(f.id) } : {}),
+        ...(result ? resultCard(result) : {}),
+      };
+    });
+
+    let amendments: Amendment[] = [];
+    try {
+      amendments = await loadAmendments(this.opts.tournamentsDir!, this.opts.tournamentId!);
+    } catch {
+      // A record that will not parse already makes `tournament()` return null
+      // and shout in the log, so there is nothing useful to add here.
+    }
+
+    return {
+      ok: true,
+      tournament: summary(draw),
+      entrants: draw.entrants,
+      fixtures,
+      amendments,
+      // A drained schedule is not a broken one, but a screen that did not say
+      // so would look like one.
+      scheduleRunning: this.scheduleRunning,
+    };
+  }
+
+  /**
+   * Every correction the terminal can make, from a browser.
+   *
+   * The same records, through the same `appendAmendment`, folded by the same
+   * `foldTournament` — one writer, so a browser and a shell cannot disagree
+   * about what a draw says. The one difference is `by`: the CLI writes a null
+   * id because a terminal is not an account, and this writes the organiser's,
+   * which is the whole of "the audit log saying who did each one".
+   */
+  private async handleAmend(req: Request, actor: Actor): Promise<Response> {
+    if (!can(actor, 'tournament.amend')) return this.refuse(req, actor, '/admin');
+    if (!this.opts.tournamentsDir || !this.opts.tournamentId) {
+      return badBody('this server is not running a tournament', 400);
+    }
+    const body = await readJsonBody(req);
+    if (!body.ok) return badBody(body.reason, body.status);
+    const validated = validateBody(body.payload, AmendBodySchema, 'every amendment needs a kind and a reason');
+    if (!validated.ok) return validated.response;
+
+    const made = await this.draftAmendment(validated.value, actor);
+    if (!made.ok) return badBody(made.reason, 400);
+
+    const root = this.opts.tournamentsDir;
+    const id = this.opts.tournamentId;
+    const before = await this.tournament();
+    const written = await appendAmendment(root, id, made.record);
+    const after = await this.tournament();
+
+    this.accounts.record(
+      actor.id,
+      'tournament.amend',
+      `${id}:${written.kind}`,
+      `${validated.value.reason} (by ${actor.slug ?? 'unknown'})`,
+    );
+    this.log(`[tournament ${id}] ${written.kind} — ${validated.value.reason} (by ${actor.slug ?? 'unknown'})`);
+
+    return Response.json({
+      ok: true,
+      amendment: written,
+      fixtures: { before: before?.draw.fixtures.length ?? 0, after: after?.draw.fixtures.length ?? 0 },
+      results: { before: before?.results.length ?? 0, after: after?.results.length ?? 0 },
+    });
+  }
+
+  /** A request body turned into the record that will be appended, or a refusal. */
+  private async draftAmendment(
+    body: import('./api/schemas').AmendBody,
+    actor: Actor,
+  ): Promise<{ ok: true; record: DraftAmendment } | { ok: false; reason: string }> {
+    const loaded = await this.tournament();
+    if (!loaded) return { ok: false, reason: 'this server is not running a tournament' };
+    const base = {
+      at: new Date().toISOString(),
+      by: { id: actor.id, slug: actor.slug ?? 'unknown' },
+      reason: body.reason,
+    };
+    const fixture = (): string | null => {
+      const wanted = body.fixtureId;
+      return wanted && loaded.draw.fixtures.some((f) => f.id === wanted) ? wanted : null;
+    };
+    // Held to a name actually in this draw, because the fold matches on the
+    // name and a typo would silently amend nothing at all.
+    const entrant = (name: string | undefined): string | null =>
+      (name && loaded.draw.entrants.find((one) => slugifyTeam(one) === slugifyTeam(name))) || null;
+
+    switch (body.kind) {
+      case 'void': {
+        const id = fixture();
+        if (!id) return { ok: false, reason: 'no such fixture in this draw' };
+        return { ok: true, record: { ...base, kind: 'void', fixtureId: id } };
+      }
+      case 'restore': {
+        if (!body.fixtureId) return { ok: false, reason: 'which fixture?' };
+        if (fixture()) return { ok: false, reason: 'that fixture is not void' };
+        return { ok: true, record: { ...base, kind: 'restore', fixtureId: body.fixtureId } };
+      }
+      case 'substitute': {
+        const team = entrant(body.team);
+        const replacement = body.replacement?.trim();
+        if (!team) return { ok: false, reason: 'no entrant of that name' };
+        if (!replacement) return { ok: false, reason: 'who takes their place?' };
+        return { ok: true, record: { ...base, kind: 'substitute', team, replacement } };
+      }
+      case 'withdraw': {
+        const team = entrant(body.team);
+        if (!team) return { ok: false, reason: 'no entrant of that name' };
+        // The venue's own margin, written into the record so the fold stays
+        // pure over the disk whatever league.json says next season.
+        const goals = body.goals ?? this.settings.rules.mercyMargin ?? 10;
+        return { ok: true, record: { ...base, kind: 'withdraw', team, goals } };
+      }
+      case 'schedule': {
+        const id = fixture();
+        if (!id) return { ok: false, reason: 'no such fixture in this draw' };
+        if (!body.playAt || Number.isNaN(Date.parse(body.playAt))) {
+          return { ok: false, reason: 'that is not a time' };
+        }
+        return {
+          ok: true,
+          record: { ...base, kind: 'schedule', times: { [id]: new Date(body.playAt).toISOString() } },
+        };
+      }
+      case 'void-result': {
+        if (!body.fixtureId) return { ok: false, reason: 'which fixture?' };
+        // Which result, not just which fixture — see `parseAmendment`. Defaults
+        // to the one on disk, which is what "play it again" means.
+        const onDisk = loaded.results.find((r) => r.fixtureId === body.fixtureId);
+        const completedAt = body.completedAt ?? onDisk?.completedAt;
+        if (!completedAt) return { ok: false, reason: 'that fixture has no result to void' };
+        return {
+          ok: true,
+          record: { ...base, kind: 'void-result', fixtureId: body.fixtureId, completedAt },
+        };
+      }
+    }
+  }
+
+  /**
+   * Play it again — one button over two different situations.
+   *
+   * A fixture the schedule gave up on needs only to be offered again. A fixture
+   * that was played and written down has to stop counting first, which is an
+   * amendment like any other and therefore needs a reason. From the organiser's
+   * side both are one decision, so both are one press.
+   */
+  private async handleReplay(req: Request, actor: Actor): Promise<Response> {
+    if (!can(actor, 'tournament.amend')) return this.refuse(req, actor, '/admin');
+    const body = await readJsonBody(req);
+    if (!body.ok) return badBody(body.reason, body.status);
+    const validated = validateBody(body.payload, ReplayBodySchema, 'a fixture and a reason are required');
+    if (!validated.ok) return validated.response;
+    const { fixtureId, reason } = validated.value;
+
+    const loaded = await this.tournament();
+    if (!loaded) return badBody('this server is not running a tournament', 400);
+    const fixture = loaded.draw.fixtures.find((f) => f.id === fixtureId);
+    if (!fixture) return badBody('no such fixture in this draw', 400);
+    if (this.pregames.has(fixtureId) || this.liveFixtures.has(fixtureId) || this.confirming.has(fixtureId)) {
+      // The reach rule: a match somebody is standing at is theirs to end.
+      return badBody('a referee is running that match — they can play it again from their own page', 409);
+    }
+
+    const result = loaded.results.find((r) => r.fixtureId === fixtureId);
+    if (result) {
+      const record: DraftAmendment = {
+        kind: 'void-result',
+        fixtureId,
+        completedAt: result.completedAt,
+        at: new Date().toISOString(),
+        by: { id: actor.id, slug: actor.slug ?? 'unknown' },
+        reason,
+      };
+      await appendAmendment(this.opts.tournamentsDir!, this.opts.tournamentId!, record);
+      this.accounts.record(
+        actor.id,
+        'tournament.amend',
+        `${this.opts.tournamentId}:void-result`,
+        `${reason} (by ${actor.slug ?? 'unknown'})`,
+      );
+    } else {
+      this.accounts.record(
+        actor.id,
+        'tournament.amend',
+        `${this.opts.tournamentId}:replay`,
+        `${reason} (by ${actor.slug ?? 'unknown'})`,
+      );
+    }
+
+    this.requestReplay(fixtureId);
+    return Response.json({ ok: true, wasPlayed: result !== undefined });
+  }
+
   // ------------------------------------------------------------- reading disk
 
   /**
@@ -2424,13 +2873,24 @@ export class LeagueServer {
    * whatever results exist, so a page loaded a second after a fixture finished
    * shows it. That property is the whole reason `deriveTable` can never be
    * stale, and a cache here would be the thing that broke it.
+   *
+   * The draw itself is folded the same way — `draw.json` plus whatever
+   * corrections have been appended beside it — so every surface in this server
+   * agrees about a voided fixture without any of them knowing what an
+   * amendment is.
    */
   private async tournament(): Promise<{ draw: Draw; results: FixtureResult[] } | null> {
     if (!this.opts.tournamentsDir || !this.opts.tournamentId) return null;
     try {
-      const draw = await loadDraw(this.opts.tournamentsDir, this.opts.tournamentId);
-      return { draw, results: await loadResults(this.opts.tournamentsDir, draw) };
-    } catch {
+      const { draw, results } = await loadTournament(this.opts.tournamentsDir, this.opts.tournamentId);
+      return { draw, results };
+    } catch (error) {
+      // A draw that is simply not there is the ordinary case for a league
+      // server hosting no tournament. An amendment that will not parse is not,
+      // and going quiet about it would leave a front page that is blank for no
+      // stated reason.
+      const why = (error as NodeJS.ErrnoException).code === 'ENOENT' ? null : (error as Error).message;
+      if (why) this.log(`[tournament ${this.opts.tournamentId}] cannot be read — ${why}`);
       return null;
     }
   }
@@ -2449,7 +2909,13 @@ export class LeagueServer {
       .slice(0, 6)
       // With its state, because "up next" and "up next, and the referee has not
       // opened it yet" are different things to a hall watching a screen.
-      .map((f) => ({ id: f.id, home: f.home, away: f.away, state: this.stateOf(f.id, false) }));
+      .map((f) => ({
+        id: f.id,
+        home: f.home,
+        away: f.away,
+        state: this.stateOf(f.id, false),
+        ...(f.playAt ? { playAt: f.playAt } : {}),
+      }));
     const recent = [...results]
       .sort((a, b) => b.completedAt.localeCompare(a.completedAt))
       .slice(0, 6)
@@ -2483,13 +2949,45 @@ export class LeagueServer {
    * the check; and the demo arena is not in any draw, so it stops being
    * something a referee is invited to referee.
    */
+  /**
+   * Matches this server is holding that the draw no longer has.
+   *
+   * An amendment reaches a fixture nobody has opened — so a fixture voided
+   * while it is in pre-game or on the pitch keeps its arena, its room and its
+   * referee. But it would also, without this, vanish from the one page that can
+   * end it: a pitch running a match whose address answers "no such fixture",
+   * until the hub itself stops. So a room somebody is standing in outlives the
+   * draw that named it, and says it has been voided instead of disappearing.
+   *
+   * What they do about it is theirs. Abandoning it gives the pitch back and
+   * writes nothing, which is very likely what a void meant; playing it on
+   * writes a result that the fold does not count, which is the same thing said
+   * more slowly.
+   */
+  private heldButVoided(draw: Draw): Fixture[] {
+    const known = new Set(draw.fixtures.map((f) => f.id));
+    const held = [
+      ...[...this.pregames.values()].map((one) => one.fixture),
+      ...[...this.liveFixtures.values()].map((one) => one.fixture),
+    ];
+    const seen = new Set<string>();
+    return held.filter((f) => {
+      if (known.has(f.id) || seen.has(f.id)) return false;
+      seen.add(f.id);
+      return true;
+    });
+  }
+
   private async refereeFixtures(actor: Actor): Promise<unknown> {
     const loaded = await this.tournament();
     if (!loaded) return { ok: true, tournament: null, fixtures: [] };
     const { draw, results } = loaded;
     const byId = new Map(results.map((r) => [r.fixtureId, r]));
 
-    const mine = draw.fixtures.filter((f) => can(actor, 'match.control', fixtureTarget(draw.id, f.id)));
+    const mine = [...draw.fixtures, ...this.heldButVoided(draw)].filter((f) =>
+      can(actor, 'match.control', fixtureTarget(draw.id, f.id)),
+    );
+    const voided = new Set(this.heldButVoided(draw).map((f) => f.id));
     const cards = mine.map((f) => {
       const live = this.liveFor(f.id);
       const result = byId.get(f.id);
@@ -2498,6 +2996,10 @@ export class LeagueServer {
         home: f.home,
         away: f.away,
         state: this.stateOf(f.id, result !== undefined),
+        ...(f.playAt ? { playAt: f.playAt } : {}),
+        // Voided out from under the person running it. Said rather than hidden:
+        // see `heldButVoided`.
+        ...(voided.has(f.id) ? { voided: true } : {}),
         ...(live ? { live, console: `/a/${live.arenaId}/referee/` } : {}),
         ...(result ? resultCard(result) : {}),
       };
@@ -2531,7 +3033,11 @@ export class LeagueServer {
   private async refereeMatch(fixtureId: string, actor: Actor): Promise<{ payload: unknown; status: number }> {
     const loaded = await this.tournament();
     if (!loaded) return { payload: { ok: false, reason: 'this server is not running a tournament' }, status: 200 };
-    const fixture = loaded.draw.fixtures.find((f) => f.id === fixtureId);
+    // A room somebody is standing in outlives the draw that named it, so that a
+    // match voided under its referee can still be abandoned rather than left
+    // running at an address that denies it exists. See `heldButVoided`.
+    const voided = this.heldButVoided(loaded.draw).find((f) => f.id === fixtureId);
+    const fixture = loaded.draw.fixtures.find((f) => f.id === fixtureId) ?? voided;
     if (!fixture) return { payload: { ok: false, reason: 'no such fixture' }, status: 200 };
     if (!can(actor, 'match.control', fixtureTarget(loaded.draw.id, fixture.id))) {
       return { payload: { ok: false, reason: 'this match is not yours to referee' }, status: 403 };
@@ -2558,6 +3064,10 @@ export class LeagueServer {
         tournament: summary(loaded.draw),
         fixture: { id: fixture.id, home: fixture.home, away: fixture.away },
         state: this.stateOf(fixtureId, result !== undefined),
+        // Voided while this room was open. The football is untouched and the
+        // decision is the referee's: abandon it and give the pitch back, or
+        // play it out and have it not count.
+        ...(voided ? { voided: true } : {}),
         live,
         // The break between the halves, while there is one: the one moment
         // during a match when this page has a decision on it rather than a
@@ -2570,36 +3080,36 @@ export class LeagueServer {
         seats,
         pregame: pregame
           ? {
-              since: pregame.since,
-              // When a push stopped reaching this match, or `null` while one
-              // still does. The whistle locks it if this is still null then.
-              lockedAt: pregame.lockedAt,
-              // The clock, in the three parts a referee reads separately: is it
-              // running, what has it awarded, and is there anything to award —
-              // a venue can turn the button off entirely.
-              penalty: {
-                available: this.settings.pregame.penaltyPerMin > 0,
-                perMin: this.settings.pregame.penaltyPerMin,
-                running: pregame.penaltyFrom !== null,
-                since: pregame.penaltyFrom,
-                goals: this.penaltiesFor(fixtureId),
-              },
-              // When this room will start itself, if the venue configured one.
-              autoStartAt:
-                this.settings.pregame.autoStartMins === null
-                  ? null
-                  : new Date(
-                      Date.parse(pregame.since) + this.settings.pregame.autoStartMins * 60_000,
-                    ).toISOString(),
-              // The case the clock cannot answer: with nobody here at all there
-              // is no one to award goals to, so it is a decision rather than a
-              // number. Said out loud so it is somebody's decision rather than
-              // a pitch quietly sitting idle.
-              nobodyHere:
-                seats !== null &&
-                !LeagueServer.ready(seats, slugifyTeam(fixture.home)) &&
-                !LeagueServer.ready(seats, slugifyTeam(fixture.away)),
-            }
+            since: pregame.since,
+            // When a push stopped reaching this match, or `null` while one
+            // still does. The whistle locks it if this is still null then.
+            lockedAt: pregame.lockedAt,
+            // The clock, in the three parts a referee reads separately: is it
+            // running, what has it awarded, and is there anything to award —
+            // a venue can turn the button off entirely.
+            penalty: {
+              available: this.settings.pregame.penaltyPerMin > 0,
+              perMin: this.settings.pregame.penaltyPerMin,
+              running: pregame.penaltyFrom !== null,
+              since: pregame.penaltyFrom,
+              goals: this.penaltiesFor(fixtureId),
+            },
+            // When this room will start itself, if the venue configured one.
+            autoStartAt:
+              this.settings.pregame.autoStartMins === null
+                ? null
+                : new Date(
+                  Date.parse(pregame.since) + this.settings.pregame.autoStartMins * 60_000,
+                ).toISOString(),
+            // The case the clock cannot answer: with nobody here at all there
+            // is no one to award goals to, so it is a decision rather than a
+            // number. Said out loud so it is somebody's decision rather than
+            // a pitch quietly sitting idle.
+            nobodyHere:
+              seats !== null &&
+              !LeagueServer.ready(seats, slugifyTeam(fixture.home)) &&
+              !LeagueServer.ready(seats, slugifyTeam(fixture.away)),
+          }
           : null,
         // The score being asked about, carried rather than read off the arena:
         // an admin may have stopped the child process after full time, and the
@@ -3040,7 +3550,7 @@ export class LeagueServer {
     }
     this.log(
       `[fixture ${fixtureId}] ${verdict === 'confirmed' ? 'confirmed' : 'to be played again'}` +
-        ` by ${account?.slug ?? 'nobody in particular'}`,
+      ` by ${account?.slug ?? 'nobody in particular'}`,
     );
     return Response.json({ ok: true, verdict }, { status: 200 });
   }
@@ -3060,6 +3570,9 @@ export class LeagueServer {
           home: f.home,
           away: f.away,
           state: this.stateOf(f.id, result !== undefined),
+          // A kick-off is a statement of intent, so it rides every card that
+          // shows a fixture and changes nothing about when one starts.
+          ...(f.playAt ? { playAt: f.playAt } : {}),
           ...(result ? resultCard(result) : {}),
         };
       }),
@@ -3085,28 +3598,34 @@ export class LeagueServer {
     return {
       ok: true,
       tournament: summary(loaded.draw),
-      fixture: { id: fixture.id, home: fixture.home, away: fixture.away, seeds: fixture.seeds },
+      fixture: {
+        id: fixture.id,
+        home: fixture.home,
+        away: fixture.away,
+        seeds: fixture.seeds,
+        ...(fixture.playAt ? { playAt: fixture.playAt } : {}),
+      },
       state: this.stateOf(fixtureId, result !== undefined),
       live,
       record: result
         ? {
-            completedAt: result.completedAt,
-            submissions: result.submissions,
-            verdict: fixtureOutcome(result),
-            legs: result.legs.map((leg) => ({
-              seed: leg.seed,
-              // Present only when half-time changed the code, which is what
-              // makes `submissions` above mean "the first half" for this leg.
-              ...(leg.secondHalf ? { secondHalf: leg.secondHalf } : {}),
-              score: leg.result.score,
-              clock: leg.result.clock,
-              goals: leg.result.goals,
-              calls: leg.result.calls,
-              events: leg.result.events,
-              refereeActions: leg.result.refereeActions,
-              robotStats: leg.result.robotStats,
-            })),
-          }
+          completedAt: result.completedAt,
+          submissions: result.submissions,
+          verdict: fixtureOutcome(result),
+          legs: result.legs.map((leg) => ({
+            seed: leg.seed,
+            // Present only when half-time changed the code, which is what
+            // makes `submissions` above mean "the first half" for this leg.
+            ...(leg.secondHalf ? { secondHalf: leg.secondHalf } : {}),
+            score: leg.result.score,
+            clock: leg.result.clock,
+            goals: leg.result.goals,
+            calls: leg.result.calls,
+            events: leg.result.events,
+            refereeActions: leg.result.refereeActions,
+            robotStats: leg.result.robotStats,
+          })),
+        }
         : null,
     };
   }
@@ -3252,6 +3771,7 @@ export class LeagueServer {
         home: f.home,
         away: f.away,
         state: this.stateOf(f.id, result !== undefined),
+        ...(f.playAt ? { playAt: f.playAt } : {}),
         ...(result ? resultCard(result) : {}),
       };
     });

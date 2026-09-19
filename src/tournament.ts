@@ -49,6 +49,16 @@ export interface Fixture {
    * Pitch ball rolling friction multiplier, shared across all legs of this fixture.
    */
   ballFriction?: number;
+  /**
+   * When this fixture is due, as an ISO time, for a venue that prints a
+   * programme.
+   *
+   * A statement of intent and nothing more: a time says when teams should be at
+   * the pitch, and a referee still opens the match. Nothing starts because a
+   * clock said so, which is the property the whole referee-paced design rests
+   * on. Absent from every draw made without times, which is all of them so far.
+   */
+  playAt?: string;
 }
 
 export interface Draw {
@@ -136,6 +146,81 @@ export interface DrawOptions {
    * one records fresh crypto seeds for a competition.
    */
   seed?: SeedInput;
+  /**
+   * Kick-off of the first round, as an ISO time.
+   *
+   * Absent from every draw made without a programme, and when it is absent not
+   * one fixture gains a `playAt` key — a draw written without times is
+   * byte-identical to one written before times existed.
+   */
+  startAt?: string;
+  /** Minutes between rounds. Defaults to how long a fixture actually takes. */
+  everyMinutes?: number;
+  /** How many fixtures share a kick-off, which is how many tables the hall has. */
+  pitches?: number;
+}
+
+/**
+ * How long to leave between rounds when nobody says.
+ *
+ * The length of the football, rounded up to the next five minutes: two halves
+ * per leg, every leg played back to back in the one slot. It is a guess at a
+ * changeover rather than a measurement, which is why `--every` exists — but a
+ * guess that is at least as long as the match is the only one worth making.
+ */
+export function defaultKickoffMinutes(legs: number, halfSeconds: number): number {
+  const minutes = (legs * 2 * halfSeconds) / 60;
+  return Math.max(5, Math.ceil(minutes / 5) * 5);
+}
+
+/**
+ * Deal a fixture list into rounds: fixture id to the time it kicks off.
+ *
+ * A round is `pitches` fixtures that start together, filled greedily from
+ * whatever is left in the order given and **skipping any fixture with a team
+ * already in that round**. A team cannot be at two tables at once: the runner
+ * refuses to play one twice over anyway, so a programme that ignored it would
+ * be a printed lie from the moment it was printed. A round that cannot be
+ * filled carries fewer fixtures and the clock moves on regardless.
+ *
+ * Insertion order is time order, which is what both callers want — `makeDraw`
+ * writing a new programme, and `amend schedule` re-laying the rest of a day.
+ */
+export function kickoffTimes(
+  fixtures: Fixture[],
+  startAt: string,
+  everyMinutes: number,
+  pitches: number,
+): Map<string, string> {
+  const first = Date.parse(startAt);
+  if (Number.isNaN(first)) throw new Error(`a kick-off time must be an ISO timestamp, got ${startAt}`);
+  if (!Number.isFinite(everyMinutes) || everyMinutes < 0) {
+    throw new Error(`minutes between rounds must not be negative, got ${everyMinutes}`);
+  }
+  if (!Number.isInteger(pitches) || pitches < 1) {
+    throw new Error(`pitches must be a whole number of at least 1, got ${pitches}`);
+  }
+
+  const left = [...fixtures];
+  const timed = new Map<string, string>();
+  let at = first;
+  while (left.length > 0) {
+    const busy = new Set<string>();
+    const playAt = new Date(at).toISOString();
+    for (let i = 0; i < left.length && busy.size < pitches * 2; ) {
+      const fixture = left[i]!;
+      if (busy.has(fixture.home) || busy.has(fixture.away)) {
+        i++;
+        continue;
+      }
+      busy.add(fixture.home);
+      busy.add(fixture.away);
+      timed.set(fixture.id, playAt);
+      left.splice(i, 1);
+    }
+    at += everyMinutes * 60_000;
+  }
+  return timed;
 }
 
 
@@ -178,16 +263,21 @@ export function makeDraw(entrants: string[], opts: DrawOptions): Draw {
     }
   }
 
+  const halfSeconds = opts.halfSeconds ?? 300;
+
   return {
     id: slugifyTeam(opts.name),
     name: opts.name,
     league: opts.league ?? 'open',
-    halfSeconds: opts.halfSeconds ?? 300,
+    halfSeconds,
     legs,
     refereed: opts.refereed ?? true,
     createdAt: new Date().toISOString(),
     entrants: unique,
-    fixtures,
+    // Times are written into the draw at creation, which is not a rewrite: it
+    // is what the draw said the first time. Moving one afterwards is an
+    // appended `schedule` amendment, like every other correction.
+    fixtures: opts.startAt ? stamp(fixtures, opts, legs, halfSeconds) : fixtures,
   };
 }
 
@@ -199,6 +289,25 @@ export interface FixtureVerdict {
   awayGoals: number;
   /** From the home side's point of view. */
   outcome: 'won' | 'drawn' | 'lost';
+}
+
+/**
+ * The fixture list in time order, each one carrying its kick-off.
+ *
+ * In time order rather than the order the loop built them, because the fold
+ * would sort it that way on every read anyway and a draw file that reads like
+ * a programme is worth more than one that reads like its own construction.
+ */
+function stamp(fixtures: Fixture[], opts: DrawOptions, legs: number, halfSeconds: number): Fixture[] {
+  const times = kickoffTimes(
+    fixtures,
+    opts.startAt!,
+    opts.everyMinutes ?? defaultKickoffMinutes(legs, halfSeconds),
+    opts.pitches ?? 1,
+  );
+  const order = [...times.keys()];
+  const byId = new Map(fixtures.map((f) => [f.id, f]));
+  return order.map((id) => ({ ...byId.get(id)!, playAt: times.get(id)! }));
 }
 
 /**

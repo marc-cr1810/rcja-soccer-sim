@@ -9,7 +9,7 @@
  * rather than by inspecting a flag that claims it was done.
  */
 
-import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -24,7 +24,7 @@ import {
   type Draw,
   type FixtureResult,
 } from '../src/tournament';
-import { loadDraw, loadResults, saveDraw, saveResult } from '../src/tournament-store';
+import { appendAmendment, loadDraw, loadResults, saveDraw, saveResult } from '../src/tournament-store';
 import { runDraw } from '../src/tournament-run';
 
 async function root(): Promise<string> {
@@ -102,6 +102,91 @@ describe('a draw', () => {
       expect(fixture.ballFriction).toBeGreaterThanOrEqual(0.9);
       expect(fixture.ballFriction).toBeLessThanOrEqual(1.1);
     }
+  });
+});
+
+describe('a draw with a programme', () => {
+  const START = '2026-09-20T09:00:00.000Z';
+
+  it('carries no time at all when nobody asked for one', () => {
+    const draw = makeDraw(['ACT', 'QLD', 'VIC'], { name: 'state' });
+    // Not merely undefined: the key is absent, so a draw written today is
+    // byte-identical to one written before kick-off times existed.
+    for (const fixture of draw.fixtures) expect('playAt' in fixture).toBe(false);
+  });
+
+  it('kicks the first round off at the time it was given', () => {
+    const draw = makeDraw(['ACT', 'QLD', 'VIC'], {
+      name: 'state',
+      startAt: START,
+      everyMinutes: 12,
+    });
+    expect(draw.fixtures[0]!.playAt).toBe(START);
+  });
+
+  it('gives one pitch one fixture at a time, every --every minutes', () => {
+    const draw = makeDraw(['ACT', 'QLD', 'VIC'], {
+      name: 'state',
+      startAt: START,
+      everyMinutes: 12,
+    });
+    const times = draw.fixtures.map((f) => f.playAt!);
+    expect(new Set(times).size).toBe(6);
+    for (let i = 1; i < times.length; i++) {
+      expect(Date.parse(times[i]!) - Date.parse(times[i - 1]!)).toBe(12 * 60_000);
+    }
+  });
+
+  it('starts several fixtures together when the hall has several tables', () => {
+    const draw = makeDraw(['ACT', 'QLD', 'VIC', 'NSW', 'SA', 'WA'], {
+      name: 'nationals',
+      startAt: START,
+      everyMinutes: 15,
+      pitches: 3,
+    });
+    const first = draw.fixtures.filter((f) => f.playAt === START);
+    expect(first).toHaveLength(3);
+  });
+
+  it('never puts a team on two pitches at once', () => {
+    const draw = makeDraw(['ACT', 'QLD', 'VIC', 'NSW', 'SA'], {
+      name: 'nationals',
+      startAt: START,
+      everyMinutes: 15,
+      pitches: 3,
+    });
+    const rounds = new Map<string, string[]>();
+    for (const fixture of draw.fixtures) {
+      const round = rounds.get(fixture.playAt!) ?? [];
+      round.push(fixture.home, fixture.away);
+      rounds.set(fixture.playAt!, round);
+    }
+    for (const [, teams] of rounds) expect(new Set(teams).size).toBe(teams.length);
+    // Every fixture still gets a slot — a clash defers one, it never drops it.
+    expect(draw.fixtures).toHaveLength(20);
+  });
+
+  it('writes the programme in time order, so the file reads like one', () => {
+    const draw = makeDraw(['ACT', 'QLD', 'VIC', 'NSW'], {
+      name: 'state',
+      startAt: START,
+      everyMinutes: 10,
+      pitches: 2,
+    });
+    const times = draw.fixtures.map((f) => Date.parse(f.playAt!));
+    expect([...times].sort((a, b) => a - b)).toEqual(times);
+  });
+
+  it('leaves a fixture the length of a fixture when nobody says otherwise', () => {
+    const draw = makeDraw(['ACT', 'QLD'], {
+      name: 'state',
+      legs: 3,
+      halfSeconds: 300,
+      startAt: START,
+    });
+    // Three legs of two five-minute halves is thirty minutes.
+    const gap = Date.parse(draw.fixtures[1]!.playAt!) - Date.parse(draw.fixtures[0]!.playAt!);
+    expect(gap).toBe(30 * 60_000);
   });
 });
 
@@ -296,6 +381,101 @@ describe('several fixtures at once', () => {
 
     // A venue's front door does not fall over because one match did.
     expect(failures).toEqual(['a-v-b']);
+    expect(results).toHaveLength(1);
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('does not offer what an earlier run gave up on, and plays what it did not', async () => {
+    const dir = await root();
+    const draw = makeDraw(['A', 'B', 'C'], { name: 'second-run' });
+    await saveDraw(dir, draw);
+
+    // The first run: one fixture cannot be played, the rest are.
+    const gaveUp = new Set<string>();
+    await runDraw(dir, draw, {
+      continueOnFailure: true,
+      onFixtureFailed: (fixture) => gaveUp.add(fixture.id),
+      playLeg: async (fixture) => {
+        if (fixture.id === 'a-v-b') throw new Error('that arena died');
+        return { result: scored(1, 0), submissions: {} };
+      },
+    });
+    expect([...gaveUp]).toEqual(['a-v-b']);
+
+    // The second run, over the same draw with the same set carried across.
+    // Without `skip` this would retry the broken fixture the instant anything
+    // else woke the loop, which is the forever-retry `failed` exists to stop.
+    const offered: string[] = [];
+    await runDraw(dir, draw, {
+      skip: gaveUp,
+      continueOnFailure: true,
+      playLeg: async (fixture) => {
+        offered.push(fixture.id);
+        return { result: scored(1, 0), submissions: {} };
+      },
+    });
+    expect(offered).toEqual([]);
+
+    // And taken out of the set — somebody has said to try it again — it plays.
+    gaveUp.delete('a-v-b');
+    await runDraw(dir, draw, {
+      skip: gaveUp,
+      playLeg: async (fixture) => {
+        offered.push(fixture.id);
+        return { result: scored(1, 0), submissions: {} };
+      },
+    });
+    expect(offered).toEqual(['a-v-b']);
+    expect(await loadResults(dir, draw)).toHaveLength(6);
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('offers a fixture the moment the caller takes it back out, mid-run', async () => {
+    const dir = await root();
+    const draw = makeDraw(['A', 'B', 'C'], { name: 'un-stalled' });
+    await saveDraw(dir, draw);
+
+    const gaveUp = new Set<string>(['a-v-b']);
+    const offered: string[] = [];
+    let poke: (() => void) | null = null;
+
+    await runDraw(dir, draw, {
+      skip: gaveUp,
+      // Somebody presses "play it again" while the run is still going. The
+      // loop is asked, rather than holding a copy taken when it started.
+      poke: () => new Promise<void>((settle) => (poke = settle)),
+      playLeg: async (fixture) => {
+        offered.push(fixture.id);
+        if (offered.length === 5) {
+          gaveUp.delete('a-v-b');
+          // Deliberately after the set changes: the poke is the signal to look
+          // again, not the thing that changes the answer.
+          queueMicrotask(() => poke?.());
+        }
+        return { result: scored(1, 0), submissions: {} };
+      },
+    });
+
+    expect(offered).toContain('a-v-b');
+    expect(await loadResults(dir, draw)).toHaveLength(6);
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('never reports a skipped fixture as one that failed in this run', async () => {
+    const dir = await root();
+    const draw = makeDraw(['A', 'B'], { name: 'skipped-not-failed' });
+    await saveDraw(dir, draw);
+
+    const failures: string[] = [];
+    // No `continueOnFailure`, so a fixture that actually failed would throw.
+    // A skipped one was never offered, so there is nothing to raise.
+    const results = await runDraw(dir, draw, {
+      skip: new Set(['a-v-b']),
+      onFixtureFailed: (fixture) => failures.push(fixture.id),
+      playLeg: async () => ({ result: scored(2, 0), submissions: {} }),
+    });
+
+    expect(failures).toEqual([]);
     expect(results).toHaveLength(1);
     await rm(dir, { recursive: true, force: true });
   });
@@ -743,6 +923,179 @@ describe('a match the referee called off', () => {
     expect(await loadResults(dir, draw)).toEqual([]);
     expect(failures[0]).toContain('abandoned');
     expect(failures[0]).toContain('field damaged');
+    await rm(dir, { recursive: true, force: true });
+  });
+});
+
+/**
+ * A day that is corrected while it is being played.
+ *
+ * A draw is immutable, so a correction is a record appended beside it — and
+ * until this slice the loop went on playing the draw it was handed at nine in
+ * the morning whatever anybody appended afterwards. What these defend is the
+ * narrow version of "it reaches": a fixture **nobody has opened** follows the
+ * corrected draw, and one that is already being refereed does not.
+ */
+describe('a draw amended while it runs', () => {
+  it('never plays a fixture voided while it waited for its referee', async () => {
+    const dir = await root();
+    const draw = makeDraw(['A', 'B', 'C'], { name: 'voided-mid-run' });
+    await saveDraw(dir, draw);
+
+    const played: string[] = [];
+    const dropped: string[] = [];
+    const doomed = 'a-v-b';
+
+    const results = await runDraw(dir, draw, {
+      playLeg: async (fixture) => {
+        played.push(fixture.id);
+        return { result: scored(1, 0), submissions: {} };
+      },
+      onFixtureDropped: (fixture) => dropped.push(fixture.id),
+      openPregame: async (fixture) => {
+        // The organiser gets to it while this one is sitting in the queue —
+        // which is exactly when a fixture is amendable and nothing is running.
+        if (fixture.id === doomed) {
+          await appendAmendment(dir, draw.id, {
+            kind: 'void',
+            fixtureId: doomed,
+            at: new Date().toISOString(),
+            by: { id: null, slug: 'organiser' },
+            reason: 'pitch flooded',
+          });
+          return 'dropped';
+        }
+      },
+    });
+
+    expect(played).not.toContain(doomed);
+    expect(dropped).toEqual([doomed]);
+    // Everything else in the draw still played, and the voided fixture is not
+    // in the results the run reports.
+    expect(played).toHaveLength(draw.fixtures.length - 1);
+    expect(results.some((r) => r.fixtureId === doomed)).toBe(false);
+    expect(await loadResults(dir, draw)).toHaveLength(draw.fixtures.length - 1);
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('frees the teams of a recalled fixture at once', async () => {
+    const dir = await root();
+    const draw = makeDraw(['A', 'B'], { name: 'recalled-frees-teams' });
+    await saveDraw(dir, draw);
+
+    // Both fixtures are between the same two teams, so the second can only be
+    // offered once the first has let go of them.
+    const offered: string[] = [];
+    const results = await runDraw(dir, draw, {
+      playLeg: async () => ({ result: scored(0, 0), submissions: {} }),
+      openPregame: async (fixture) => {
+        offered.push(fixture.id);
+        if (offered.length === 1) {
+          await appendAmendment(dir, draw.id, {
+            kind: 'void',
+            fixtureId: fixture.id,
+            at: new Date().toISOString(),
+            by: { id: null, slug: 'organiser' },
+            reason: 'no time left in the day',
+          });
+          return 'dropped';
+        }
+      },
+    });
+
+    expect(offered).toHaveLength(2);
+    expect(results).toHaveLength(1);
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('stops offering a withdrawn team, and counts their walkovers instead', async () => {
+    const dir = await root();
+    const draw = makeDraw(['A', 'B', 'C'], { name: 'withdrawn-mid-run' });
+    await saveDraw(dir, draw);
+
+    const played: string[] = [];
+    let withdrawn = false;
+
+    const results = await runDraw(dir, draw, {
+      playLeg: async (fixture) => {
+        played.push(fixture.id);
+        return { result: scored(1, 0), submissions: {} };
+      },
+      openPregame: async (fixture) => {
+        // After one real match, A goes home. Their remaining fixtures should
+        // never be offered again.
+        if (!withdrawn && played.length >= 1) {
+          withdrawn = true;
+          await appendAmendment(dir, draw.id, {
+            kind: 'withdraw',
+            team: 'A',
+            goals: 5,
+            at: new Date().toISOString(),
+            by: { id: null, slug: 'organiser' },
+            reason: 'their bus did not arrive',
+          });
+          if (fixture.home === 'A' || fixture.away === 'A') return 'dropped';
+        }
+      },
+    });
+
+    const afterWithdrawal = played.slice(1);
+    expect(afterWithdrawal.some((id) => id.includes('a'))).toBe(false);
+    // The run reports the tournament as it stands: the walkovers count, which
+    // is what keeps games played comparable across the table.
+    expect(results).toHaveLength(draw.fixtures.length);
+    const walkovers = results.filter((r) => r.legs[0]!.result.mercy === true);
+    expect(walkovers.length).toBeGreaterThan(0);
+    // Only the team that went home is walked over, and the game they did play
+    // before going home is still a played game.
+    for (const walkover of walkovers) expect(walkover.home === 'A' || walkover.away === 'A').toBe(true);
+    expect(results.find((r) => r.fixtureId === played[0])!.legs[0]!.result.mercy).toBeUndefined();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('re-offers a fixture under the names it has been substituted to', async () => {
+    const dir = await root();
+    const draw = makeDraw(['A', 'B'], { name: 'substituted-mid-run' });
+    await saveDraw(dir, draw);
+
+    const offers: string[] = [];
+    await runDraw(dir, draw, {
+      playLeg: async () => ({ result: scored(0, 0), submissions: {} }),
+      openPregame: async (fixture) => {
+        offers.push(`${fixture.home} v ${fixture.away}`);
+        if (offers.length === 1) {
+          await appendAmendment(dir, draw.id, {
+            kind: 'substitute',
+            team: 'B',
+            replacement: 'D',
+            at: new Date().toISOString(),
+            by: { id: null, slug: 'organiser' },
+            reason: 'B withdrew and D took their place',
+          });
+          return 'dropped';
+        }
+      },
+    });
+
+    expect(offers[0]).toBe('A v B');
+    // The same fixture, offered again as the draw now reads it.
+    expect(offers[1]).toBe('A v D');
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('keeps playing the last good draw when a record will not parse', async () => {
+    const dir = await root();
+    const draw = makeDraw(['A', 'B'], { name: 'broken-record' });
+    await saveDraw(dir, draw);
+    await mkdir(join(dir, draw.id, 'amendments'), { recursive: true });
+    await writeFile(join(dir, draw.id, 'amendments', '0001.json'), '{ this is not json');
+
+    // A venue's schedule does not stop because a file was caught half-written.
+    // Every screen that reads a tournament is already loud about it.
+    const results = await runDraw(dir, draw, {
+      playLeg: async () => ({ result: scored(2, 0), submissions: {} }),
+    });
+    expect(results).toHaveLength(2);
     await rm(dir, { recursive: true, force: true });
   });
 });

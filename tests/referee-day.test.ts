@@ -19,7 +19,7 @@ import { join, resolve } from 'node:path';
 import { LeagueServer } from '../src/league';
 import type { PregameVerdict } from '../src/pregame';
 import { makeDraw } from '../src/tournament';
-import { saveDraw } from '../src/tournament-store';
+import { appendAmendment, saveDraw } from '../src/tournament-store';
 
 const PYTHON_LIB_DIR = resolve(import.meta.dirname, '../python');
 const PASSWORD = 'a-long-enough-password';
@@ -38,6 +38,8 @@ interface Started {
   drawId: string;
   /** Where a seeded push goes, for the tests that need code on disk. */
   submissionsDir: string;
+  /** Where the draw lives, for the tests that append a correction to it. */
+  tournamentsDir: string;
 }
 
 /**
@@ -65,7 +67,7 @@ async function start(withDraw = true): Promise<Started> {
     world: { realtime: false, submissionsDir, workspacesDir, pythonLibDir: PYTHON_LIB_DIR },
   });
   servers.push(server);
-  return { server, port: await server.listen(), drawId: draw.id, submissionsDir };
+  return { server, port: await server.listen(), drawId: draw.id, submissionsDir, tournamentsDir };
 }
 
 async function signIn(started: Started, role: 'referee' | 'admin', name: string): Promise<string> {
@@ -407,7 +409,7 @@ describe('agreeing the score', () => {
 });
 
 /** A fixture whose turn has come, exactly as the draw runner leaves it. */
-function whenDue(started: Started, fixtureId: string): Promise<void> {
+function whenDue(started: Started, fixtureId: string): Promise<void | 'dropped'> {
   const [home, away] = fixtureId.split('-v-');
   return started.server.awaitPregame(
     { id: fixtureId, home: home!, away: away!, seeds: [1] } as never,
@@ -763,5 +765,126 @@ describe('the pre-game room', () => {
     // scope check rather than a rule invented for pre-game.
     const res = await post(started, '/api/team/match/alpha-v-bravo/arrive', charlie);
     expect(res.status).toBe(403);
+  });
+});
+
+/**
+ * A correction appended by somebody else, while this server is running.
+ *
+ * `amend` is a terminal on the same machine, not this process, so the only way
+ * a league server hears about a void is by looking — which is what `sweepDue`
+ * does, on the clock that already sweeps pre-game rooms. What these defend is
+ * the reach: a fixture **nobody has opened** follows the corrected draw, and a
+ * room somebody is standing in does not.
+ */
+describe('a draw corrected while the server runs', () => {
+  /** Append a record the way `amend` does, from outside the server. */
+  async function correct(started: Started, record: Parameters<typeof appendAmendment>[2]): Promise<void> {
+    await appendAmendment(started.tournamentsDir, started.drawId, record);
+  }
+
+  it('shows a kick-off on every page that shows a fixture', async () => {
+    const started = await start();
+    const cookie = await signIn(started, 'admin', 'Organiser');
+    give(started, 'organiser', 'alpha-v-bravo');
+
+    // Before: nothing anywhere carries a time, and the key is absent rather
+    // than null, so a venue with no programme reads exactly as it did.
+    const bare = await get(started, '/api/schedule', cookie);
+    expect(bare.payload.fixtures.every((f: { playAt?: string }) => f.playAt === undefined)).toBe(true);
+
+    const nine = '2026-09-20T09:00:00.000Z';
+    await correct(started, {
+      kind: 'schedule',
+      times: { 'alpha-v-bravo': nine },
+      at: new Date().toISOString(),
+      by: { id: null, slug: 'organiser' },
+      reason: 'the programme is out',
+    });
+
+    const schedule = await get(started, '/api/schedule', cookie);
+    // A timed fixture sorts to the front of the effective draw, so it is also
+    // the one the schedule lists first.
+    expect(schedule.payload.fixtures[0].id).toBe('alpha-v-bravo');
+    expect(schedule.payload.fixtures[0].playAt).toBe(nine);
+
+    const front = await get(started, '/api/front', cookie);
+    expect(front.payload.upcoming[0].playAt).toBe(nine);
+
+    const team = await get(started, '/api/team/alpha', cookie);
+    expect(team.payload.fixtures.find((f: { id: string }) => f.id === 'alpha-v-bravo').playAt).toBe(nine);
+
+    const mine = await get(started, '/api/referee/fixtures', cookie);
+    expect(mine.payload.fixtures.find((f: { id: string }) => f.id === 'alpha-v-bravo').playAt).toBe(nine);
+
+    const one = await get(started, '/api/match/alpha-v-bravo', cookie);
+    expect(one.payload.fixture.playAt).toBe(nine);
+  });
+
+  it('recalls a fixture voided while it waited for a referee', async () => {
+    const started = await start();
+    const waiting = whenDue(started, 'alpha-v-bravo');
+
+    await correct(started, {
+      kind: 'void',
+      fixtureId: 'alpha-v-bravo',
+      at: new Date().toISOString(),
+      by: { id: null, slug: 'organiser' },
+      reason: 'pitch flooded',
+    });
+    await started.server.sweepDue();
+
+    // The runner hears "this offer is withdrawn" rather than a failure, so the
+    // fixture is neither played nor reported as broken.
+    expect(await waiting).toBe('dropped');
+  });
+
+  it('recalls one the draw has decided without football', async () => {
+    const started = await start();
+    const waiting = whenDue(started, 'alpha-v-bravo');
+
+    // A withdrawal leaves the fixture in the draw and puts a walkover against
+    // it. Without this the room stayed open and a referee could spawn a pitch
+    // for a match that already had a score — found by running it, not by a test.
+    await correct(started, {
+      kind: 'withdraw',
+      team: 'Alpha',
+      goals: 5,
+      at: new Date().toISOString(),
+      by: { id: null, slug: 'organiser' },
+      reason: 'their bus did not arrive',
+    });
+    await started.server.sweepDue();
+
+    expect(await waiting).toBe('dropped');
+  });
+
+  it('leaves a room its referee is standing in, and says it has been voided', async () => {
+    const started = await start();
+    const cookie = await signIn(started, 'admin', 'Organiser');
+    const room = inPregame(started, 'alpha-v-bravo');
+
+    await correct(started, {
+      kind: 'void',
+      fixtureId: 'alpha-v-bravo',
+      at: new Date().toISOString(),
+      by: { id: null, slug: 'organiser' },
+      reason: 'voided while its referee had it',
+    });
+    await started.server.sweepDue();
+
+    // Untouched: no admin button pulls a pitch out from under a whistle.
+    const page = await get(started, '/api/referee/match/alpha-v-bravo', cookie);
+    expect(page.payload.ok).toBe(true);
+    expect(page.payload.state).toBe('pregame');
+    // But said out loud, and still on the list — otherwise the one page that
+    // can end this match denies the match exists.
+    expect(page.payload.voided).toBe(true);
+    const list = await get(started, '/api/referee/fixtures', cookie);
+    const card = list.payload.fixtures.find((f: { id: string }) => f.id === 'alpha-v-bravo');
+    expect(card.voided).toBe(true);
+
+    await started.server.close();
+    await room.catch(() => {});
   });
 });

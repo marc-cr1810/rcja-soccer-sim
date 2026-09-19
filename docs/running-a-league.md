@@ -165,6 +165,50 @@ Stop it with ctrl-c and start it again and it picks up where it stopped, having
 counted nothing twice. A fixture interrupted halfway leaves nothing behind and
 is replayed.
 
+## Correcting a draw, and playing a fixture again
+
+`/admin/tournaments` is the organiser's view of the draw. It shows the
+programme with every fixture's state, the entrants, and every correction
+already made to the draw — who made it, when, and **why**, because nothing here
+is written without a reason typed into the box. A button is much easier to press
+by accident than a command is to type.
+
+| what | when to press it |
+|---|---|
+| **Play it again** | the fixture was abandoned, or was played and scored wrong |
+| **Move** | give it a new kick-off time |
+| **Void** | it is not going to be played at all |
+| **Restore** | you voided it and were wrong |
+| **Withdraw** (on an entrant) | a team has gone home; their unplayed fixtures are awarded against them |
+| **Substitute** (on an entrant) | somebody else takes their place in every fixture they have not played |
+
+These are the same records the `amend` command appends, through the same
+writer, so a browser and a shell cannot make a draw say two different things.
+The only difference is that a correction made here names the account that made
+it, and one made from a terminal names the Unix user.
+
+**A match somebody is standing at is not yours to correct.** A fixture in
+pre-game, on the pitch, or waiting on its referee's confirmation shows no
+buttons and says *a referee has it*. Ending it is theirs — from their own page —
+and no admin button pulls a pitch out from under a whistle.
+
+### An abandoned match, and a schedule that has drained
+
+A referee who abandons a match leaves it unwritten, which is right: half a match
+is not a result. The schedule then stops offering it for the rest of the run,
+which is also right — a fixture that fails for a reason that has not gone away
+should not be retried in a loop.
+
+What that used to mean is that re-running it needed the server restarted, taking
+the front page, every login and every practice field down with it. Now the
+fixture sits on `/admin/tournaments` marked *abandoned*, with the referee's
+reason beside it, and **Play it again** puts it straight back into the schedule.
+
+The same holds after the last fixture has been played. The run ends; the
+schedule does not. Voiding a result — from the browser or with `amend
+void-result` in a terminal — wakes it again within a few seconds and the fixture
+is offered to a referee, with nothing restarted.
+
 ## Arenas, and how many of them
 
 An **arena** is one child process holding one world: a fixture from the draw, a

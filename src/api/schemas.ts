@@ -207,6 +207,10 @@ export const ScheduleFixtureSchema = z
     home: z.string(),
     away: z.string(),
     state: z.enum(['played', 'playing', 'upcoming']),
+    playAt: z
+      .string()
+      .optional()
+      .openapi({ description: 'When this fixture is due, ISO. A programme, not a trigger — a fixture still waits for its referee' }),
     fixtureId: z.string().optional().openapi({ description: 'Present when state=played' }),
     homeScore: z.number().int().optional().openapi({ description: 'Present when state=played' }),
     awayScore: z.number().int().optional().openapi({ description: 'Present when state=played' }),
@@ -597,6 +601,44 @@ export const ResetPasswordBodySchema = z
   .openapi('ResetPasswordBody', { description: 'Body for POST /api/admin/accounts/{id}/password' });
 export type ResetPasswordBody = z.infer<typeof ResetPasswordBodySchema>;
 
+export const AmendBodySchema = z
+  .object({
+    kind: z.enum(['void', 'restore', 'substitute', 'withdraw', 'schedule', 'void-result']),
+    reason: z
+      .string()
+      .trim()
+      .min(1)
+      .openapi({ description: 'Required by every kind. An amendment without a reason is an edit' }),
+    fixtureId: z.string().optional().openapi({ description: 'void, restore, void-result, schedule' }),
+    team: z.string().optional().openapi({ description: 'substitute, withdraw' }),
+    replacement: z.string().optional().openapi({ description: 'substitute' }),
+    goals: z
+      .number()
+      .int()
+      .min(1)
+      .optional()
+      .openapi({ description: "withdraw; defaults to the venue's own mercy margin" }),
+    playAt: z.string().optional().openapi({ description: 'schedule — ISO kick-off for one fixture' }),
+    completedAt: z
+      .string()
+      .optional()
+      .openapi({ description: 'void-result; defaults to the result currently on disk' }),
+  })
+  .openapi('AmendBody', { description: 'Body for POST /api/admin/tournament/amend' });
+export type AmendBody = z.infer<typeof AmendBodySchema>;
+
+export const ReplayBodySchema = z
+  .object({
+    fixtureId: z.string(),
+    reason: z
+      .string()
+      .trim()
+      .min(1)
+      .openapi({ description: 'Required. A played fixture is disowned by an amendment, which needs one' }),
+  })
+  .openapi('ReplayBody', { description: 'Body for POST /api/admin/tournament/replay' });
+export type ReplayBody = z.infer<typeof ReplayBodySchema>;
+
 export const SetDisabledBodySchema = z
   .object({ disabled: z.boolean().optional() })
   .openapi('SetDisabledBody', { description: 'Body for POST /api/admin/accounts/{id}/disabled' });
@@ -791,7 +833,15 @@ export const LiveFixtureSchema = z
 export type LiveFixture = z.infer<typeof LiveFixtureSchema>;
 
 export const FrontUpcomingSchema = z
-  .object({ id: z.string(), home: z.string(), away: z.string() })
+  .object({
+    id: z.string(),
+    home: z.string(),
+    away: z.string(),
+    playAt: z
+      .string()
+      .optional()
+      .openapi({ description: 'When this fixture is due, ISO. A programme, not a trigger — a fixture still waits for its referee' }),
+  })
   .openapi('FrontUpcoming', { description: 'A fixture about to play' });
 export type FrontUpcoming = z.infer<typeof FrontUpcomingSchema>;
 
@@ -845,6 +895,10 @@ export const MatchResponseSchema = z
       home: z.string(),
       away: z.string(),
       seeds: z.array(SeedSchema),
+      playAt: z
+        .string()
+        .optional()
+        .openapi({ description: 'When this fixture is due, ISO. A programme, not a trigger' }),
     }),
     state: z.enum(['played', 'playing', 'upcoming']),
     live: LiveFixtureSchema.nullable(),

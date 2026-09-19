@@ -825,6 +825,11 @@ the code that plays.
 team's mis-uploaded file, and re-runs an abandoned game — all from a browser,
 with the audit log saying who did each one.*
 
+**In progress**, in slices — [PHASE-12.md](PHASE-12.md) is the working record:
+what each slice settled, what running it caught, and what is left. Rescheduling
+and re-running an abandoned game are done and were verified live; the
+mis-uploaded file is the clause with nothing behind it yet.
+
 Last, because it is the only one of these whose absence can be worked around
 with a terminal and an ssh session. Not optional, though: at a real event the
 person holding this screen is the one being shouted at.

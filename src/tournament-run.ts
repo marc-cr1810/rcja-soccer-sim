@@ -47,7 +47,7 @@ import {
   type FixtureResult,
   type LegRecord,
 } from './tournament';
-import { loadResults, saveResult } from './tournament-store';
+import { loadResults, loadTournament, saveResult } from './tournament-store';
 
 export interface PlayedLeg {
   result: MatchResult;
@@ -85,9 +85,16 @@ export interface RunOptions {
    * nothing at all. Left out, a fixture is played the moment its turn comes,
    * exactly as before, which is what a batch `tournament` and every test want.
    *
+   * Resolving `'dropped'` **recalls the offer**: this fixture is not the
+   * fixture it was when it went out — voided, or substituted under new names —
+   * so it is not played, not failed, and its teams are free at once. The loop
+   * decides whether a fresh offer goes out, by asking the draw as it now
+   * stands. That is how a correction made at eleven in the morning reaches a
+   * schedule that started at nine.
+   *
    * Throwing leaves the fixture unwritten and unplayed, as a failure.
    */
-  openPregame?: (fixture: Fixture) => Promise<void>;
+  openPregame?: (fixture: Fixture) => Promise<void | 'dropped'>;
   /** Called when a fixture's turn has come and it is waiting to be opened. */
   onFixtureDue?: (fixture: Fixture) => void;
   /** Called once a fixture has a pitch and is about to play its first leg. */
@@ -96,6 +103,8 @@ export interface RunOptions {
   onFixtureDone?: (fixture: Fixture, result: FixtureResult) => void;
   /** Called when a played fixture was sent back to be played again. */
   onFixtureReplay?: (fixture: Fixture) => void;
+  /** Called when an offer was recalled because the draw was corrected under it. */
+  onFixtureDropped?: (fixture: Fixture) => void;
   /** Called when a fixture could not be played. It stays unwritten and replays. */
   onFixtureFailed?: (fixture: Fixture, error: Error) => void;
   /**
@@ -127,6 +136,29 @@ export interface RunOptions {
    * 50%, so it belongs in the record beside the seed and the code hashes.
    */
   conditions?: FixtureResult['conditions'];
+  /**
+   * Whether a fixture is one somebody has given up on — asked, not snapshotted.
+   *
+   * Handing this over moves the whole decision to the caller: this loop reports
+   * failures through `onFixtureFailed` and stops deciding for itself which of
+   * them to offer again. A caller that supplies it **must** add a fixture when
+   * it is told one failed, or a match that cannot be played is offered forever.
+   *
+   * It is asked on every pass rather than read once, and that is the point. A
+   * league server holds the set, so an organiser pressing *play it again*
+   * halfway through a competition day puts the fixture back into **this** run
+   * rather than the next one — which, given that there may not be a next one,
+   * is the difference between the button working and not.
+   */
+  skip?: { has(fixtureId: string): boolean };
+  /**
+   * Resolves when the caller thinks this loop should look again.
+   *
+   * Raced against the fixtures in flight. Without it the loop only reconsiders
+   * when a match ends, so a fixture taken back out of `skip` while every other
+   * offer is sitting with a referee would wait for one of them to finish.
+   */
+  poke?: () => Promise<unknown>;
 }
 
 export async function runDraw(
@@ -136,6 +168,30 @@ export async function runDraw(
 ): Promise<FixtureResult[]> {
   const results = await loadResults(root, draw);
   const slots = Math.max(1, opts.slots ?? 1);
+
+  /**
+   * The draw as it stands right now, corrections and all.
+   *
+   * Re-read rather than closed over, because a competition day is corrected
+   * while it runs: a team goes home at lunch and their remaining fixtures stop
+   * being fixtures. Before this, the loop played the draw it was handed at nine
+   * in the morning whatever anybody appended to it afterwards.
+   *
+   * A re-read that fails leaves the last good view in place. A venue's schedule
+   * must not stop because a file was caught half-written, and a record that
+   * will not parse is already shouted about by every screen that reads one.
+   */
+  let effective: { draw: Draw; results: FixtureResult[] } = { draw, results };
+  const refresh = async (): Promise<boolean> => {
+    try {
+      const fresh = await loadTournament(root, draw.id);
+      effective = { draw: fresh.draw, results: fresh.results };
+      return true;
+    } catch {
+      // Keep playing what we were playing.
+      return false;
+    }
+  };
 
   /** In flight now, by fixture id. */
   const playing = new Map<string, Promise<void>>();
@@ -147,18 +203,37 @@ export async function runDraw(
    * Left unwritten, so a later run replays them from the start — but not
    * retried here, because a fixture that fails for a reason that has not gone
    * away would otherwise be retried forever.
+   *
+   * Only what failed *here*, which is what the failure raised at the end
+   * reports. Whether a failed fixture is offered again is `givenUp`'s
+   * question, and a caller that supplies `skip` answers it instead.
    */
   const failed = new Map<string, Error>();
+  /**
+   * Whether this run has stopped offering a fixture.
+   *
+   * The caller's answer when it gave one, and this run's own otherwise. Both
+   * halves matter: a batch `tournament` wants the old behaviour exactly, and a
+   * venue wants somebody to be able to change the answer while the day runs.
+   */
+  const givenUp = (id: string): boolean => (opts.skip ? opts.skip.has(id) : failed.has(id));
 
-  /** The first fixture with no result, not in flight, whose teams are free. */
+  /**
+   * The first fixture with no result, not in flight, whose teams are free.
+   *
+   * Asked of the effective draw, so a voided fixture is not there to be found
+   * and a withdrawn team's fixtures already have walkovers against them. The
+   * run's own results are added to what the fold says, because a result written
+   * a moment ago may not have been re-read yet.
+   */
   const startable = (): Fixture | null => {
-    const played = new Set(results.map((r) => r.fixtureId));
+    const played = new Set([...effective.results, ...results].map((r) => r.fixtureId));
     return (
-      draw.fixtures.find(
+      effective.draw.fixtures.find(
         (f) =>
           !played.has(f.id) &&
           !playing.has(f.id) &&
-          !failed.has(f.id) &&
+          !givenUp(f.id) &&
           !busy.has(f.home) &&
           !busy.has(f.away),
       ) ?? null
@@ -261,7 +336,14 @@ export async function runDraw(
     // for its referee is not running one.
     if (opts.openPregame) {
       opts.onFixtureDue?.(fixture);
-      await opts.openPregame(fixture);
+      // A recalled offer is not a played fixture and not a failed one. Nothing
+      // was spawned and no slot was taken, so there is nothing to undo: the
+      // teams go free with the `finally` every ending shares, and the loop asks
+      // the corrected draw what to offer instead.
+      if ((await opts.openPregame(fixture)) === 'dropped') {
+        opts.onFixtureDropped?.(fixture);
+        return;
+      }
     }
 
     await takeSlot();
@@ -272,6 +354,22 @@ export async function runDraw(
     }
   };
 
+  /**
+   * At most one outstanding poke, reused across passes.
+   *
+   * A fresh promise per pass would leave every earlier one unsettled for the
+   * length of a competition day; this one is nulled when it fires, so the next
+   * pass makes another and no more than one is ever waiting.
+   */
+  let poked: Promise<void> | null = null;
+  const waitingOnAPoke = (): Promise<void>[] => {
+    if (!opts.poke) return [];
+    poked ??= opts.poke().then(() => {
+      poked = null;
+    });
+    return [poked];
+  };
+
   // Everything eligible is offered; how many of them are *played* at once is
   // the slot semaphore's business. Without a referee in front of the spawn the
   // two are the same thing, and bounding the offer by `slots` keeps a batch
@@ -280,6 +378,9 @@ export async function runDraw(
   const offerLimit = opts.openPregame ? Number.POSITIVE_INFINITY : slots;
 
   for (;;) {
+    // What is worth offering is a question about the draw as it stands, so the
+    // draw is re-read before it is asked — once a pass, not once a fixture.
+    await refresh();
     while (playing.size < offerLimit) {
       const fixture = startable();
       if (!fixture) break;
@@ -307,7 +408,7 @@ export async function runDraw(
     // Blocking here forever is the right answer, not a hang: if everything
     // eligible has been offered and no referee has opened any of it, there is
     // nothing this loop could usefully do instead.
-    await Promise.race(playing.values());
+    await Promise.race([...playing.values(), ...waitingOnAPoke()]);
   }
 
   // Every fixture that could survive has been played by now, including the ones
@@ -320,5 +421,9 @@ export async function runDraw(
     );
   }
 
-  return results;
+  // The tournament as it stands, not merely what this run wrote: a withdrawal's
+  // walkovers count and a disowned result does not, so the table a caller
+  // prints when the draw finishes is the table `rcja table` prints a second
+  // later. Falls back to this run's own results if the last re-read failed.
+  return (await refresh()) ? effective.results : results;
 }
