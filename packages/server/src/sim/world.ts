@@ -755,10 +755,16 @@ export class World {
     this.lastForcingTeam = null;
     this.sinceForcing = 999;
     this.reportedOutOfPlay = false;
+    this.active();
   }
 
   active(): Robot[] {
-    return this.robots.filter((r) => !r.removed);
+    this.activeRobotsBuffer.length = 0;
+    for (let i = 0; i < this.robots.length; i++) {
+      const r = this.robots[i]!;
+      if (!r.removed) this.activeRobotsBuffer.push(r);
+    }
+    return this.activeRobotsBuffer;
   }
 
 
@@ -892,11 +898,16 @@ export class World {
     // pinned between an opponent and the wall - which is exactly the forcing
     // situation in rule 5.6.1.3 - cannot be resolved in one pass, and robots
     // visibly merging into one another destroys the point of a referee view.
+    let isScrum = false;
     for (let pass = 0; pass < CONTACT_PASSES; pass++) {
       let anyMoved = false;
+      let contacts = 0;
       for (let i = 0; i < robotPairOrder.length; i++) {
         for (let j = i + 1; j < robotPairOrder.length; j++) {
-          if (separateBodies(robotPairOrder[i]!, robotPairOrder[j]!)) anyMoved = true;
+          if (separateBodies(robotPairOrder[i]!, robotPairOrder[j]!)) {
+            anyMoved = true;
+            contacts++;
+          }
         }
       }
       for (let i = 0; i < robotPairOrder.length; i++) {
@@ -905,7 +916,31 @@ export class World {
         if (separateBodies(robot, this.ball, recess)) anyMoved = true;
         if (collideWithPerimeter(robot, false)) anyMoved = true;
       }
+      if (pass === 0 && contacts >= 2) {
+        isScrum = true;
+      }
       if (!anyMoved) break;
+    }
+
+    // Adaptive substepping for multi-body scrums (e.g. 3 or 4 robots pinned in a corner):
+    // If multiple robots remained in contact, run a secondary micro-relaxation pass
+    // to guarantee sub-millimeter overlap without oscillation.
+    if (isScrum) {
+      for (let subPass = 0; subPass < 4; subPass++) {
+        let subMoved = false;
+        for (let i = 0; i < robotPairOrder.length; i++) {
+          for (let j = i + 1; j < robotPairOrder.length; j++) {
+            if (separateBodies(robotPairOrder[i]!, robotPairOrder[j]!)) subMoved = true;
+          }
+        }
+        for (let i = 0; i < robotPairOrder.length; i++) {
+          const robot = robotPairOrder[i]!;
+          const recess = dribblerRecess(robot, this.ball, this.config.league);
+          if (separateBodies(robot, this.ball, recess)) subMoved = true;
+          if (collideWithPerimeter(robot, false)) subMoved = true;
+        }
+        if (!subMoved) break;
+      }
     }
 
     // Allow entry with the physics' own margin (half a radius), not the full
@@ -1028,7 +1063,8 @@ export class World {
       Math.abs(this.ball.x) > HALF_LENGTH && withinGoalMouth(this.ball.z);
 
     let nearest = Infinity;
-    for (const robot of this.active()) {
+    for (let i = 0; i < this.activeRobotsBuffer.length; i++) {
+      const robot = this.activeRobotsBuffer[i]!;
       nearest = Math.min(nearest, distance(robot, this.ball) - robot.radius - this.ball.radius);
     }
 
@@ -1089,11 +1125,17 @@ export class World {
      * leaves the circle on its own, which moves the mark, which resets the
      * window. The test regulates itself.
      */
-    const contesting = this.active().filter(
-      (r) => distance(r, this.ball) < r.radius + this.ball.radius + 25,
-    );
-    const hasViolet = contesting.some((r) => r.team === 'violet');
-    const hasLime = contesting.some((r) => r.team === 'lime');
+    let hasViolet = false;
+    let hasLime = false;
+    const thresh = this.ball.radius + 25;
+    for (let i = 0; i < this.activeRobotsBuffer.length; i++) {
+      const r = this.activeRobotsBuffer[i]!;
+      if (distance(r, this.ball) < r.radius + thresh) {
+        if (r.team === 'violet') hasViolet = true;
+        if (r.team === 'lime') hasLime = true;
+        if (hasViolet && hasLime) break;
+      }
+    }
     const isOpposingContest = hasViolet && hasLime;
 
     // Rule 5.6.1.2: Ball stuck between MULTIPLE opposing robots in a scrum.
@@ -1146,7 +1188,15 @@ export class World {
      * its full window and the progress clock waits. If the keeper comes out,
      * its timer clears and this resumes on the next tick.
      */
-    if (this.active().some((r) => r.isGoalie && (r.inactiveGoalieFor ?? 0) > 0)) {
+    let hasInactiveGoalie = false;
+    for (let i = 0; i < this.activeRobotsBuffer.length; i++) {
+      const r = this.activeRobotsBuffer[i]!;
+      if (r.isGoalie && (r.inactiveGoalieFor ?? 0) > 0) {
+        hasInactiveGoalie = true;
+        break;
+      }
+    }
+    if (hasInactiveGoalie) {
       return;
     }
 
@@ -1245,7 +1295,9 @@ export class World {
 
   /** Timers behind rules 5.7.1.2 and 5.7.1.6, plus the 5.11 geometry test. */
   private detectRobotStates(dt: number): void {
-    for (const robot of this.active()) {
+    const actives = this.activeRobotsBuffer;
+    for (let i = 0; i < actives.length; i++) {
+      const robot = actives[i]!;
       // Rule 5.7.1.2 is about the GOAL AREA - inside the goal itself - not the
       // penalty box. Testing the box flagged every goalie holding a legal
       // position on its line every twenty seconds.
@@ -1380,16 +1432,27 @@ export class World {
         // into their penalty box takes priority over Multiple Defence.
         const oppTeam: TeamId = team === 'violet' ? 'lime' : 'violet';
         const sign = this.defendingGoal(team) === 'cyan' ? -1 : 1;
-        const forcingOpponent = this.active().find((opp) => {
-          if (opp.team !== oppTeam) return false;
+        let forcingOpponent: Robot | undefined;
+        for (let i = 0; i < this.activeRobotsBuffer.length; i++) {
+          const opp = this.activeRobotsBuffer[i]!;
+          if (opp.team !== oppTeam) continue;
           const hasBall = distance(opp, this.ball) <= opp.radius + this.ball.radius + 35;
-          const pushingDefenders = defenders.some(
-            (d) =>
+          let pushingDefenders = false;
+          for (let j = 0; j < defenders.length; j++) {
+            const d = defenders[j]!;
+            if (
               distance(opp, d) <= opp.radius + d.radius + 25 ||
-              (hasBall && distance(this.ball, d) <= d.radius + this.ball.radius + 20),
-          );
-          return hasBall && pushingDefenders && opp.vx * sign > 50;
-        });
+              (hasBall && distance(this.ball, d) <= d.radius + this.ball.radius + 20)
+            ) {
+              pushingDefenders = true;
+              break;
+            }
+          }
+          if (hasBall && pushingDefenders && opp.vx * sign > 50) {
+            forcingOpponent = opp;
+            break;
+          }
+        }
 
         if (forcingOpponent) {
           this.multipleDefenceCooldown[team] = 6;
@@ -1436,9 +1499,15 @@ export class World {
   multipleDefenceCandidates(team: TeamId): Robot[] {
     const own = this.defendingGoal(team);
     const maxGoalZ = HALF_GOAL_WIDTH + 50;
-    return this.active().filter(
-      (r) => r.team === team && inPenaltyBox(r, own) && Math.abs(r.z) <= maxGoalZ,
-    );
+    const actives = this.active();
+    const result: Robot[] = [];
+    for (let i = 0; i < actives.length; i++) {
+      const r = actives[i]!;
+      if (r.team === team && inPenaltyBox(r, own) && Math.abs(r.z) <= maxGoalZ) {
+        result.push(r);
+      }
+    }
+    return result;
   }
 
   /**
@@ -1451,7 +1520,12 @@ export class World {
     if (candidates.length < 2) {
       // If called manually by referee when multiple defenders are in the penalty box
       const own = this.defendingGoal(team);
-      const inBox = this.active().filter((r) => r.team === team && inPenaltyBox(r, own));
+      const actives = this.active();
+      const inBox: Robot[] = [];
+      for (let i = 0; i < actives.length; i++) {
+        const r = actives[i]!;
+        if (r.team === team && inPenaltyBox(r, own)) inBox.push(r);
+      }
       if (inBox.length < 2) return null;
       candidates = inBox;
     }
@@ -1472,10 +1546,15 @@ export class World {
     let dest: Point = { x: 0, z: 0 };
     const isOccupied = (p: Point, excludeId: string) => {
       const ballCollision = Math.hypot(p.x - this.ball.x, p.z - this.ball.z) < target.radius + this.ball.radius + 20;
-      const robotCollision = this.active().some(
-        (r) => r.id !== excludeId && Math.hypot(p.x - r.x, p.z - r.z) < target.radius + r.radius + 20,
-      );
-      return ballCollision || robotCollision;
+      if (ballCollision) return true;
+      const actives = this.active();
+      for (let i = 0; i < actives.length; i++) {
+        const r = actives[i]!;
+        if (r.id !== excludeId && Math.hypot(p.x - r.x, p.z - r.z) < target.radius + r.radius + 20) {
+          return true;
+        }
+      }
+      return false;
     };
 
     if (isOccupied(dest, target.id)) {
@@ -1513,8 +1592,8 @@ export class World {
     return true;
   }
 
-  private occupiedNeutralPoints(): Point[] {
-    return this.active().map((r) => ({ x: r.x, z: r.z }));
+  private occupiedNeutralPoints(): readonly Point[] {
+    return this.activeRobotsBuffer;
   }
 
   placeBall(p: Point): void {
@@ -1595,8 +1674,13 @@ export class World {
     // 5.7.4, and its note: an unoccupied corner of the robot's own penalty
     // box, or a neutral point if the box is fully occupied. If nothing is
     // free the robot waits rather than being placed on top of another one.
-    const isFree = (c: Point): boolean =>
-      !this.active().some((r) => distance(r, c) < r.radius * 2 + 20);
+    const isFree = (c: Point): boolean => {
+      for (let i = 0; i < this.activeRobotsBuffer.length; i++) {
+        const r = this.activeRobotsBuffer[i]!;
+        if (distance(r, c) < r.radius * 2 + 20) return false;
+      }
+      return true;
+    };
     const free = corners.find(isFree) ?? NEUTRAL_POINTS.find(isFree);
     if (!free) return false;
 

@@ -2625,6 +2625,7 @@ function usage(): void {
     match     play one match headless and print the result    [--half --home --away --seed --opponent]
     ladder    play every bot against every other              [--half --rounds --seed]
     bench     measure your robot program and say what is wrong
+    sim-bench benchmark headless simulation throughput & scaling   [--matches --seconds --league --json]
 
     draw        write a fixture list for a tournament          [--name --teams --legs --half --seed --headless --start --every --pitches]
     tournament  play a draw through, resumably                 [--name --headless --port --referee-token]
@@ -2749,6 +2750,35 @@ where the folders are kept (default ./workspaces). Needs bun run
 `);
 }
 
+async function simBenchCommand(flags: Map<string, string>): Promise<void> {
+  const { runSimBenchmark, formatSimBenchTable } = await import('../league/sim-bench');
+  const matchesFlag = flags.get('matches');
+  const matches = matchesFlag
+    ? matchesFlag
+        .split(',')
+        .map((s) => parseInt(s.trim(), 10))
+        .filter((n) => !isNaN(n) && n > 0)
+    : [1, 2, 4, 8];
+  const seconds = num(flags, 'seconds', 10);
+  const league = leagueFrom(flags);
+
+  console.log(
+    `\n  Benchmarking headless simulation throughput across ${matches.join(', ')} concurrent matches (${seconds}s each)...`,
+  );
+  const rows = await runSimBenchmark({
+    matches,
+    seconds,
+    league,
+    idealSensors: flags.get('ideal-sensors') !== 'false',
+  });
+
+  if (flags.has('json')) {
+    console.log(JSON.stringify(rows, null, 2));
+  } else {
+    console.log(`\n${formatSimBenchTable(rows)}\n`);
+  }
+}
+
 if (import.meta.main) {
   const { command, flags, words } = parse(process.argv.slice(2));
 
@@ -2786,6 +2816,9 @@ if (import.meta.main) {
       break;
     case 'bench':
       await bench(flags);
+      break;
+    case 'sim-bench':
+      await simBenchCommand(flags);
       break;
     case 'draw':
       await draw(flags);
