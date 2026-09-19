@@ -459,7 +459,7 @@ export class MatchServer {
       if (!d.transport) {
         d.transport = this.agents.accept(ws as ServerWebSocket<unknown>, String(data));
       } else {
-        d.transport.onMessage(String(data));
+        d.transport.onMessage(typeof data === 'string' ? data : new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
       }
     }
     // viewers never send messages
@@ -483,7 +483,9 @@ export class MatchServer {
     if (!ws.data.transport) {
       ws.data.transport = this.agents.accept(ws as ServerWebSocket<unknown>, String(data));
     } else {
-      ws.data.transport.onMessage(String(data));
+      d_msg: {
+        ws.data.transport.onMessage(typeof data === 'string' ? data : new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+      }
     }
   }
 
@@ -518,6 +520,7 @@ export class MatchServer {
   }
 
   private broadcast(message: ViewMessage): void {
+    if (this.viewers.size === 0) return;
     const text = JSON.stringify(message);
     for (const ws of this.viewers) {
       try {
@@ -526,6 +529,11 @@ export class MatchServer {
         this.viewers.delete(ws);
       }
     }
+  }
+
+  private broadcastFrame(match: Match): void {
+    if (this.viewers.size === 0) return;
+    this.broadcast({ type: 'frame', frame: match.snapshot() });
   }
 
   // ── HTTP / WebSocket fetch handler ────────────────────────────────────────
@@ -799,7 +807,7 @@ export class MatchServer {
 
     if (match.refereed) {
       const result = await this.playRefereed(match);
-      this.broadcast({ type: 'frame', frame: match.snapshot() });
+      this.broadcastFrame(match);
       return result;
     }
 
@@ -809,7 +817,7 @@ export class MatchServer {
 
     if (!this.realtime) {
       const result = remote ? await this.playFast(match) : match.run();
-      this.broadcast({ type: 'frame', frame: match.snapshot() });
+      this.broadcastFrame(match);
       this.lastResult = result;
       this.lastNextMatchIn = options.nextMatchIn;
       this.broadcast({ type: 'summary', result, nextMatchIn: options.nextMatchIn });
@@ -858,10 +866,10 @@ export class MatchServer {
         // to stand still, and counting it would read as the machine falling
         // behind when it is doing exactly what it was told.
         if (match.world.running) this.fidelity.advance(match.world.clock - was, wall);
-        this.broadcast({ type: 'frame', frame: match.snapshot() });
+        this.broadcastFrame(match);
       }
       match.world.running = false;
-      this.broadcast({ type: 'frame', frame: match.snapshot() });
+      this.broadcastFrame(match);
     }
 
     const res = match.result();
@@ -987,10 +995,10 @@ export class MatchServer {
         if (this.realtime && match.world.running) {
           this.fidelity.advance(match.world.clock - was, refereedWall);
         }
-        this.broadcast({ type: 'frame', frame: match.snapshot() });
+        this.broadcastFrame(match);
       }
       match.world.running = false;
-      this.broadcast({ type: 'frame', frame: match.snapshot() });
+      this.broadcastFrame(match);
       if (match.isEnded) break;
       // The break between the halves, which this loop has always left and
       // never named. Only after the first, and only for a match that did not
@@ -998,7 +1006,7 @@ export class MatchServer {
       // `isEnded` above, and none of them has a second half to wait for.
       if (half === 1) {
         match.beginHalfTime();
-        this.broadcast({ type: 'frame', frame: match.snapshot() });
+        this.broadcastFrame(match);
       }
     }
 
@@ -1103,7 +1111,7 @@ export class MatchServer {
       }
 
       match.poll(dt * perControl);
-      this.broadcast({ type: 'frame', frame: match.snapshot() });
+      this.broadcastFrame(match);
     }
   }
 
@@ -1166,7 +1174,7 @@ export class MatchServer {
         session.match.poll(Math.min(owed, wall));
         owed = 0;
       }
-      this.broadcast({ type: 'frame', frame: session.match.snapshot() });
+      this.broadcastFrame(session.match);
     }
   }
 

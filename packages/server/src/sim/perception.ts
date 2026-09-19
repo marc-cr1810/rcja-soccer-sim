@@ -129,6 +129,9 @@ export class Senses {
     this.idealSensors = idealSensors;
   }
 
+  private readonly blockersBuffer: SensedRobot[] = [];
+  private readonly linesBuffer: import('./sensors').LineReading[] = [];
+
   read(input: SenseInput): SensorFrame {
     const { view, self, wheelSpeeds, omega, held, messages, attackDirection, dt } = input;
     const ideal = this.idealSensors;
@@ -144,7 +147,12 @@ export class Senses {
     // Every robot but this one can get in the way of the infrared, including
     // the robot's own team mate — which is the coordination problem in a
     // sentence, and the reason 4.2.5 communication is worth having.
-    const blockers = view.robots.filter((r) => r.id !== self.id);
+    this.blockersBuffer.length = 0;
+    for (let i = 0; i < view.robots.length; i++) {
+      const r = view.robots[i]!;
+      if (r.id !== self.id) this.blockersBuffer.push(r);
+    }
+    const blockers = this.blockersBuffer;
 
     return {
       clock: view.clock,
@@ -164,7 +172,7 @@ export class Senses {
       ball: readIr(self, view.ball, { blockers, ideal }, this.ir),
       compass: { heading: this.compass.read(self.heading, this.compassNoise, ideal) },
       gyro: { rate: this.gyro.read(omega, this.gyroNoise, ideal) },
-      lines: readLines(self, this.lineNoise, ideal),
+      lines: readLines(self, this.lineNoise, ideal, this.linesBuffer),
       range: readRange(self, this.rangeNoise, blockers, ideal),
       encoders: this.encoders.read(ideal),
       camera: this.camera.read(self, view.ball, blockers, this.cameraNoise, fresh, ideal),

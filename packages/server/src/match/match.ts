@@ -434,18 +434,37 @@ export class Match {
     }
   }
 
+  private readonly sensedRobotsBuffer: SensedRobot[] = [];
+  private readonly cachedMatchView: MatchView = {
+    clock: 0,
+    playing: false,
+    ball: { x: 0, z: 0 },
+    robots: this.sensedRobotsBuffer,
+    kickoff: { pending: false, team: null, countdown: 0 },
+  };
+  private readonly cachedOrderedSlots: Slot[] = [];
+
   /** What perception is allowed to see. Built fresh each control cycle. */
   private view(): MatchView {
-    const robots: SensedRobot[] = this.world
-      .active()
-      .map((r) => ({ id: r.id, team: r.team, number: numberOf(r.id), x: r.x, z: r.z, heading: r.heading }));
-    return {
-      clock: this.world.clock,
-      playing: this.world.running,
-      ball: { x: this.world.ball.x, z: this.world.ball.z },
-      robots,
-      kickoff: this.world.restart,
-    };
+    const active = this.world.active();
+    this.sensedRobotsBuffer.length = 0;
+    for (let i = 0; i < active.length; i++) {
+      const r = active[i]!;
+      this.sensedRobotsBuffer.push({
+        id: r.id,
+        team: r.team,
+        number: numberOf(r.id),
+        x: r.x,
+        z: r.z,
+        heading: r.heading,
+      });
+    }
+    this.cachedMatchView.clock = this.world.clock;
+    this.cachedMatchView.playing = this.world.running;
+    this.cachedMatchView.ball.x = this.world.ball.x;
+    this.cachedMatchView.ball.z = this.world.ball.z;
+    this.cachedMatchView.kickoff = this.world.restart;
+    return this.cachedMatchView;
   }
 
   /** The live robot for a slot, after any reset replaced the objects. */
@@ -455,8 +474,14 @@ export class Match {
 
   /** All four slots, in an order that alternates tick to tick. See `slotOrderFlipped`. */
   private orderedSlots(): Slot[] {
-    const all = [...this.slots.values()];
-    return this.slotOrderFlipped ? all.reverse() : all;
+    this.cachedOrderedSlots.length = 0;
+    for (const slot of this.slots.values()) {
+      this.cachedOrderedSlots.push(slot);
+    }
+    if (this.slotOrderFlipped) {
+      this.cachedOrderedSlots.reverse();
+    }
+    return this.cachedOrderedSlots;
   }
 
   /** Whether this robot's dribbler currently has the ball. */

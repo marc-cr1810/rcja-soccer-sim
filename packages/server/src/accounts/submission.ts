@@ -169,7 +169,7 @@ async function checkSyntheticTick(
         if (!ws.data.transport) {
           ws.data.transport = gateway.accept(ws as never, String(data));
         } else {
-          ws.data.transport.onMessage(String(data));
+          ws.data.transport.onMessage(typeof data === 'string' ? data : new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
         }
       },
       close(ws) {

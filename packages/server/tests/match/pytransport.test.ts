@@ -163,6 +163,7 @@ describe.skipIf(!pythonAvailable)('the transport seam', () => {
       robot: 1,
       name: 'ACT',
       token: 'secret',
+      format: 'protobuf',
     });
   });
 

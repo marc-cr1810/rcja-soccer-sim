@@ -384,21 +384,25 @@ export function surfaceAt(x: number, z: number): Surface {
   return 'carpet';
 }
 
-export function readLines(pose: Pose, noise: Noise, ideal = false): LineReading[] {
-  const out: LineReading[] = [];
+export function readLines(pose: Pose, noise: Noise, ideal = false, out?: LineReading[]): LineReading[] {
+  const result = out ?? [];
   for (let i = 0; i < LINE_SENSOR_COUNT; i++) {
     const bearing = wrapAngle((i * 2 * Math.PI) / LINE_SENSOR_COUNT);
     const a = pose.heading + bearing;
     const sx = pose.x + Math.cos(a) * LINE_SENSOR_RADIUS;
     const sz = pose.z + Math.sin(a) * LINE_SENSOR_RADIUS;
     const surface = surfaceAt(sx, sz);
-    out.push({
-      bearing,
-      surface,
-      value: ideal ? REFLECTANCE[surface] : clamp01(REFLECTANCE[surface] + noise.gaussian(LINE_NOISE)),
-    });
+    const value = ideal ? REFLECTANCE[surface] : clamp01(REFLECTANCE[surface] + noise.gaussian(LINE_NOISE));
+    if (result[i]) {
+      result[i].bearing = bearing;
+      result[i].surface = surface;
+      result[i].value = value;
+    } else {
+      result[i] = { bearing, surface, value };
+    }
   }
-  return out;
+  result.length = LINE_SENSOR_COUNT;
+  return result;
 }
 
 // --------------------------------------------------------------- ultrasonics

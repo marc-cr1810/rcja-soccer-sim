@@ -1,0 +1,124 @@
+syntax = "proto3";
+
+package rcja;
+
+message BallReading {
+  float bearing = 1;
+  float strength = 2;
+}
+
+message CompassReading {
+  float heading = 1;
+}
+
+message GyroReading {
+  float rate = 1;
+}
+
+enum Surface {
+  SURFACE_CARPET = 0;
+  SURFACE_LINE = 1;
+  SURFACE_MARKING = 2;
+}
+
+message LineReading {
+  float bearing = 1;
+  Surface surface = 2;
+  float value = 3;
+}
+
+message RangeReading {
+  optional float front = 1;
+  optional float back = 2;
+  optional float left = 3;
+  optional float right = 4;
+}
+
+message Sighting {
+  float bearing = 1;
+  float range = 2;
+}
+
+message Blob {
+  float start = 1;
+  float end = 2;
+  float height = 3;
+}
+
+message GoalSightings {
+  optional Sighting cyan = 1;
+  optional Sighting yellow = 2;
+}
+
+message GoalBlobs {
+  repeated Blob cyan = 1;
+  repeated Blob yellow = 2;
+}
+
+message CameraReading {
+  GoalSightings goals = 1;
+  GoalBlobs goal_blobs = 2;
+  optional Sighting ball = 3;
+  bool fresh = 4;
+}
+
+message BallGateReading {
+  bool held = 1;
+}
+
+message KickoffReading {
+  bool pending = 1;
+  bool ours = 2;
+  float countdown = 3;
+}
+
+message TeamMessage {
+  int32 from = 1;
+  string body_json = 2;
+  float age = 3;
+}
+
+message SensorFrame {
+  double clock = 1;
+  int32 robot = 2;
+  string team = 3;
+  int32 attack_direction = 4;
+  bool playing = 5;
+  bool returned = 6;
+  KickoffReading kickoff = 7;
+  optional BallReading ball = 8;
+  CompassReading compass = 9;
+  GyroReading gyro = 10;
+  repeated LineReading lines = 11;
+  RangeReading range = 12;
+  repeated float encoders = 13;
+  CameraReading camera = 14;
+  BallGateReading ball_gate = 15;
+  repeated TeamMessage messages = 16;
+}
+
+message ActuatorFrame {
+  repeated float motors = 1;
+  float dribbler = 2;
+  bool kicker = 3;
+  string say_json = 4;
+}
+
+message DisabledMessage {
+  string rule = 1;
+  string reason = 2;
+  float returns_in = 3;
+}
+
+message ServerMessage {
+  oneof payload {
+    SensorFrame sensors = 1;
+    DisabledMessage disabled = 2;
+  }
+}
+
+message ClientMessage {
+  oneof payload {
+    ActuatorFrame command = 1;
+  }
+}

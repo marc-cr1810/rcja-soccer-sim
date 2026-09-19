@@ -52,6 +52,7 @@ class Runtime:
         self.name = "Violet"
         self.token: str | None = None
         self.motor_count = 4
+        self.format: str = "json"
 
         self.last_frame: dict[str, Any] = {}
         self.clock: float = 0.0
@@ -149,6 +150,7 @@ class Runtime:
             "team": self.team,
             "robot": self.number,
             "name": self.name or self.team.capitalize(),
+            "format": "protobuf",
         }
         if self.token is not None:
             join_msg["token"] = self.token
@@ -157,13 +159,14 @@ class Runtime:
 
         # 3. Receive welcome
         raw = self.socket.recv()
-        hello = json.loads(raw)
+        hello = json.loads(raw) if isinstance(raw, str) else json.loads(raw.decode("utf-8"))
         if hello.get("type") == "reject":
             raise ConnectionError(f"Server refused: {hello.get('reason')}")
         if hello.get("type") != "welcome":
             raise ConnectionError(f"Unexpected handshake response: {hello!r}")
 
         self.motor_count = hello.get("motors", 4)
+        self.format = hello.get("format", "json")
         robot_id = hello.get("robot", "")
         if "-" in robot_id:
             team_part, num_part = robot_id.split("-", 1)
@@ -178,7 +181,14 @@ class Runtime:
 
         # 4. Wait for the first sensor frame before unblocking user hardware reads
         while True:
-            msg = json.loads(self.socket.recv())
+            raw = self.socket.recv()
+            if isinstance(raw, (bytes, bytearray, memoryview)):
+                from rcja_soccer._proto import decode_server_message
+                msg = decode_server_message(raw)
+            else:
+                msg = json.loads(raw)
+            if not msg:
+                continue
             if msg.get("type") == "sensors":
                 self._update_sensor_frame(msg["frame"])
                 break
@@ -443,11 +453,23 @@ class Runtime:
             while True:
                 try:
                     cmd = self.build_actuator_frame()
-                    self.socket.send(json.dumps({"type": "command", "frame": cmd}))
+                    if self.format == "protobuf":
+                        from rcja_soccer._proto import encode_client_message
+                        self.socket.send(encode_client_message(cmd))
+                    else:
+                        self.socket.send(json.dumps({"type": "command", "frame": cmd}))
 
                     # Wait for next server response
                     while True:
-                        msg = json.loads(self.socket.recv())
+                        raw = self.socket.recv()
+                        if isinstance(raw, (bytes, bytearray, memoryview)):
+                            from rcja_soccer._proto import decode_server_message
+                            msg = decode_server_message(raw)
+                        else:
+                            msg = json.loads(raw)
+
+                        if not msg:
+                            continue
                         msg_type = msg.get("type")
                         if msg_type == "sensors":
                             self._update_sensor_frame(msg["frame"])

@@ -15,6 +15,7 @@
 
 import type { ServerWebSocket } from 'bun';
 import { sanitise, type Transport } from '../match/agent';
+import { decodeClientMessage, encodeServerMessage } from '../match/proto';
 import {
   PROTOCOL_VERSION,
   type ActuatorFrame,
@@ -33,6 +34,8 @@ export interface JoinMessage {
   name?: string;
   /** Server-issued at submit time. Required only for a seat that has one registered — see `expectToken`. */
   token?: string;
+  /** Binary protobuf or JSON text format. Defaults to 'json'. */
+  format?: 'json' | 'protobuf';
 }
 
 export interface WelcomeMessage {
@@ -40,6 +43,7 @@ export interface WelcomeMessage {
   robot: string;
   motors: number;
   protocol: number;
+  format?: 'json' | 'protobuf';
 }
 
 export interface RejectMessage {
@@ -103,14 +107,17 @@ export class RemoteTransport implements Transport {
   reconnects = 0;
   /** When this seat was last told it is off the field. See `disabled`. */
   private lastDisabled = 0;
+  format: 'json' | 'protobuf';
 
   constructor(
     readonly name: string,
     readonly robotId: string,
     socket: ServerWebSocket<unknown>,
     private readonly motorCount: number,
+    format: 'json' | 'protobuf' = 'json',
   ) {
     this.socket = socket;
+    this.format = format;
   }
 
   /**
@@ -124,13 +131,14 @@ export class RemoteTransport implements Transport {
    * Whatever the old connection had queued is dropped. It was an answer to a
    * sensor frame the world has long since moved past.
    */
-  reattach(socket: ServerWebSocket<unknown>): void {
+  reattach(socket: ServerWebSocket<unknown>, format: 'json' | 'protobuf' = 'json'): void {
     try {
       if (this.socket !== socket) this.socket.close();
     } catch {
       // Already gone, which is usually why we are here.
     }
     this.socket = socket;
+    this.format = format;
     this.pending = null;
     this.closed = false;
     this.lastDisabled = 0;
@@ -142,16 +150,23 @@ export class RemoteTransport implements Transport {
   }
 
   /** Called by the central websocket.message handler for every message on this socket. */
-  onMessage(text: string): void {
-    let message: AgentClientMessage;
-    try {
-      message = JSON.parse(text) as AgentClientMessage;
-    } catch {
-      this.rejected++;
-      return;
+  onMessage(data: string | Uint8Array | Buffer): void {
+    let clean: ActuatorFrame | null = null;
+    if (typeof data !== 'string') {
+      const bytes = data instanceof Uint8Array ? data : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+      const decoded = decodeClientMessage(bytes);
+      clean = decoded ? sanitise(decoded, this.motorCount) : null;
+    } else {
+      let message: AgentClientMessage;
+      try {
+        message = JSON.parse(data) as AgentClientMessage;
+      } catch {
+        this.rejected++;
+        return;
+      }
+      if (message.type !== 'command') return;
+      clean = sanitise(message.frame, this.motorCount);
     }
-    if (message.type !== 'command') return;
-    const clean = sanitise(message.frame, this.motorCount);
     if (!clean) {
       this.rejected++;
       return;
@@ -173,7 +188,11 @@ export class RemoteTransport implements Transport {
   send(frame: SensorFrame): void {
     if (this.closed) return;
     try {
-      this.socket.send(JSON.stringify({ type: 'sensors', frame } satisfies SensorMessage));
+      if (this.format === 'protobuf') {
+        this.socket.send(encodeServerMessage({ type: 'sensors', frame }));
+      } else {
+        this.socket.send(JSON.stringify({ type: 'sensors', frame } satisfies SensorMessage));
+      }
     } catch {
       this.closed = true;
     }
@@ -193,7 +212,11 @@ export class RemoteTransport implements Transport {
     if (now - this.lastDisabled < DISABLED_EVERY_MS) return;
     this.lastDisabled = now;
     try {
-      this.socket.send(JSON.stringify(state satisfies DisabledMessage));
+      if (this.format === 'protobuf') {
+        this.socket.send(encodeServerMessage(state));
+      } else {
+        this.socket.send(JSON.stringify(state satisfies DisabledMessage));
+      }
     } catch {
       this.closed = true;
     }
@@ -379,16 +402,19 @@ export class AgentGateway {
       );
     }
 
+    const format = join.format === 'protobuf' ? 'protobuf' : 'json';
+
     if (held) {
       // Same seat, same transport object, new socket underneath, so the
       // match keeps talking to the thing it is already holding.
-      held.transport.reattach(ws);
+      held.transport.reattach(ws, format);
       ws.send(
         JSON.stringify({
           type: 'welcome',
           robot: id,
           motors: motorCount,
           protocol: PROTOCOL_VERSION,
+          format,
         } satisfies WelcomeMessage),
       );
       if (this.ready) {
@@ -398,7 +424,7 @@ export class AgentGateway {
     }
 
     const teamName = join.name ?? (join.team === 'violet' ? 'Violet' : 'Lime');
-    const transport = new RemoteTransport(`${teamName}/${id}`, id, ws, motorCount);
+    const transport = new RemoteTransport(`${teamName}/${id}`, id, ws, motorCount, format);
     this.seats.set(id, { transport, team: join.team, number: join.robot, teamName });
     // The seat is deliberately NOT freed when the socket closes. A seat is a
     // team's place in the match, and losing a connection is a robot fault,
@@ -411,6 +437,7 @@ export class AgentGateway {
         robot: id,
         motors: motorCount,
         protocol: PROTOCOL_VERSION,
+        format,
       } satisfies WelcomeMessage),
     );
 

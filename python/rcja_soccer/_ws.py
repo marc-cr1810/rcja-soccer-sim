@@ -35,6 +35,14 @@ class WebSocketError(TransportError):
     """This socket failed, or the peer said something unexpected."""
 
 
+def _apply_mask(data: bytes, mask: bytes) -> bytes:
+    if not data or not mask:
+        return data
+    n = len(data)
+    full_mask = (mask * (n // 4 + 1))[:n]
+    return (int.from_bytes(data, "little") ^ int.from_bytes(full_mask, "little")).to_bytes(n, "little")
+
+
 class WebSocket:
     """A text-only client connection."""
 
@@ -135,7 +143,7 @@ class WebSocket:
         mask = self._recv_exactly(4) if masked else b""
         payload = self._recv_exactly(length) if length else b""
         if masked:
-            payload = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+            payload = _apply_mask(payload, mask)
 
         # The server never fragments here, but a peer is allowed to, and a
         # client that falls over when one does is a client that fails at an
@@ -152,23 +160,29 @@ class WebSocket:
             mask = self._recv_exactly(4) if masked else b""
             more = self._recv_exactly(length) if length else b""
             if masked:
-                more = bytes(b ^ mask[i % 4] for i, b in enumerate(more))
+                more = _apply_mask(more, mask)
             payload += more
 
         return opcode, payload
 
-    def recv(self) -> str:
-        """The next text message. Blocks; control frames are handled quietly."""
+    def recv_raw(self) -> tuple[int, bytes | str]:
+        """The next message. Returns (opcode, str | bytes)."""
         while True:
             opcode, payload = self._read_frame()
             if opcode == _OP_TEXT or opcode == _OP_CONTINUATION:
-                return payload.decode("utf-8", errors="replace")
+                return opcode, payload.decode("utf-8", errors="replace")
+            if opcode == _OP_BINARY:
+                return opcode, payload
             if opcode == _OP_PING:
                 self._send_frame(_OP_PONG, payload)
             elif opcode == _OP_CLOSE:
                 self._closed = True
                 raise WebSocketError("server closed the connection")
-            # Binary and pong are ignored: nothing here sends either.
+
+    def recv(self) -> str | bytes:
+        """The next message. Returns str for text frames and bytes for binary frames."""
+        _, payload = self.recv_raw()
+        return payload
 
     # -- writing ----------------------------------------------------------
 
@@ -191,11 +205,14 @@ class WebSocket:
 
         mask = os.urandom(4)
         header += mask
-        masked = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+        masked = _apply_mask(payload, mask)
         self._sock.sendall(bytes(header) + masked)
 
-    def send(self, text: str) -> None:
-        self._send_frame(_OP_TEXT, text.encode("utf-8"))
+    def send(self, data: str | bytes) -> None:
+        if isinstance(data, (bytes, bytearray, memoryview)):
+            self._send_frame(_OP_BINARY, bytes(data))
+        else:
+            self._send_frame(_OP_TEXT, data.encode("utf-8"))
 
     def close(self) -> None:
         """Say goodbye if we still can, and never raise for trying.

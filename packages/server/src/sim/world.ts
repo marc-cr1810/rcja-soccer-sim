@@ -350,6 +350,10 @@ export class World {
    * this mirrors, and `pairOrder` below.
    */
   private pairOrderFlipped = false;
+  private readonly scratchBallBefore: Body = { x: 0, z: 0, vx: 0, vz: 0, radius: 0, mass: 0 };
+  private readonly scratchBallTrial: Body = { x: 0, z: 0, vx: 0, vz: 0, radius: 0, mass: 0 };
+  private readonly activeRobotsBuffer: Robot[] = [];
+  private readonly orderedActivesBuffer: Robot[] = [];
 
   /**
    * The arrangement restarts go back to, or null for the kick-off marks.
@@ -795,32 +799,48 @@ export class World {
 
     stepBall(this.ball, dt, this.ballFriction);
 
-    const actives = this.active();
+    this.activeRobotsBuffer.length = 0;
+    for (let i = 0; i < this.robots.length; i++) {
+      const r = this.robots[i]!;
+      if (!r.removed) this.activeRobotsBuffer.push(r);
+    }
+    const actives = this.activeRobotsBuffer;
 
     // One impulse pass, so a collision exchanges momentum exactly once.
     //
     // Every robot resolves against the SAME pre-pass ball state and the
     // resulting corrections are summed, rather than each robot in turn
-    // resolving against whatever the previous one just left behind. Two
-    // robots contesting the ball in one tick is an even fight; letting the
-    // first one move the ball out from under the second - or hand it a
-    // head start - made whichever seat `actives` happened to reach last
-    // (always the same one, since active robots are always ordered
-    // violet-1/violet-2/lime-1/lime-2) systematically win the ball's
-    // outgoing velocity in a tie, with no such contest ever intended.
-    const ballBefore = { ...this.ball };
+    // resolving against whatever the previous one just left behind.
+    this.scratchBallBefore.x = this.ball.x;
+    this.scratchBallBefore.z = this.ball.z;
+    this.scratchBallBefore.vx = this.ball.vx;
+    this.scratchBallBefore.vz = this.ball.vz;
+    this.scratchBallBefore.radius = this.ball.radius;
+    this.scratchBallBefore.mass = this.ball.mass;
+    this.scratchBallBefore.y = this.ball.y;
+    this.scratchBallBefore.vy = this.ball.vy;
+
     let ballDX = 0;
     let ballDZ = 0;
     let ballDVX = 0;
     let ballDVZ = 0;
-    for (const robot of actives) {
-      const recess = dribblerRecess(robot, ballBefore, this.config.league);
-      const ballTrial = { ...ballBefore };
-      if (collideBodies(robot, ballTrial, recess, BALL_ROBOT_BOUNCE)) {
-        ballDX += ballTrial.x - ballBefore.x;
-        ballDZ += ballTrial.z - ballBefore.z;
-        ballDVX += ballTrial.vx - ballBefore.vx;
-        ballDVZ += ballTrial.vz - ballBefore.vz;
+    for (let i = 0; i < actives.length; i++) {
+      const robot = actives[i]!;
+      const recess = dribblerRecess(robot, this.scratchBallBefore, this.config.league);
+      this.scratchBallTrial.x = this.scratchBallBefore.x;
+      this.scratchBallTrial.z = this.scratchBallBefore.z;
+      this.scratchBallTrial.vx = this.scratchBallBefore.vx;
+      this.scratchBallTrial.vz = this.scratchBallBefore.vz;
+      this.scratchBallTrial.radius = this.scratchBallBefore.radius;
+      this.scratchBallTrial.mass = this.scratchBallBefore.mass;
+      this.scratchBallTrial.y = this.scratchBallBefore.y;
+      this.scratchBallTrial.vy = this.scratchBallBefore.vy;
+
+      if (collideBodies(robot, this.scratchBallTrial, recess, BALL_ROBOT_BOUNCE)) {
+        ballDX += this.scratchBallTrial.x - this.scratchBallBefore.x;
+        ballDZ += this.scratchBallTrial.z - this.scratchBallBefore.z;
+        ballDVX += this.scratchBallTrial.vx - this.scratchBallBefore.vx;
+        ballDVZ += this.scratchBallTrial.vz - this.scratchBallBefore.vz;
         this.lastBallTouch = { robotId: robot.id, team: robot.team, at: this.clock };
       }
     }
@@ -828,8 +848,16 @@ export class World {
     this.ball.z += ballDZ;
     this.ball.vx += ballDVX;
     this.ball.vz += ballDVZ;
-    for (const robot of actives) robot.sinceOpponentContact += dt;
-    const robotPairOrder = this.pairOrder(actives);
+    for (let i = 0; i < actives.length; i++) actives[i]!.sinceOpponentContact += dt;
+
+    this.orderedActivesBuffer.length = 0;
+    if (this.pairOrderFlipped) {
+      for (let i = actives.length - 1; i >= 0; i--) this.orderedActivesBuffer.push(actives[i]!);
+    } else {
+      for (let i = 0; i < actives.length; i++) this.orderedActivesBuffer.push(actives[i]!);
+    }
+    const robotPairOrder = this.orderedActivesBuffer;
+
     for (let i = 0; i < robotPairOrder.length; i++) {
       for (let j = i + 1; j < robotPairOrder.length; j++) {
         const a = robotPairOrder[i]!;
@@ -846,16 +874,19 @@ export class World {
     // situation in rule 5.6.1.3 - cannot be resolved in one pass, and robots
     // visibly merging into one another destroys the point of a referee view.
     for (let pass = 0; pass < CONTACT_PASSES; pass++) {
+      let anyMoved = false;
       for (let i = 0; i < robotPairOrder.length; i++) {
         for (let j = i + 1; j < robotPairOrder.length; j++) {
-          separateBodies(robotPairOrder[i]!, robotPairOrder[j]!);
+          if (separateBodies(robotPairOrder[i]!, robotPairOrder[j]!)) anyMoved = true;
         }
       }
-      for (const robot of this.pairOrder(actives)) {
+      for (let i = 0; i < robotPairOrder.length; i++) {
+        const robot = robotPairOrder[i]!;
         const recess = dribblerRecess(robot, this.ball, this.config.league);
-        separateBodies(robot, this.ball, recess);
-        collideWithPerimeter(robot, false);
+        if (separateBodies(robot, this.ball, recess)) anyMoved = true;
+        if (collideWithPerimeter(robot, false)) anyMoved = true;
       }
+      if (!anyMoved) break;
     }
 
     // Allow entry with the physics' own margin (half a radius), not the full
@@ -1696,7 +1727,13 @@ function clampAbs(v: number, limit: number): number {
 /** Rule 4.6.4: effective depth of the dribbler recess on the front of the robot. */
 export function dribblerRecess(robot: Robot, ball: Body, league: League): number {
   if (!league.dribblerAllowed) return 0;
-  const toBall = Math.atan2(ball.z - robot.z, ball.x - robot.x);
+  const dx = ball.x - robot.x;
+  const dz = ball.z - robot.z;
+  const maxReach = robot.radius + ball.radius + 20;
+  if (Math.abs(dx) > maxReach || Math.abs(dz) > maxReach) return 0;
+  if (dx * dx + dz * dz > maxReach * maxReach) return 0;
+
+  const toBall = Math.atan2(dz, dx);
   let off = Math.abs(toBall - robot.heading);
   while (off > Math.PI) off = Math.abs(off - Math.PI * 2);
   if (off > 0.6) return 0;

@@ -280,9 +280,12 @@ export function collideBodies(a: Body, b: Body, minDistDelta = 0, restitution = 
 
   const dx = b.x - a.x;
   const dz = b.z - a.z;
-  const dist = Math.hypot(dx, dz);
   const minDist = a.radius + b.radius - minDistDelta;
-  if (dist >= minDist || dist === 0) return false;
+  if (Math.abs(dx) >= minDist || Math.abs(dz) >= minDist) return false;
+
+  const distSq = dx * dx + dz * dz;
+  if (distSq >= minDist * minDist || distSq === 0) return false;
+  const dist = Math.sqrt(distSq);
 
   const nx = dx / dist;
   const nz = dz / dist;
@@ -326,9 +329,13 @@ export function separateBodies(a: Body, b: Body, minDistDelta = 0): boolean {
 
   const dx = b.x - a.x;
   const dz = b.z - a.z;
-  let dist = Math.hypot(dx, dz);
   const minDist = a.radius + b.radius - minDistDelta;
-  if (dist >= minDist) return false;
+  if (Math.abs(dx) >= minDist || Math.abs(dz) >= minDist) return false;
+
+  const distSq = dx * dx + dz * dz;
+  if (distSq >= minDist * minDist) return false;
+
+  let dist = Math.sqrt(distSq);
 
   let nx: number;
   let nz: number;

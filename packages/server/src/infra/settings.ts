@@ -47,6 +47,10 @@ export interface ArenaSettings {
   reserveCores: number;
   /** How many fixtures the schedule plays at once. */
   concurrentFixtures: number;
+  /**
+   * Capacity multiplier for overcommitted arena scheduling. Defaults to 1.0.
+   */
+  overcommit?: number;
 }
 
 export interface PracticeSettings {
@@ -228,6 +232,7 @@ export function defaultSettings(): LeagueSettings {
       seatMemoryMb: DEFAULT_SEAT_MEMORY_MB,
       reserveCores: 1,
       concurrentFixtures: 2,
+      overcommit: 1.0,
     },
     practice: { open: true, max: null, idleMins: 20, graceMins: 5, perTeam: 1, claimSecs: 90 },
     pregame: { autoStartMins: null, penaltyPerMin: 1 },
@@ -355,6 +360,10 @@ export function loadSettings(dataDir: string, overrides: Partial<Flags> = {}): L
   const concurrent = readNumber(arenas.concurrentFixtures, 'arenas.concurrentFixtures', 2, { min: 1, max: 64 }, complaints);
   settings.arenas.concurrentFixtures = Math.round(concurrent.value);
   set('arenas.concurrentFixtures', concurrent.used);
+
+  const overcommit = readNumber(arenas.overcommit, 'arenas.overcommit', 1.0, { min: 0.5, max: 20.0 }, complaints);
+  settings.arenas.overcommit = overcommit.value;
+  set('arenas.overcommit', overcommit.used);
 
   if (typeof practice.open === 'boolean') {
     settings.practice.open = practice.open;
