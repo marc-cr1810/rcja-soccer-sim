@@ -826,9 +826,9 @@ team's mis-uploaded file, and re-runs an abandoned game — all from a browser,
 with the audit log saying who did each one.*
 
 **In progress**, in slices — [PHASE-12.md](PHASE-12.md) is the working record:
-what each slice settled, what running it caught, and what is left. Rescheduling,
-stopping a field and re-running an abandoned game are done and were verified
-live; the mis-uploaded file is the clause with nothing behind it yet.
+what each slice settled, what running it caught, and what is left. All four
+clauses of the gate now work from a browser and were verified live; what is
+left is the people screen, the audit screen, and settings.
 
 Last, because it is the only one of these whose absence can be worked around
 with a terminal and an ssh session. Not optional, though: at a real event the

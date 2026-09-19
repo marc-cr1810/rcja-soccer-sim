@@ -183,12 +183,26 @@ export interface DemoSettings {
   randomSides?: boolean;
 }
 
+/** What is kept of a team's earlier pushes, so an organiser can go back to one. */
+export interface PushSettings {
+  /**
+   * Pushes kept per robot, oldest pruned first.
+   *
+   * Ten because the wrong file is nearly always the last push or the one
+   * before it, and because a student pressing Run all afternoon can make
+   * hundreds — a history bounded by a team's habits rather than by a number
+   * is a disk that fills on the day of the event.
+   */
+  keep: number;
+}
+
 export interface LeagueSettings {
   arenas: ArenaSettings;
   practice: PracticeSettings;
   pregame: PregameSettings;
   rules: RuleSettings;
   demo: DemoSettings;
+  pushes: PushSettings;
 }
 
 /** Where a value came from, for a console that has to be able to explain itself. */
@@ -219,6 +233,7 @@ export function defaultSettings(): LeagueSettings {
     pregame: { autoStartMins: null, penaltyPerMin: 1 },
     rules: { mercyMargin: DEFAULT_MERCY_MARGIN, halfTimeSeconds: DEFAULT_HALF_TIME_SECONDS },
     demo: { on: false, bots: 'reference', home: 'Violet', away: 'Lime', halfSeconds: 300, league: null, gapSeconds: 10, randomSides: false },
+    pushes: { keep: 10 },
   };
 }
 
@@ -314,6 +329,7 @@ export function loadSettings(dataDir: string, overrides: Partial<Flags> = {}): L
   const pregame = (raw.pregame ?? {}) as Record<string, unknown>;
   const rules = (raw.rules ?? {}) as Record<string, unknown>;
   const demo = (raw.demo ?? {}) as Record<string, unknown>;
+  const pushes = (raw.pushes ?? {}) as Record<string, unknown>;
 
   const set = <K extends string>(path: K, used: boolean): void => {
     sources[path] = used ? 'file' : 'default';
@@ -368,6 +384,10 @@ export function loadSettings(dataDir: string, overrides: Partial<Flags> = {}): L
   const claim = readNumber(practice.claimSecs, 'practice.claimSecs', 90, { min: 10, max: 3600 }, complaints);
   settings.practice.claimSecs = Math.round(claim.value);
   set('practice.claimSecs', claim.used);
+
+  const kept = readNumber(pushes.keep, 'pushes.keep', 10, { min: 1, max: 200 }, complaints);
+  settings.pushes.keep = Math.round(kept.value);
+  set('pushes.keep', kept.used);
 
   // Pre-game. `null` and `auto` both mean "no timer", which is the shipped
   // default — `readAuto` already spells that, and it is the same word
@@ -531,6 +551,7 @@ export interface Flags {
   seatMemoryMb: number;
   practiceMax: number;
   idleMins: number;
+  pushesKept: number;
   perTeam: number;
   autoStartMins: number | null;
   penaltyPerMin: number;
@@ -565,6 +586,7 @@ function applyFlags(
   take(flags.seatMemoryMb, 'arenas.seatMemoryMb', (v) => (settings.arenas.seatMemoryMb = v));
   take(flags.practiceMax, 'practice.max', (v) => (settings.practice.max = v));
   take(flags.idleMins, 'practice.idleMins', (v) => (settings.practice.idleMins = v));
+  take(flags.pushesKept, 'pushes.keep', (v) => (settings.pushes.keep = v));
   take(flags.perTeam, 'practice.perTeam', (v) => (settings.practice.perTeam = v));
   take(flags.autoStartMins, 'pregame.autoStartMins', (v) => (settings.pregame.autoStartMins = v));
   take(flags.penaltyPerMin, 'pregame.penaltyPerMin', (v) => (settings.pregame.penaltyPerMin = v));

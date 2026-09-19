@@ -956,3 +956,33 @@ button.stop:disabled { opacity: 0.5; cursor: default; }
 /* A field that has been warned it is closing. Coloured like the warning block
    it corresponds to, so the row and the banner are recognisably the same news. */
 .row .state.closing { color: #f87171; font-weight: 600; }
+
+/* --- a team's files, read-only ------------------------------------------- */
+/* A push row opens; saying so with the cursor is cheaper than a chevron. */
+.row.pointer { cursor: pointer; }
+.row.pointer:hover { background: var(--raised); }
+.filename {
+  margin: 0.6rem 0 0.3rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
+  color: var(--ink);
+}
+pre.code {
+  margin: 0;
+  padding: 0.7rem 0.9rem;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--raised);
+  color: var(--ink);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+/* A robot's own history, under its team's heading — a step quieter than h2. */
+h3 {
+  margin: 1.6rem 0 0.6rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--muted);
+}

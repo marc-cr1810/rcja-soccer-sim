@@ -37,7 +37,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import type { Authority } from './authority';
-import { slugifyTeam, TOKEN_FILENAME } from './manifest';
+import { slugifyTeam, TOKEN_FILENAME, type Manifest } from './manifest';
+import { keepPush, type PushBy, type PushVia } from './pushes';
 import { validateSubmission } from './submission';
 import type { RobotNumber, WorkspaceStore } from './workspace';
 import { DeleteBodySchema, SaveBodySchema } from './api/schemas';
@@ -67,6 +68,19 @@ export interface TeamApiOptions {
    * should go on knowing nothing — a laptop running `serve` supplies none.
    */
   noticeFor?: (team: string, robot: RobotNumber) => string | null | Promise<string | null>;
+  /**
+   * Where to keep a copy of every push, if anywhere.
+   *
+   * A league server passes one; a laptop running `serve` does not, and its
+   * push path is byte-for-byte what it has always been. Without a screen to
+   * reach it from, history on a laptop is disk nobody can see — and the
+   * organiser's screen only exists on a league.
+   */
+  pushesDir?: string;
+  /** How many pushes to keep per robot. Ignored without `pushesDir`. */
+  pushesKept?: number;
+  /** Where a swallowed archive failure goes, so it is not silent as well. */
+  log?: (line: string) => void;
 }
 
 export class TeamApi {
@@ -206,7 +220,7 @@ export class TeamApi {
         );
       }
 
-      await this.keep(scratch, manifest.team, manifest.robot);
+      await this.keep(scratch, manifest, { id: null, slug: team }, 'workspace');
       const notice = await this.opts.noticeFor?.(manifest.team, manifest.robot);
       return Response.json({
         ok: true,
@@ -311,7 +325,7 @@ export class TeamApi {
         );
       }
 
-      const token = await this.keep(scratch, manifest.team, manifest.robot);
+      const token = await this.keep(scratch, manifest, { id: null, slug: slugifyTeam(manifest.team) }, 'push');
       const notice = await this.opts.noticeFor?.(manifest.team, manifest.robot);
       return Response.json({
         ok: true,
@@ -334,9 +348,9 @@ export class TeamApi {
    * successful push, whether or not the code changed — it authenticates this
    * validated copy, not a standing account.
    */
-  private async keep(scratch: string, team: string, robot: RobotNumber): Promise<string> {
-    const teamDir = join(this.opts.submissionsDir, slugifyTeam(team));
-    const target = join(teamDir, String(robot));
+  private async keep(scratch: string, manifest: Manifest, by: PushBy, via: PushVia): Promise<string> {
+    const teamDir = join(this.opts.submissionsDir, slugifyTeam(manifest.team));
+    const target = join(teamDir, String(manifest.robot));
     await mkdir(teamDir, { recursive: true });
     await rm(target, { recursive: true, force: true });
     try {
@@ -349,7 +363,89 @@ export class TeamApi {
 
     const token = randomBytes(24).toString('base64url');
     await writeFile(join(target, TOKEN_FILENAME), token);
+
+    // Kept after the move, so the archive is a copy of what is actually live
+    // rather than of a scratch folder that might not have survived it — and
+    // **after** the token exists, because `keepPush` is the thing that knows
+    // not to copy it.
+    //
+    // Wrapped, because a push that has already succeeded must not be reported
+    // as failed for want of a copy. The team's code is in; the history is a
+    // convenience for somebody else entirely, and a full disk is not a reason
+    // to tell a student their robot did not upload.
+    if (this.opts.pushesDir) {
+      try {
+        await keepPush(this.opts.pushesDir, {
+          folder: target,
+          manifest,
+          by,
+          via,
+          keep: this.opts.pushesKept ?? 10,
+        });
+      } catch (err) {
+        this.opts.log?.(`[pushes] ${slugifyTeam(manifest.team)}/${manifest.robot} not archived: ${(err as Error).message}`);
+      }
+    }
+
     return token;
+  }
+
+  /**
+   * Put a folder through the push path on somebody else's behalf.
+   *
+   * This is how an organiser rolls a team back to an earlier push, and it is
+   * deliberately **not a way into the submissions tree** — it is the same
+   * `validateSubmission` and the same `keep` an ordinary push takes, with the
+   * caller supplying who is doing it. Everything that matters follows from
+   * that rather than being re-implemented: a push that no longer validates
+   * fails loudly, a fresh join token is minted, `noticeFor` fires so Phase
+   * 11's lineup lock answers exactly as it does for a team's own push, and the
+   * restore is itself archived — so undoing one is just another one.
+   */
+  async restore(
+    files: { name: string; content: Buffer }[],
+    expect: { team: string; robot: RobotNumber },
+    by: PushBy,
+  ): Promise<
+    | { ok: true; team: string; robot: RobotNumber; token: string; notice?: string }
+    | { ok: false; reason: string; status: number }
+  > {
+    const { pythonLibDir } = this.opts;
+    if (!pythonLibDir) {
+      return { ok: false, status: 400, reason: 'this server has no python library configured; nothing can be validated' };
+    }
+    if (files.length === 0) return { ok: false, status: 400, reason: 'that push kept no files' };
+
+    const scratch = await mkdtemp(join(tmpdir(), 'rcja-restore-'));
+    try {
+      for (const file of files) {
+        if (!SAFE_SUBMIT_PATH.test(file.name)) {
+          return { ok: false, status: 400, reason: `"${file.name}" is not a safe filename` };
+        }
+        await writeFile(join(scratch, file.name), file.content);
+      }
+
+      const result = await validateSubmission(scratch, { pythonLibDir });
+      // A push that was valid when it was made and is not valid now — the
+      // python library has moved on under it, say. Loud, with the validator's
+      // own sentence, rather than quietly seating a robot that cannot load.
+      if (!result.ok) return { ok: false, status: 400, reason: result.reason };
+
+      const manifest = result.value;
+      if (slugifyTeam(manifest.team) !== slugifyTeam(expect.team) || manifest.robot !== expect.robot) {
+        return {
+          ok: false,
+          status: 400,
+          reason: `that push says it is ${manifest.team} robot ${manifest.robot}, not ${expect.team} robot ${expect.robot}`,
+        };
+      }
+
+      const token = await this.keep(scratch, manifest, by, 'rollback');
+      const notice = await this.opts.noticeFor?.(manifest.team, manifest.robot);
+      return { ok: true, team: manifest.team, robot: manifest.robot, token, ...(notice ? { notice } : {}) };
+    } finally {
+      await rm(scratch, { recursive: true, force: true }).catch(() => {});
+    }
   }
 }
 

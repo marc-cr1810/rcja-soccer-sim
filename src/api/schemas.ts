@@ -645,6 +645,18 @@ export const ReplayBodySchema = z
   .openapi('ReplayBody', { description: 'Body for POST /api/admin/tournament/replay' });
 export type ReplayBody = z.infer<typeof ReplayBodySchema>;
 
+export const RollbackBodySchema = z
+  .object({
+    stamp: z.string().openapi({ description: 'Which kept push to put back, by its directory name' }),
+    reason: z
+      .string()
+      .trim()
+      .min(1)
+      .openapi({ description: 'Required, like every amend verb: without one this is an edit, not a correction' }),
+  })
+  .openapi('RollbackBody', { description: 'Body for POST /api/admin/teams/:slug/:robot/rollback' });
+export type RollbackBody = z.infer<typeof RollbackBodySchema>;
+
 export const SetDisabledBodySchema = z
   .object({ disabled: z.boolean().optional() })
   .openapi('SetDisabledBody', { description: 'Body for POST /api/admin/accounts/{id}/disabled' });

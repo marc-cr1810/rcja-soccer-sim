@@ -8,8 +8,9 @@ slice decided, what running it taught, and what is still ahead.
 When the phase closes, its result collapses into PHASES.md the way Phase 10's
 did, and this file goes with it.
 
-**Where it stands: A to E are built and verified live (19 September 2026).
-F to I are not started.**
+**Where it stands: A to F are built and verified live (19 September 2026).
+G, H and I are not started — and the gate itself is now met in all four
+clauses.**
 
 ## The gate, clause by clause
 
@@ -21,7 +22,7 @@ F to I are not started.**
 | --- | --- |
 | reschedules a fixture | **Done** — C wrote kick-off times, D put them behind a button |
 | stops a runaway practice field | **Done** — it already worked; E gave it its own screen and the reasons beside it |
-| fixes a team's mis-uploaded file | **Not built.** F1 then F2. The only clause with nothing behind it |
+| fixes a team's mis-uploaded file | **Done** — F1 kept the pushes, F2 put them behind a button |
 | re-runs an abandoned game | **Done** — D |
 | the audit log saying who did each one | **Partly.** D made it true for draw corrections; H closes the rest |
 
@@ -148,17 +149,54 @@ queue goes at the bottom of the same page.
 - `tenancy.waiting()` has said it is "for an admin who wants to see the line"
   since Phase 8 and had no screen to say it on until now.
 
-### F1 — push history
+### F1 — push history ✅
 
-`data/pushes/<team>/<robot>/<stamp>/`, deliberately outside `submissions/` so
-`listEntrants` and `resolveLineup` cannot trip over it. Not a screen: a
-prerequisite, because there is nothing to roll back to until pushes are kept.
+`<pushesDir>/<team>/<robot>/<stamp>/{push.json,files/}`, its own tree beside
+`submissions/` and `workspaces/` rather than inside any of them.
 
-### F2 — `/admin/teams`, read-only, and rollback
+- **The layout is chosen against a failure, not for tidiness.** `listEntrants`
+  reads every entry in the submissions directory as a team slug and
+  `resolveLineup` hands a robot folder's listing to `parseManifest`. History
+  kept in either is something they walk into, and the symptom would have
+  arrived on a competition day. There is a test whose only job is to say so.
+- **The join token is never copied.** It is a credential minted fresh on every
+  push; a history of them would be a pile of live keys for every push ever
+  made. A rollback is an ordinary push, so it mints its own.
+- **One hook, in `keep()`** — the single place both doors already went through,
+  which is Phase 5's *one way in, not two* kept rather than excepted. Wrapped
+  and logged, never thrown: a push that has already succeeded must not be
+  reported as failed because the archive could not be written.
+- `pushes.keep`, default 10, pruned oldest-first. A student pressing Run all
+  afternoon can make hundreds, so the bound is a number rather than a habit.
+- **League only.** A laptop running `serve` has no screen to reach a history
+  from, and its push path is byte-for-byte what it was.
 
-The gate's *fixes a team's mis-uploaded file*. A rollback is replayed **as an
-ordinary push** — validator, fresh join token, Phase 11's lineup lock — so
-nothing gets a second code path into a team's folder.
+### F2 — `/admin/teams`, read-only, and rollback ✅
+
+The gate's *fixes a team's mis-uploaded file*.
+
+- **No new capability.** `team.submit` has been `any` for admin since Phase 6 —
+  *an organiser may push as any team* — and reading what a team pushed and
+  replaying one are both that. The table stays a list that can be read in one
+  sitting. The routes go above the `account.manage` gate: reading team files is
+  not being able to reset passwords.
+- **Rollback is the ordinary push path**, through `TeamApi.restore` → the same
+  `validateSubmission` → the same `keep`. Nothing in the league server knows
+  how to write into `submissions/`, which is decided fork 2 kept as a property
+  of the code rather than a promise. What falls out for free: a push that no
+  longer validates fails with the validator's own sentence, a fresh token is
+  minted, `noticeFor` fires so the lineup lock answers identically, and the
+  rollback is itself archived.
+- **`loads` is the answer to the question the screen is opened with.** The same
+  three checks the lineup makes, because a robot that fails any of them is not
+  an error — it is quietly replaced by the built-in agent wearing the team's
+  name, and nobody finds out until kick-off. Live, this immediately found a
+  hand-placed folder and said *"no join token — this folder did not arrive
+  through a push"*, which nothing anywhere had ever reported.
+- **The workspace is not touched, and the screen says so.** A rollback restores
+  what was *submitted*; the team's editor still holds what broke it, and their
+  next Run puts it back. Rewriting a student's editor during a competition
+  would destroy work with no record of it.
 
 ### G — `/admin/people`
 
@@ -203,6 +241,10 @@ is why the phase is being walked in slices with a live pass at the end of each.
   and there is no DOM harness.
 - **`bun test` forces `TZ=UTC`; a spawned CLI runs in the machine's own zone.**
   A test asserting on a bare `09:00` fails by the offset. Spell UTC in those.
+- **A history nobody can put in order is not a history.** Two pushes forty
+  seconds apart both read *10:54 AM*, because `when()` stops at minutes — right
+  for a kick-off, wrong for the one list whose entire job is *which came
+  first*. `whenExact()` exists for that, and for nothing else.
 
 ## Known gaps, carried deliberately
 

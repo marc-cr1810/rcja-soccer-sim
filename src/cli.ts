@@ -1003,7 +1003,7 @@ async function tournament(flags: Map<string, string>): Promise<void> {
  * - Option A (proper install on an actual system): `~/.local/share/rcja-soccer-sim/<subdir>` (Linux XDG standard).
  */
 export function defaultStorageDir(
-  subdir: 'league' | 'tournaments' | 'submissions' | 'workspaces',
+  subdir: 'league' | 'tournaments' | 'submissions' | 'workspaces' | 'pushes',
   cwd: string = process.cwd(),
 ): string {
   // 1. If running inside this project repo (detected by package.json name):
@@ -1067,6 +1067,18 @@ function submissionsRoot(flags?: Map<string, string>): string {
 
 function workspacesRoot(flags?: Map<string, string>): string {
   return flags?.has('workspaces-dir') ? resolve(flags.get('workspaces-dir')!) : defaultStorageDir('workspaces');
+}
+
+/**
+ * Where copies of earlier pushes go — a tree of its own, never under
+ * `submissions/`.
+ *
+ * `listEntrants` reads every entry in the submissions directory as a team
+ * slug and `resolveLineup` hands a robot folder's listing to `parseManifest`,
+ * so a history folder inside either would be something they walk into.
+ */
+function pushesRoot(flags?: Map<string, string>): string {
+  return flags?.has('pushes') ? resolve(flags.get('pushes')!) : defaultStorageDir('pushes');
 }
 
 /** A password, off the terminal rather than out of a shell history. */
@@ -2110,6 +2122,7 @@ async function league(flags: Map<string, string>): Promise<void> {
     log: (line) => console.log(`  ${line}`),
     settings,
     settingSources: sources,
+    pushesDir: pushesRoot(flags),
     world: {
       viewerRoot: viewerRoot(),
       refereeRoot: refereeRoot(),
@@ -2481,6 +2494,7 @@ function budgetFlags(
   if (flags.has('seat-cpu')) out.seatCpuPercent = num(flags, 'seat-cpu', 0);
   if (flags.has('seat-mem')) out.seatMemoryMb = num(flags, 'seat-mem', 0);
   if (flags.has('practice-max')) out.practiceMax = num(flags, 'practice-max', 0);
+  if (flags.has('pushes-kept')) out.pushesKept = num(flags, 'pushes-kept', 0);
   if (flags.has('demo')) out.demoOn = flags.get('demo') !== 'false';
   if (flags.has('demo-bots')) out.demoBots = flags.get('demo-bots')!;
   if (flags.has('demo-home')) out.demoHome = flags.get('demo-home')!;

@@ -98,6 +98,7 @@ const ROUTES: [RegExp, Route][] = [
   [/^\/admin$/, admin],
   [/^\/admin\/arenas$/, adminArenas],
   [/^\/admin\/tournaments$/, adminTournaments],
+  [/^\/admin\/teams$/, adminTeams],
   [/^\/referee\/?$/, refereeList],
   [/^\/referee\/m\/([^/]+)$/, (p) => refereeMatch(p[0]!)],
   // END-STATE.md's own name for the pre-game screen, pointed at the same
@@ -2183,6 +2184,10 @@ async function admin(): Promise<void> {
         <span class="grow">Correct the draw</span>
         <span class="state">move, void, withdraw, play it again</span>
       </a>
+      <a class="row" href="/admin/teams">
+        <span class="grow">Team files</span>
+        <span class="state">what is loaded, and putting an earlier push back</span>
+      </a>
     </div>
 
     <h2>Invite somebody</h2>
@@ -2314,6 +2319,25 @@ function budgetPanel(load: AdminArenas): string {
  * A venue's real failure mode is not a subtle bug, it is four things running
  * that should not be and nobody knowing which machine they are on.
  */
+/**
+ * A time with its seconds, for a list whose whole job is *which came first*.
+ *
+ * `when()` stops at minutes, which is right for a kick-off and wrong here:
+ * two pushes forty seconds apart both read "10:54 AM", and a history nobody
+ * can put in order is not a history.
+ */
+function whenExact(iso: string): string {
+  const at = new Date(iso);
+  if (Number.isNaN(at.getTime())) return '';
+  const time = at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const today = new Date();
+  const sameDay =
+    at.getDate() === today.getDate() &&
+    at.getMonth() === today.getMonth() &&
+    at.getFullYear() === today.getFullYear();
+  return sameDay ? time : `${at.toLocaleDateString([], { day: 'numeric', month: 'short' })}, ${time}`;
+}
+
 /** "4m ago", for a column where a wall-clock time would be noise. */
 function since(iso: string): string {
   const ms = Date.now() - Date.parse(iso);
@@ -2705,6 +2729,256 @@ function amendmentRow(record: AdminAmendment): string {
       <span class="state">${esc(when(record.at))}</span>
     </div>
   `);
+}
+
+// ------------------------------------------------- a team's files
+
+interface LiveFolder {
+  entry: string | null;
+  team: string | null;
+  /** Will this actually load, or will the built-in agent play in their name? */
+  loads: boolean;
+  /** Why not, in the validator's own words. */
+  why: string | null;
+  at: string;
+  files: { name: string; bytes: number }[];
+}
+
+interface AdminRobot {
+  robot: 1 | 2;
+  live: LiveFolder | null;
+  kept: number;
+}
+
+interface KeptPush {
+  stamp: string;
+  at: string;
+  by: { id: string | null; slug: string };
+  via: string;
+  team: string;
+  robot: number;
+  entry: string;
+  files: { name: string; bytes: number }[];
+}
+
+/** Which robot's history is open, and which of its pushes is being read. */
+let openRobot: { slug: string; robot: 1 | 2 } | null = null;
+let openPush: string | null = null;
+
+/**
+ * Team files, and putting an earlier push back.
+ *
+ * Read-only, deliberately: an organiser cannot type into a team's folder here,
+ * because a folder somebody hand-edited is a folder that never went through
+ * the validator. What they can do is put back a push that did — which is the
+ * ordinary push path, so it is checked, re-tokened and archived like any
+ * other.
+ */
+async function adminTeams(): Promise<void> {
+  if (!me.can.admin) return void go('/login?next=%2Fadmin%2Fteams');
+  const data = await api<{ ok: boolean; teams: { slug: string; displayName: string; disabled: boolean; robots: AdminRobot[] }[] }>(
+    '/api/admin/teams',
+  );
+
+  const open = openRobot
+    ? await api<{ ok: boolean; pushes: KeptPush[]; live: LiveFolder | null }>(
+        `/api/admin/teams/${encodeURIComponent(openRobot.slug)}/${openRobot.robot}`,
+      )
+    : null;
+  const reading =
+    openRobot && openPush
+      ? await api<{ ok: boolean; push: KeptPush; files: { name: string; bytes: number; text?: string; binary?: true }[] }>(
+          `/api/admin/teams/${encodeURIComponent(openRobot.slug)}/${openRobot.robot}/${openPush}`,
+        )
+      : null;
+
+  view.innerHTML = h(`
+    <p class="dim"><a href="/admin">Administration</a></p>
+    <h1>Team files</h1>
+    <p class="dim">What each robot has on the server, and every push kept before it.</p>
+
+    ${
+      data.teams.length === 0
+        ? `<div class="empty">No team accounts yet.</div>`
+        : data.teams.map((team) => teamFilesBlock(team, open?.pushes ?? [], reading)).join('')
+    }
+  `);
+
+  for (const button of view.querySelectorAll<HTMLButtonElement>('button[data-robot]')) {
+    button.addEventListener('click', async () => {
+      const slug = button.dataset.team!;
+      const robot = button.dataset.robot === '2' ? 2 : 1;
+      const same = openRobot?.slug === slug && openRobot.robot === robot;
+      openRobot = same ? null : { slug, robot };
+      openPush = null;
+      pending = null;
+      await adminTeams();
+    });
+  }
+
+  for (const row of view.querySelectorAll<HTMLElement>('[data-stamp]')) {
+    row.addEventListener('click', async () => {
+      const stamp = row.dataset.stamp!;
+      openPush = openPush === stamp ? null : stamp;
+      pending = null;
+      await adminTeams();
+    });
+  }
+
+  for (const button of view.querySelectorAll<HTMLButtonElement>('button.rollback')) {
+    button.addEventListener('click', async () => {
+      pending = { kind: 'rollback', title: 'Put this push back', fixtureId: button.dataset.stamp! };
+      await adminTeams();
+    });
+  }
+
+  if (view.querySelector('#rollback-form')) {
+    form('#rollback-form', submitRollback);
+    view.querySelector('#rollback-cancel')!.addEventListener('click', async () => {
+      pending = null;
+      await adminTeams();
+    });
+  }
+}
+
+function teamFilesBlock(
+  team: { slug: string; displayName: string; disabled: boolean; robots: AdminRobot[] },
+  pushes: KeptPush[],
+  reading: { push: KeptPush; files: { name: string; bytes: number; text?: string; binary?: true }[] } | null,
+): string {
+  return h(`
+    <h2>${esc(team.displayName)}${team.disabled ? ' <span class="dim">(disabled)</span>' : ''}</h2>
+    <div class="rows">
+      ${team.robots.map((robot) => robotFilesRow(team.slug, robot)).join('')}
+    </div>
+    ${
+      openRobot?.slug === team.slug
+        ? pushesBlock(pushes, reading)
+        : ''
+    }
+  `);
+}
+
+function robotFilesRow(slug: string, robot: AdminRobot): string {
+  const open = openRobot?.slug === slug && openRobot.robot === robot.robot;
+  if (!robot.live) {
+    return h(`<div class="row">
+      <span class="at">${robot.robot}</span>
+      <span class="grow dim">nothing pushed</span>
+    </div>`);
+  }
+  return h(`
+    <div class="row">
+      <span class="at">${robot.robot}</span>
+      <span class="grow">${esc(robot.live.entry ?? 'no entry point')}
+        <br /><span class="dim">${robot.live.files.map((f) => esc(f.name)).join(', ')}</span></span>
+      <span class="state">${esc(when(robot.live.at))}</span>
+      <span class="state${robot.live.loads ? '' : ' closing'}">${
+        robot.live.loads ? 'loads' : esc(robot.live.why ?? 'will not load')
+      }</span>
+      <button data-team="${esc(slug)}" data-robot="${robot.robot}">${
+        open ? 'Hide' : `${robot.kept} kept`
+      }</button>
+    </div>
+  `);
+}
+
+function pushesBlock(
+  pushes: KeptPush[],
+  reading: { push: KeptPush; files: { name: string; bytes: number; text?: string; binary?: true }[] } | null,
+): string {
+  // Which robot this is a history of, said out loud: the list renders under a
+  // team's two rows and would otherwise read as the team's rather than one
+  // robot's.
+  const heading = `<h3>Robot ${openRobot?.robot ?? 1} &middot; earlier pushes</h3>`;
+  if (pushes.length === 0) {
+    return h(`${heading}<div class="empty">Nothing kept for this robot yet.</div>`);
+  }
+  return h(`
+    ${heading}
+    <div class="rows">
+      ${pushes
+        .map(
+          (push) => `<div class="row pointer" data-stamp="${esc(push.stamp)}">
+            <span class="at">${esc(whenExact(push.at))}</span>
+            <span class="grow">${esc(push.files.map((f) => f.name).join(', '))}</span>
+            <span class="state">${esc(push.by.slug)}${push.by.id ? '' : ' (key)'}</span>
+            <span class="state">${push.via === 'rollback' ? 'put back' : esc(push.via)}</span>
+          </div>
+          ${reading && reading.push.stamp === push.stamp ? pushDetail(reading) : ''}`,
+        )
+        .join('')}
+    </div>
+  `);
+}
+
+function pushDetail(reading: {
+  push: KeptPush;
+  files: { name: string; bytes: number; text?: string; binary?: true }[];
+}): string {
+  return h(`
+    <div class="panel">
+      ${reading.files
+        .map(
+          (file) => `<div class="filename">${esc(file.name)} <span class="dim">${file.bytes} bytes</span></div>
+          ${
+            file.text === undefined
+              ? `<p class="dim">Not text — shown by name and size only.</p>`
+              : `<pre class="code">${esc(file.text)}</pre>`
+          }`,
+        )
+        .join('')}
+      ${
+        // Armed where the button was, not at the bottom of the list: the
+        // decision and the code it is about have to be in one eyeful.
+        pending?.kind === 'rollback' && pending.fixtureId === reading.push.stamp
+          ? rollbackPanel()
+          : `<button class="rollback" data-stamp="${esc(reading.push.stamp)}">Put this back</button>`
+      }
+    </div>
+  `);
+}
+
+function rollbackPanel(): string {
+  return h(`
+    <form class="panel amend" id="rollback-form">
+      <strong>Put this push back</strong>
+      <p class="dim">It goes through the validator like any push, and gets a new join token.
+        The team's own workspace is <em>not</em> touched — their next Run or push will
+        put back whatever is in their editor.</p>
+      <label for="rollback-why">Why</label>
+      <input id="rollback-why" placeholder="they uploaded robot 2's file" />
+      <div>
+        <button class="primary" type="submit">Put it back</button>
+        <button class="quiet" type="button" id="rollback-cancel">Cancel</button>
+      </div>
+      <div class="error" id="error" hidden></div>
+    </form>
+  `);
+}
+
+async function submitRollback(): Promise<string | null> {
+  if (!pending || !openRobot) return null;
+  const reason = value('#rollback-why');
+  if (!reason) return 'Say why. A rollback without a reason is an edit.';
+
+  const res = await api<{ ok: boolean; reason?: string; notice?: string }>(
+    `/api/admin/teams/${encodeURIComponent(openRobot.slug)}/${openRobot.robot}/rollback`,
+    { method: 'POST', body: JSON.stringify({ stamp: pending.fixtureId, reason }) },
+  );
+  if (!res.ok) return res.reason ?? 'that did not work';
+  pending = null;
+  openPush = null;
+  await adminTeams();
+  // Phase 11's lineup lock, answering exactly as it does for a team's own
+  // push: the code is in, and it is for the game after the one already locked.
+  if (res.notice) {
+    const note = document.createElement('div');
+    note.className = 'warn';
+    note.textContent = res.notice;
+    view.querySelector('h1')?.after(note);
+  }
+  return null;
 }
 
 // ----------------------------------------------------------------- plumbing

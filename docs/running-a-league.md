@@ -765,6 +765,48 @@ a league server exactly as a fixture does, so every one of these checks is on
 the only road in. On a plain `serve practice` it still binds wide: there is no
 hub in front of it and no accounts to check.
 
+## Fixing a team's file
+
+A student uploads the wrong file twenty minutes before their match. It happens
+at every event, and until Phase 12 the only fix was an ssh session.
+
+**`/admin/teams`** shows every team, both robots, and what each one actually
+has on the server: the entry point, the files, when they arrived, and — the
+question the screen exists for — whether it **loads**. That last one is the
+same three checks the lineup makes: a manifest that parses, a robot number
+matching the folder it is in, and a join token. A robot that fails any of them
+does not error; it is quietly replaced by the built-in agent wearing the team's
+name, and nobody finds out until kick-off.
+
+Under each robot is every push kept before the one that is live, newest first,
+with who made it. Open one to read its files, then **Put this back**, with a
+reason — required, like every `amend` verb, because without one it is an edit
+rather than a correction.
+
+An organiser **cannot type into a team's folder**, deliberately. A folder
+somebody hand-edited is a folder that never went through the validator, and a
+competition whose entry route can be bypassed is not one. What a rollback does
+instead is put an earlier push through **the ordinary push path**: the same
+validator, a freshly minted join token, and the same lineup-lock notice a
+team's own push gets. Three things follow from that rather than being promised:
+
+- a push that was valid when it was made and no longer is **fails loudly**,
+  with the validator's own sentence, rather than seating a robot that cannot
+  start;
+- rolling back during a locked pre-game lands for the *next* match and leaves
+  the one being played alone;
+- the rollback is itself kept, so undoing one is just another one.
+
+**The team's workspace is not touched.** A rollback restores what they
+*submitted*; their browser editor still holds whatever broke it, and their next
+Run or push will put it straight back. The screen says so beside the button —
+the fix is not finished until the team fixes their own copy.
+
+Ten pushes are kept per robot by default. `pushes.keep` in `league.json`
+changes it, or `--pushes-kept` for one run; `--pushes <dir>` moves where they
+live. They are deliberately **not** stored under `submissions/`, which is
+scanned as a list of teams.
+
 ## Watching the machine
 
 **`/admin/arenas`** shows three numbers rather than one — what you set, what

@@ -38,6 +38,7 @@
 
 import type { Server } from 'bun';
 import { extname, join, normalize, resolve } from 'node:path';
+import { readdir, readFile, stat } from 'node:fs/promises';
 
 import { splitArenaPath, type ServerOptions } from './server';
 import { ArenaSupervisor } from './arenas';
@@ -62,7 +63,8 @@ import { totalUsage } from './usage';
 import { Accounts, type Account } from './accounts';
 import { can, capabilitiesOf, fixtureTarget, GUEST, type Actor, type Capability } from './capabilities';
 import { bearer, type Authority, type AuthRequest, type Submitter } from './authority';
-import { slugifyTeam } from './manifest';
+import { parseManifest, slugifyTeam, TOKEN_FILENAME } from './manifest';
+import { listPushes, readPush } from './pushes';
 import { hashSubmission } from './submission';
 import { resolveLineup, type LineupEntry } from './lineup';
 import {
@@ -86,6 +88,7 @@ import {
   InviteTeamBodySchema,
   ResetPasswordBodySchema,
   ReplayBodySchema,
+  RollbackBodySchema,
   RunBodySchema,
   SeatActionBodySchema,
   SeatBodySchema,
@@ -139,6 +142,16 @@ export interface LeagueOptions {
    * world of its own.
    */
   world: Omit<ServerOptions, 'port' | 'host' | 'authority'>;
+  /**
+   * Where a copy of every push is kept, so an organiser can put one back.
+   *
+   * On `LeagueOptions` rather than inside `world`, because it is a league
+   * concept: a laptop running `serve` has no screen to reach a history from,
+   * and its push path stays exactly what it has always been. Defaults to
+   * `pushes` inside the data directory when not given — league data, kept
+   * where the rest of this league's data is.
+   */
+  pushesDir?: string;
   /**
    * What the venue has turned: the arena ceiling, the seat grants, the
    * practice caps. Defaults when absent, which is what a test wants.
@@ -370,6 +383,8 @@ export class LeagueServer {
   private readonly workspaceRoot: string | null;
   /** Where validated pushes live, resolved once rather than at each reader. */
   private readonly submissionsDirectory: string;
+  /** Where the copies of earlier pushes live. Never inside the tree above. */
+  private readonly pushesDirectory: string;
   private readonly log: (line: string) => void;
   private readonly authority: Authority;
   private readonly teams: TeamApi;
@@ -472,6 +487,7 @@ export class LeagueServer {
     this.siteRoot = opts.siteRoot ? resolve(opts.siteRoot) : null;
     this.workspaceRoot = opts.world.workspaceRoot ? resolve(opts.world.workspaceRoot) : null;
     this.submissionsDirectory = resolve(opts.world.submissionsDir ?? 'submissions');
+    this.pushesDirectory = opts.pushesDir ? resolve(opts.pushesDir) : join(resolve(opts.dataDir), 'pushes');
     this.accounts = new Accounts({ file: join(resolve(opts.dataDir), 'league.db') });
     this.authority = accountsAuthority(this.accounts);
     this.now = opts.now ?? Date.now;
@@ -482,6 +498,9 @@ export class LeagueServer {
       authority: this.authority,
       workspaces: new WorkspaceStore({ dir: resolve(opts.world.workspacesDir ?? 'workspaces') }),
       submissionsDir: this.submissionsDirectory,
+      pushesDir: this.pushesDirectory,
+      pushesKept: this.settings.pushes.keep,
+      log: this.log,
       pythonLibDir: opts.world.pythonLibDir ? resolve(opts.world.pythonLibDir) : null,
       // The one thing a push cannot work out for itself: whether the team
       // making it is twenty minutes from a match whose lineup is already
@@ -2593,6 +2612,23 @@ export class LeagueServer {
       return await this.handleReplay(req, actor);
     }
 
+    // Team files are `team.submit` at `any` — "an organiser may push as any
+    // team", which the table has said since Phase 6. Reading what a team
+    // pushed and replaying an earlier push are both that, so no new capability
+    // is invented and the list stays one that can be read in a sitting.
+    if (path === 'teams' && req.method === 'GET') {
+      if (!can(actor, 'team.submit')) return this.refuse(req, actor, '/admin');
+      return Response.json(await this.adminTeams());
+    }
+    if (path.startsWith('teams/') && req.method === 'GET') {
+      if (!can(actor, 'team.submit')) return this.refuse(req, actor, '/admin');
+      return await this.adminTeamPushes(path.slice('teams/'.length));
+    }
+    if (path.startsWith('teams/') && path.endsWith('/rollback') && req.method === 'POST') {
+      if (!can(actor, 'team.submit')) return this.refuse(req, actor, '/admin');
+      return await this.handleRollback(req, actor, path.slice('teams/'.length, -'/rollback'.length));
+    }
+
     if (!can(actor, 'account.manage')) return this.refuse(req, actor, '/admin');
     const admin = actor.id;
 
@@ -2649,6 +2685,150 @@ export class LeagueServer {
   }
 
   // ------------------------------------------------------ administering a draw
+
+  /**
+   * Every team, and what each of their robots has on the server right now.
+   *
+   * The question this screen exists to answer is *"a student uploaded the
+   * wrong file — what is actually loaded?"*, so `loads` is the same three
+   * checks `listEntrants` makes and not a looser guess: a manifest that
+   * parses, a robot number matching the folder, and a token. A robot that
+   * fails any of them plays as the built-in agent wearing the team's name,
+   * which is precisely the thing nobody notices until kick-off.
+   */
+  private async adminTeams(): Promise<unknown> {
+    const teams = [];
+    for (const account of this.accounts.list().filter((one) => one.role === 'team')) {
+      teams.push({
+        slug: account.slug,
+        displayName: account.displayName,
+        disabled: account.disabledAt !== null,
+        robots: [await this.robotFiles(account.slug, 1), await this.robotFiles(account.slug, 2)],
+      });
+    }
+    return { ok: true, teams };
+  }
+
+  /** What is live for one robot, and how many earlier pushes are kept. */
+  private async robotFiles(slug: string, robot: 1 | 2): Promise<unknown> {
+    const dir = join(this.submissionsDirectory, slug, String(robot));
+    let live: unknown = null;
+    try {
+      const names = await readdir(dir);
+      const parsed = parseManifest(await readFile(join(dir, 'manifest.json')), new Set(names));
+      const files = [];
+      for (const name of names.filter((one) => one !== TOKEN_FILENAME).sort()) {
+        files.push({ name, bytes: (await stat(join(dir, name))).size });
+      }
+      live = {
+        entry: parsed.ok ? parsed.value.entry : null,
+        team: parsed.ok ? parsed.value.team : null,
+        // Why it will not load, in the validator's own words, rather than a
+        // bare false — the organiser is about to have to explain it to a
+        // fifteen-year-old.
+        loads: parsed.ok && parsed.value.robot === robot && names.includes(TOKEN_FILENAME),
+        why: parsed.ok
+          ? parsed.value.robot !== robot
+            ? `manifest.json says this is robot ${parsed.value.robot}`
+            : names.includes(TOKEN_FILENAME)
+              ? null
+              : 'no join token — this folder did not arrive through a push'
+          : parsed.reason,
+        at: (await stat(join(dir, 'manifest.json'))).mtime.toISOString(),
+        files,
+      };
+    } catch {
+      // Nothing pushed for this robot. Not an error: most teams have one.
+    }
+    return { robot, live, kept: (await listPushes(this.pushesDirectory, slug, robot)).length };
+  }
+
+  /**
+   * One robot's kept pushes, or the files of one of them.
+   *
+   * `teams/<slug>/<robot>` lists; `teams/<slug>/<robot>/<stamp>` opens one.
+   * Contents come back decoded where they are text and named-and-sized where
+   * they are not, because a folder is Python and a mis-uploaded file is quite
+   * often the thing that is not.
+   */
+  private async adminTeamPushes(rest: string): Promise<Response> {
+    const parts = rest.split('/');
+    const slug = slugifyTeam(decodeURIComponent(parts[0] ?? ''));
+    const robot = parts[1] === '2' ? 2 : 1;
+    if (!slug || (parts[1] !== '1' && parts[1] !== '2')) {
+      return Response.json({ ok: false, reason: 'which team, and which robot?' }, { status: 404 });
+    }
+
+    if (parts.length === 2) {
+      return Response.json({
+        ok: true,
+        slug,
+        robot,
+        ...(await this.robotFiles(slug, robot) as object),
+        pushes: await listPushes(this.pushesDirectory, slug, robot),
+      });
+    }
+
+    const found = await readPush(this.pushesDirectory, slug, robot, parts[2] ?? '');
+    if (!found) return Response.json({ ok: false, reason: 'no such push' }, { status: 404 });
+    return Response.json({
+      ok: true,
+      push: found.record,
+      files: found.files.map((file) => ({
+        name: file.name,
+        bytes: file.content.length,
+        ...textOf(file.content),
+      })),
+    });
+  }
+
+  /**
+   * Put an earlier push back.
+   *
+   * The handler reads the archive and hands it to `TeamApi.restore`, which is
+   * the ordinary push path — the same validator, the same writer, the same
+   * freshly minted token, and the same `noticeFor` hook, so Phase 11's lineup
+   * lock answers here exactly as it does for a team's own push. Nothing in
+   * this method knows how to write into the submissions tree, which is
+   * decided fork 2 kept as a property of the code rather than a promise.
+   */
+  private async handleRollback(req: Request, actor: Actor, rest: string): Promise<Response> {
+    const parts = rest.split('/');
+    const slug = slugifyTeam(decodeURIComponent(parts[0] ?? ''));
+    if (!slug || (parts[1] !== '1' && parts[1] !== '2')) {
+      return Response.json({ ok: false, reason: 'which team, and which robot?' }, { status: 404 });
+    }
+    const robot = parts[1] === '2' ? 2 : 1;
+
+    const body = await readJsonBody(req, 8 * 1024);
+    if (!body.ok) return Response.json({ ok: false, reason: body.reason }, { status: body.status });
+    const validated = validateBody(body.payload, RollbackBodySchema, 'a rollback needs a push and a reason');
+    if (!validated.ok) return validated.response;
+    const { stamp, reason } = validated.value;
+
+    const found = await readPush(this.pushesDirectory, slug, robot, stamp);
+    if (!found) return Response.json({ ok: false, reason: 'no such push' }, { status: 404 });
+
+    const done = await this.teams.restore(
+      found.files,
+      { team: found.record.team, robot },
+      { id: actor.id, slug: actor.slug ?? 'unknown' },
+    );
+    if (!done.ok) return Response.json({ ok: false, reason: done.reason }, { status: done.status });
+
+    if (actor.id) {
+      this.accounts.record(actor.id, 'team.submit', `${slug}/${robot}`, `rolled back to ${stamp}: ${reason}`);
+    }
+    return Response.json({
+      ok: true,
+      team: done.team,
+      robot: done.robot,
+      ...(done.notice ? { notice: done.notice } : {}),
+      // Said back every time, because it is the half of this an organiser
+      // does not expect: the team's editor still holds whatever broke it.
+      workspace: 'the team\u2019s workspace is unchanged \u2014 their next Run or push will put it back',
+    });
+  }
 
   /**
    * The draw as an organiser has to see it to act on it.
@@ -3948,6 +4128,22 @@ function cookie(req: AuthRequest, name: string): string {
 }
 
 /** An account as anybody may see it: never the hash, never the email. */
+/**
+ * A file's contents where they are text, and its absence where they are not.
+ *
+ * A team folder is Python, and a mis-uploaded file is quite often the thing
+ * that is not — a `.pyc`, an image, a zip somebody renamed. Sending those
+ * through as mojibake would make the screen lie about what is in the folder,
+ * so they come back named and sized and nothing else.
+ */
+function textOf(content: Buffer): { text: string } | { binary: true } {
+  const text = content.toString('utf8');
+  // The round trip is the test: anything that does not survive it was not
+  // UTF-8 to begin with. A lone NUL is enough on its own.
+  if (text.includes('\u0000') || !Buffer.from(text, 'utf8').equals(content)) return { binary: true };
+  return { text };
+}
+
 function publicAccount(account: Account): Record<string, unknown> {
   return {
     id: account.id,
