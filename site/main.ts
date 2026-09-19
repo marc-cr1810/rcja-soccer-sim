@@ -96,6 +96,7 @@ const ROUTES: [RegExp, Route][] = [
   [/^\/team$/, dashboard],
   [/^\/team\/settings$/, settings],
   [/^\/admin$/, admin],
+  [/^\/admin\/arenas$/, adminArenas],
   [/^\/admin\/tournaments$/, adminTournaments],
   [/^\/referee\/?$/, refereeList],
   [/^\/referee\/m\/([^/]+)$/, (p) => refereeMatch(p[0]!)],
@@ -2171,11 +2172,13 @@ async function admin(): Promise<void> {
   view.innerHTML = h(`
     <h1>Administration</h1>
 
-    ${budgetPanel(load)}
-    ${arenaRows(load)}
-
-    <h2>The draw</h2>
     <div class="rows">
+      <a class="row" href="/admin/arenas">
+        <span class="grow">What is running</span>
+        <span class="state">${load.running} ${load.running === 1 ? 'arena' : 'arenas'}${
+          load.queue.length ? `, ${load.queue.length} waiting` : ''
+        }</span>
+      </a>
       <a class="row" href="/admin/tournaments">
         <span class="grow">Correct the draw</span>
         <span class="state">move, void, withdraw, play it again</span>
@@ -2239,16 +2242,6 @@ async function admin(): Promise<void> {
     await admin();
     return null;
   });
-
-  for (const button of view.querySelectorAll<HTMLButtonElement>('button.stop')) {
-    button.addEventListener('click', async () => {
-      const id = button.dataset.arena;
-      if (!id) return;
-      button.disabled = true;
-      await api(`/api/admin/arenas/${encodeURIComponent(id)}/stop`, { method: 'POST' });
-      await admin();
-    });
-  }
 }
 
 interface AdminArenas {
@@ -2275,7 +2268,12 @@ interface AdminArenas {
     createdAt: string;
     usage: { cores: number; memoryMb: number } | null;
     fidelity: number | null;
+    lastUsed: string;
+    closingAt: string | null;
+    open: number;
   }[];
+  /** The teams waiting for a field, front first. */
+  queue: { slug: string; offer: string | null }[];
 }
 
 /**
@@ -2316,6 +2314,25 @@ function budgetPanel(load: AdminArenas): string {
  * A venue's real failure mode is not a subtle bug, it is four things running
  * that should not be and nobody knowing which machine they are on.
  */
+/** "4m ago", for a column where a wall-clock time would be noise. */
+function since(iso: string): string {
+  const ms = Date.now() - Date.parse(iso);
+  if (!Number.isFinite(ms)) return '';
+  const minutes = Math.floor(ms / 60_000);
+  if (minutes < 1) return 'just now';
+  if (minutes < 60) return `${minutes}m ago`;
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m ago`;
+}
+
+/** The other direction, for a field that has been warned it is closing. */
+function inAbout(iso: string): string {
+  const ms = Date.parse(iso) - Date.now();
+  if (!Number.isFinite(ms)) return '';
+  if (ms <= 0) return 'any moment';
+  const minutes = Math.round(ms / 60_000);
+  return minutes < 1 ? 'in under a minute' : `in ${minutes}m`;
+}
+
 function arenaRows(load: AdminArenas): string {
   if (load.arenas.length === 0) {
     return h(`<h2>Arenas</h2><div class="empty">Nothing is running.</div>`);
@@ -2327,17 +2344,108 @@ function arenaRows(load: AdminArenas): string {
       ${load.arenas
         .map((arena) => {
           const age = Math.max(0, Math.round((now - Date.parse(arena.createdAt)) / 60000));
+          // Who is on it, and when somebody last was. A field with people on it
+          // says so and nothing more: `lastUsed` on an occupied field is simply
+          // now, and printing "just now" beside "2 here" is noise.
+          const presence = arena.open > 0 ? `${arena.open} here` : `quiet, ${since(arena.lastUsed)}`;
           return `<div class="row">
             <a class="grow" href="${esc(arena.url)}">${esc(arena.kind)} ${esc(arena.id)}</a>
-            <span class="state">${age}m</span>
+            <span class="state">${esc(arena.owner ?? '')}</span>
+            <span class="state">${age}m old</span>
+            <span class="state${arena.open > 0 ? ' playing' : ''}">${esc(presence)}</span>
             <span class="state">${arena.usage ? `${arena.usage.cores.toFixed(2)} cores · ${Math.round(arena.usage.memoryMb)} MB` : 'measuring…'}</span>
             <span class="state">${arena.fidelity === null ? '' : `realtime ${(arena.fidelity * 100).toFixed(0)}%`}</span>
+            ${
+              arena.closingAt
+                ? `<span class="state closing">closing ${esc(inAbout(arena.closingAt))}</span>`
+                : ''
+            }
             <button class="stop" data-arena="${esc(arena.id)}">Stop</button>
           </div>`;
         })
         .join('')}
     </div>
   `);
+}
+
+/**
+ * The line for a practice field.
+ *
+ * It belongs beside the fields rather than on a screen of its own, because a
+ * queue is not only a list of teams — it is what makes the idle sweep
+ * impatient. With nobody waiting a field sits for the full quiet time; with
+ * somebody waiting that halves, and only the quietest field goes per sweep.
+ * An organiser reading "closing in 2m" needs the reason in the same eyeful.
+ */
+function queueRows(load: AdminArenas): string {
+  if (load.queue.length === 0) {
+    return h(`<h2>Waiting for a field</h2><div class="empty">Nobody is waiting.</div>`);
+  }
+  return h(`
+    <h2>Waiting for a field</h2>
+    <div class="rows">
+      ${load.queue
+        .map(
+          (one, index) => `<div class="row">
+            <span class="at">${index + 1}</span>
+            <span class="grow">${esc(one.slug)}</span>
+            <span class="state">${one.offer ? `offered a field until ${esc(when(one.offer))}` : ''}</span>
+          </div>`,
+        )
+        .join('')}
+    </div>
+  `);
+}
+
+/**
+ * Every arena on the machine, and the button to stop it.
+ *
+ * Its own screen since Phase 12 — a venue's failure mode is four things
+ * running that should not be and nobody knowing which machine they are on, and
+ * that question deserves a page rather than a panel above the invitations.
+ * It polls, because every number on it is a live one.
+ */
+async function adminArenas(): Promise<void> {
+  if (!me.can.admin) return void go('/login?next=%2Fadmin%2Farenas');
+  const load = await api<AdminArenas>('/api/admin/arenas');
+
+  view.innerHTML = h(`
+    <p class="dim"><a href="/admin">Administration</a></p>
+    <h1>What is running</h1>
+
+    ${budgetPanel(load)}
+    ${arenaRows(load)}
+    ${queueRows(load)}
+  `);
+
+  for (const button of view.querySelectorAll<HTMLButtonElement>('button.stop')) {
+    button.addEventListener('click', async () => {
+      const id = button.dataset.arena;
+      if (!id) return;
+      // Armed, not immediate. The list re-renders every few seconds and this
+      // button kills somebody's field: one press on a row that moved under the
+      // cursor is not a decision anybody made.
+      if (button.dataset.armed !== 'yes') {
+        for (const other of view.querySelectorAll<HTMLButtonElement>('button.stop[data-armed=yes]')) {
+          other.dataset.armed = 'no';
+          other.textContent = 'Stop';
+        }
+        button.dataset.armed = 'yes';
+        button.textContent = 'Stop it — sure?';
+        return;
+      }
+      button.disabled = true;
+      await api(`/api/admin/arenas/${encodeURIComponent(id)}/stop`, { method: 'POST' });
+      await adminArenas();
+    });
+  }
+
+  // Paused while somebody is mid-decision: a re-render would throw the armed
+  // button away and put an unarmed one under their finger.
+  repoll(() => {
+    if (view.querySelector('button.stop[data-armed=yes]')) return;
+    void adminArenas();
+  }, 5000);
 }
 
 

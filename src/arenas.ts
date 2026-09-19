@@ -172,6 +172,19 @@ export interface ArenaInfo {
    * reports it. The first number to move when the budget is wrong.
    */
   fidelity: number | null;
+  /**
+   * When somebody was last actually on this field.
+   *
+   * A connected robot deliberately does not move it (see `Arena.lastUsed`), so
+   * an arena that is busy with football and empty of people reads as idle here
+   * — which is the whole point, and the thing an organiser needs to see before
+   * they decide a field is worth stopping.
+   */
+  lastUsed: string;
+  /** When this arena closes unless somebody turns up, once it has been warned. */
+  closingAt: string | null;
+  /** People on it right now — viewers and consoles, never robots. */
+  open: number;
 }
 
 interface Arena {
@@ -596,6 +609,9 @@ export class ArenaSupervisor {
       createdAt: new Date(arena.createdAt).toISOString(),
       usage: arena.usage,
       fidelity: arena.fidelity,
+      lastUsed: new Date(arena.lastUsed).toISOString(),
+      closingAt: arena.closingAt === null ? null : new Date(arena.closingAt).toISOString(),
+      open: arena.open,
     };
   }
 

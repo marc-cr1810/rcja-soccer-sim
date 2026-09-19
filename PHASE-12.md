@@ -8,8 +8,8 @@ slice decided, what running it taught, and what is still ahead.
 When the phase closes, its result collapses into PHASES.md the way Phase 10's
 did, and this file goes with it.
 
-**Where it stands: A, B, C and D are built and verified live (19 September
-2026). E to I are not started.**
+**Where it stands: A to E are built and verified live (19 September 2026).
+F to I are not started.**
 
 ## The gate, clause by clause
 
@@ -20,7 +20,7 @@ did, and this file goes with it.
 | Clause | Where it stands |
 | --- | --- |
 | reschedules a fixture | **Done** — C wrote kick-off times, D put them behind a button |
-| stops a runaway practice field | **Already true** before the phase began — `/admin` + `arena.kill`. E gives it its own screen |
+| stops a runaway practice field | **Done** — it already worked; E gave it its own screen and the reasons beside it |
 | fixes a team's mis-uploaded file | **Not built.** F1 then F2. The only clause with nothing behind it |
 | re-runs an abandoned game | **Done** — D |
 | the audit log saying who did each one | **Partly.** D made it true for draw corrections; H closes the rest |
@@ -125,11 +125,28 @@ and a supervisor loop around `runDraw`.
 - `theirs: true` on a card means a referee has it: no buttons, and `replay`
   refuses it with a 409.
 
-### E — `/admin/arenas` as its own screen
+### E — `/admin/arenas` as its own screen ✅
 
-`/admin` is still one page. This moves arenas out, surfaces `lastUsed` and
-`closeAt` — both internal to `ArenaInfo` today — and shows the practice queue,
-so the person being shouted at can see which field is the problem.
+Arenas move off `/admin`, which becomes a hub. `lastUsed`, `closingAt` and
+`open` come out of `ArenaInfo`'s internals and onto the row, and the practice
+queue goes at the bottom of the same page.
+
+- **A row has to say why the field is still up**, not just that it is. `2 here`
+  when somebody is on it, `quiet, 14m ago` when nobody is, `closing in 3m` once
+  it has been warned. A **connected robot is deliberately not somebody** — that
+  is Phase 10's rule, and the column is where it finally becomes visible.
+- **The queue belongs on the same page as the fields**, because it is not only
+  a list of teams: it is what makes the idle sweep impatient. With nobody
+  waiting a field sits for the full idle time; with somebody waiting that halves
+  and only the quietest field goes. Reading *closing in 3m* without the queue
+  beside it is reading half the sentence.
+- **Stop takes two presses.** The list re-polls every five seconds because every
+  number on it is live, and one press on a row that moved under the cursor is
+  not a decision anybody made. The poll pauses while a button is armed, or the
+  re-render would put an unarmed button under the finger that was about to
+  press.
+- `tenancy.waiting()` has said it is "for an admin who wants to see the line"
+  since Phase 8 and had no screen to say it on until now.
 
 ### F1 — push history
 

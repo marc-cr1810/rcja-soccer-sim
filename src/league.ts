@@ -2412,6 +2412,19 @@ export class LeagueServer {
           inUse: totalUsage(arenas.map((a) => a.usage).filter((u) => u !== null)),
           running: arenas.length,
           arenas,
+          /**
+           * The line for a field, front first.
+           *
+           * `tenancy.waiting()` has said it is "for an admin who wants to see
+           * the line" since Phase 8 and has never had a screen to say it on.
+           * A queue is also the thing that changes how the idle sweep behaves
+           * — it halves the quiet time and takes only the quietest field — so
+           * an organiser looking at fields closing needs to see it beside them.
+           */
+          queue: this.tenancy.waiting().map((slug) => ({
+            slug,
+            offer: this.tenancy.placeOf(slug)?.offer?.until ?? null,
+          })),
         },
         { status: 200 },
       );

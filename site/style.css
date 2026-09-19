@@ -952,3 +952,7 @@ button.stop:disabled { opacity: 0.5; cursor: default; }
   .top { gap: 1rem 1.4rem; padding-top: 1.2rem; }
 }
 
+
+/* A field that has been warned it is closing. Coloured like the warning block
+   it corresponds to, so the row and the banner are recognisably the same news. */
+.row .state.closing { color: #f87171; font-weight: 600; }

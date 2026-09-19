@@ -767,12 +767,35 @@ hub in front of it and no accounts to check.
 
 ## Watching the machine
 
-`/admin` shows three numbers rather than one — what you set, what the hardware
-guarantees, and what is in use right now, read from the live processes — with a
-row per arena giving its kind, age, CPU, memory and how much of real time its
-match is managing to play, and a button to stop it. A venue's real failure mode
-is four things running that should not be and nobody knowing which machine they
-are on.
+**`/admin/arenas`** shows three numbers rather than one — what you set, what
+the hardware guarantees, and what is in use right now, read from the live
+processes — with a row per arena giving its kind, owner, age, CPU, memory and
+how much of real time its match is managing to play. A venue's real failure
+mode is four things running that should not be and nobody knowing which machine
+they are on. The page refreshes itself every few seconds, because every number
+on it is a live one.
+
+Each row also says **why the field is still up**:
+
+| Column | What it means |
+| --- | --- |
+| `2 here` | People on it right now — a viewer, a console. |
+| `quiet, 14m ago` | Nobody is on it, and when somebody last was. |
+| `closing in 3m` | It has been warned and goes at that time unless somebody comes back. |
+
+A **connected robot deliberately does not count** as somebody being there. A
+field of robots playing to an empty stand is precisely the waste being
+reclaimed, and one forgotten laptop program would otherwise outrank the team at
+the front of the queue.
+
+That queue is at the bottom of the same page, front first, because it is not
+just a list of teams waiting — it is what makes the sweep impatient. With
+nobody waiting a field sits for the full idle time; with somebody waiting that
+halves, and only the quietest field goes per sweep. Reading *closing in 3m*
+without seeing the queue beside it is reading half the sentence.
+
+**Stop** needs two presses. The list re-renders while you read it, and one
+press on a row that moved under the cursor is not a decision anybody made.
 
 ## From a terminal
 
@@ -785,8 +808,8 @@ bun run serve -- arenas --url http://localhost:8080 --key rcja_…
 bun run serve -- arenas stop <id> --url http://localhost:8080 --key rcja_…
 ```
 
-Both are on `/admin` as well. They are here too because the day this gets asked
-in earnest is the day `/admin` is the thing that has gone wrong.
+Both are on `/admin/arenas` as well. They are here too because the day this
+gets asked in earnest is the day the browser is the thing that has gone wrong.
 
 ## Installing on a fresh host
 

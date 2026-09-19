@@ -575,3 +575,60 @@ describe('run it from the workspace', () => {
     expect(theirs.status).toBe(403);
   }, 40_000);
 });
+
+/**
+ * What an organiser can see of the fields.
+ *
+ * A venue's failure mode is four things running that should not be and nobody
+ * knowing which machine they are on. The answer has to be readable from one
+ * screen, which means the list has to carry *why* a field is still up — who is
+ * on it, when anybody last was, and whether it has already been warned — and
+ * the queue it is being weighed against.
+ */
+describe('the fields, as an organiser sees them', () => {
+  it('says who is on a field and when a person last was', async () => {
+    const started = await start();
+    const act = await team(started, 'ACT Robotics');
+    const organiser = await admin(started);
+
+    const opened = await openField(started, act);
+    expect(opened.status).toBe(201);
+
+    const seen = await call(started.port, '/api/admin/arenas', { cookie: organiser });
+    expect(seen.status).toBe(200);
+    const field = seen.payload.arenas.find((one: any) => one.id === opened.payload.field.id);
+    expect(field.owner).toBe('act-robotics');
+    // Present on every arena, not only a warned one: "nothing is closing" is an
+    // answer an organiser needs as much as a countdown.
+    expect(field.closingAt).toBeNull();
+    expect(typeof field.open).toBe('number');
+    expect(Number.isNaN(Date.parse(field.lastUsed))).toBe(false);
+  }, 20_000);
+
+  it('shows the line, front first, beside the fields it is waiting for', async () => {
+    const started = await start();
+    const act = await team(started, 'ACT Robotics');
+    const nsw = await team(started, 'NSW Lightning');
+    const qld = await team(started, 'QLD Thunder');
+    const organiser = await admin(started);
+
+    // Two slots — `arenas.max` of three less the one held back for a fixture.
+    expect((await openField(started, act)).status).toBe(201);
+    expect((await openField(started, nsw)).status).toBe(201);
+
+    const third = await openField(started, qld);
+    expect(third.payload.ok).toBe(false);
+    expect(third.payload.queued).toBe(true);
+
+    const seen = await call(started.port, '/api/admin/arenas', { cookie: organiser });
+    expect(seen.payload.queue.map((one: any) => one.slug)).toEqual(['qld-thunder']);
+  }, 20_000);
+
+  it('keeps the list to an organiser', async () => {
+    const started = await start();
+    const act = await team(started, 'ACT Robotics');
+
+    const seen = await call(started.port, '/api/admin/arenas', { cookie: act });
+    expect(seen.status).toBeGreaterThanOrEqual(400);
+  }, 20_000);
+});

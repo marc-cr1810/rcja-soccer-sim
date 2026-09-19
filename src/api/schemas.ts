@@ -370,6 +370,12 @@ export const ArenaInfoSchema = z
     createdAt: z.string(),
     usage: ArenaUsageSchema.nullable(),
     fidelity: z.number().nullable().openapi({ description: 'Simulated seconds per wall second while playing' }),
+    lastUsed: z.string().openapi({ description: 'When a person was last on it — a connected robot does not count' }),
+    closingAt: z
+      .string()
+      .nullable()
+      .openapi({ description: 'When it closes unless somebody comes back, once warned' }),
+    open: z.number().int().openapi({ description: 'People on it right now — viewers and consoles, never robots' }),
   })
   .openapi('ArenaInfo', { description: 'Summary of a running arena' });
 export type ArenaInfo = z.infer<typeof ArenaInfoSchema>;
