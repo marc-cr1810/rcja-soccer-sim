@@ -58,6 +58,8 @@ class Runtime:
         self.clock: float = 0.0
         self.off_field = False
         self.last_kickoff = False
+        self._cached_reading: Reading | None = None
+        self._cached_reading_frame: dict[str, Any] | None = None
 
         # Actuator State Buffers
         self.pin_values: dict[int, int] = {}       # Pin ID -> 0 or 1
@@ -199,6 +201,8 @@ class Runtime:
         self.last_frame = frame
         self.clock = frame.get("clock", 0.0)
         self.off_field = False
+        self._cached_reading = None
+        self._cached_reading_frame = None
 
         # Reset kickoff flag on kick-off transition
         pending = frame.get("kickoff", {}).get("pending", False)
@@ -503,7 +507,12 @@ class Runtime:
         `s`, before there were two connections to reconcile.
         """
         self.ensure_connected()
-        return Reading(self.last_frame)
+        if self._cached_reading is not None and self._cached_reading_frame is self.last_frame:
+            return self._cached_reading
+        reading = Reading(self.last_frame)
+        self._cached_reading = reading
+        self._cached_reading_frame = self.last_frame
+        return reading
 
     def send_command(
         self,

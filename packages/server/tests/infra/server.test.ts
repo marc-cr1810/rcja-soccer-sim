@@ -224,6 +224,32 @@ describe('the match server', () => {
     socket.close();
   });
 
+  it('compresses viewer stream with delta frames between keyframes', async () => {
+    const { applyViewDelta } = await import('@rcja/shared/view');
+    const server = new MatchServer({ port: 0, realtime: true, viewHz: 60 });
+    servers.push(server);
+    const port = await server.listen();
+    const { socket, messages } = await connect(port);
+    void server.play({ agents: agents(), teams: { violet: 'A', lime: 'B' }, halfSeconds: 2 });
+    // Wait for several ticks of play
+    await new Promise((ok) => setTimeout(ok, 250));
+    socket.close();
+
+    const frames = messages.filter((m) => m.type === 'frame');
+    const deltas = messages.filter((m) => m.type === 'delta');
+    expect(frames.length).toBeGreaterThanOrEqual(1);
+    expect(deltas.length).toBeGreaterThanOrEqual(1);
+
+    // Verify applying delta to initial frame produces valid updated state
+    let state = (frames[0] as any).frame;
+    for (const d of deltas) {
+      state = applyViewDelta(state, (d as any).delta);
+      expect(state.clock).toBeGreaterThanOrEqual(0);
+      expect(state.robots.length).toBe(4);
+      expect(state.ball.radius).toBeGreaterThan(0);
+    }
+  });
+
   it('serves nothing useful when no viewer has been built', async () => {
     const { port } = await start();
     const res = await fetch(`http://127.0.0.1:${port}/`);

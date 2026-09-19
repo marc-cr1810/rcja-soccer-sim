@@ -34,6 +34,7 @@ import {
   distance,
   speed,
   stepBall,
+  sweptBallCollision,
   type Body,
 } from './physics';
 import { openDrive, stepDrive, type DriveSpec } from './drive';
@@ -760,10 +761,6 @@ export class World {
     return this.robots.filter((r) => !r.removed);
   }
 
-  /** `list`, in an order that alternates tick to tick. See `pairOrderFlipped`. */
-  private pairOrder(list: Robot[]): Robot[] {
-    return this.pairOrderFlipped ? [...list].reverse() : list;
-  }
 
   emit(event: Omit<MatchEvent, 'at'>): void {
     this.events.push({ ...event, at: this.clock });
@@ -797,6 +794,8 @@ export class World {
       robot.wheelSpeeds = stepDrive(robot, robot.drive, robot.motors, dt).wheelSpeeds;
     }
 
+    const ballX0 = this.ball.x;
+    const ballZ0 = this.ball.z;
     stepBall(this.ball, dt, this.ballFriction);
 
     this.activeRobotsBuffer.length = 0;
@@ -805,6 +804,26 @@ export class World {
       if (!r.removed) this.activeRobotsBuffer.push(r);
     }
     const actives = this.activeRobotsBuffer;
+
+    let sweptHit: ReturnType<typeof sweptBallCollision> = null;
+    if (Math.hypot(this.ball.vx, this.ball.vz) > 1000) {
+      const goalBound = Math.abs(this.ball.z) <= HALF_GOAL_WIDTH - this.ball.radius * 0.5;
+      sweptHit = sweptBallCollision(
+        this.ball,
+        ballX0,
+        ballZ0,
+        this.ball.x,
+        this.ball.z,
+        actives,
+        goalBound,
+        this.ballBounce,
+      );
+      if (sweptHit?.hit === 'robot' && sweptHit.robotId) {
+        const robotId = sweptHit.robotId;
+        const r = actives.find((a) => a.id === robotId);
+        if (r) this.lastBallTouch = { robotId: r.id, team: r.team, at: this.clock };
+      }
+    }
 
     // One impulse pass, so a collision exchanges momentum exactly once.
     //
@@ -895,7 +914,7 @@ export class World {
     const goalBound = Math.abs(this.ball.z) <= HALF_GOAL_WIDTH - this.ball.radius * 0.5;
     const hit = collideWithPerimeter(this.ball, goalBound, this.ballBounce);
 
-    this.detectGoal(hit);
+    this.detectGoal(sweptHit?.hit === 'goal-back' ? 'goal-back' : hit);
     this.detectUnreachable(dt);
     this.detectBallOutOfPlay();
     this.detectIllegalKickOff();

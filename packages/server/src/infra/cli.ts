@@ -20,7 +20,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync } from '
 import { spawnSync } from 'node:child_process';
 import { checkLatestRelease, formatUpdateBanner, performUpgrade, GITHUB_REPO } from './update';
 import { randomBytes } from 'node:crypto';
-import { homedir, networkInterfaces, userInfo } from 'node:os';
+import { cpus, homedir, networkInterfaces, userInfo } from 'node:os';
 import { join, resolve } from 'node:path';
 import { DEFAULT_OPTIONS, formatBench, runBench, type BenchResult } from '../league/bench';
 import { slugifyTeam } from './manifest';
@@ -941,13 +941,33 @@ async function tournament(flags: Map<string, string>): Promise<void> {
   console.log(`  ctrl-c to stop; re-run to carry on where it stopped\n`);
 
   const libDir = pythonLibDir();
+  const cpusAvailable = cpus().length;
+  const slots = flags.has('slots')
+    ? num(flags, 'slots', 1)
+    : (flags.has('parallel') && !refereed ? Math.max(1, Math.min(cpusAvailable, 8)) : 1);
+
+  let supervisor: InstanceType<typeof import('../league/arenas').ArenaSupervisor> | null = null;
+  if (slots > 1 && !refereed) {
+    const { ArenaSupervisor } = await import('../league/arenas');
+    supervisor = new ArenaSupervisor({
+      mode: 'worker',
+      maxArenas: slots,
+      fixtureSlots: slots,
+      pythonLibDir: libDir ?? undefined,
+      submissionsDir: flags.get('submissions'),
+    });
+    console.log(`  parallel execution: running across ${slots} worker arenas on ${cpusAvailable} CPU cores`);
+  }
+
   let running: SpawnedLineup | null = null;
   process.on('SIGINT', () => {
     running?.stop();
+    supervisor?.closeAll();
     process.exit(0);
   });
 
   const results = await runDraw(root, made, {
+    slots,
     onFixtureStart: (fixture, played, total) => {
       console.log(`  fixture ${played + 1} of ${total}:  ${fixture.home} v ${fixture.away}`);
     },
@@ -960,6 +980,39 @@ async function tournament(flags: Map<string, string>): Promise<void> {
     playLeg: async (fixture, seed, leg) => {
       const teams = { violet: fixture.home, lime: fixture.away };
       const submissions: Record<string, string> = {};
+
+      if (supervisor) {
+        const arena = await supervisor.create({ kind: 'fixture' });
+        try {
+          const arenaPort = supervisor.portOf(arena.id);
+          const response = await fetch(`http://127.0.0.1:${arenaPort}/arena-api/play`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              agents: agentsFor(undefined),
+              teams,
+              league: made.league,
+              halfSeconds: made.halfSeconds,
+              seed,
+              refereed: false,
+              ballFriction: fixture.ballFriction,
+            }),
+          });
+          if (!response.ok) throw new Error(`arena would not play (${response.status})`);
+          for (; ;) {
+            await new Promise((r) => setTimeout(r, 100));
+            const stateRes = await fetch(`http://127.0.0.1:${arenaPort}/arena-api/state`);
+            const { state } = (await stateRes.json()) as { state: any };
+            if (state.finished) {
+              return { result: state.finished.result, submissions: state.finished.submissions ?? submissions };
+            }
+            if (state.error) throw new Error(state.error);
+          }
+        } finally {
+          supervisor.close(arena.id);
+        }
+      }
+
       let lineup: SpawnedLineup | null = null;
 
       if (libDir) {
@@ -998,6 +1051,7 @@ async function tournament(flags: Map<string, string>): Promise<void> {
     },
   });
 
+  if (supervisor) supervisor.closeAll();
   console.log(`\n${formatTable(made, results)}\n`);
   await server.close();
 }
@@ -2368,7 +2422,7 @@ async function league(flags: Map<string, string>): Promise<void> {
    * abandoned fixture would be retried the instant anything else woke the
    * loop, which is the forever-retry `failed` exists to prevent.
    */
-  for (;;) {
+  for (; ;) {
     server.scheduleRunning = true;
     const results = await runDraw(root, made, {
       ...playing,

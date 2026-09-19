@@ -1,7 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { spawnSync } from 'child_process';
 import {
-  encodeSensorFrame,
   decodeClientMessage,
   encodeServerMessage,
 } from '../../src/match/proto';

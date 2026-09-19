@@ -25,7 +25,7 @@ import {
   type MatchOptions,
   type MatchResult,
 } from '../match/match';
-import { VIEW_HZ, type ViewMessage } from '@rcja/shared/view';
+import { VIEW_HZ, type ViewMessage, type ViewFrame, type ViewDeltaFrame } from '@rcja/shared/view';
 import { SEAT_IDS, type SeatId } from '../match/match';
 import type { SeedInput } from '../sim/rand';
 import type { LeagueId } from '@rcja/shared/leagues';
@@ -531,9 +531,64 @@ export class MatchServer {
     }
   }
 
+  private lastBroadcastSnapshot: ViewFrame | null = null;
+  private broadcastTickCount = 0;
+
   private broadcastFrame(match: Match): void {
     if (this.viewers.size === 0) return;
-    this.broadcast({ type: 'frame', frame: match.snapshot() });
+    const snapshot = match.snapshot();
+    this.broadcastTickCount++;
+
+    if (!this.lastBroadcastSnapshot || this.broadcastTickCount % 30 === 0) {
+      this.lastBroadcastSnapshot = snapshot;
+      this.broadcast({ type: 'frame', frame: snapshot });
+      return;
+    }
+
+    const last = this.lastBroadcastSnapshot;
+    const deltaRobots = snapshot.robots.map((r) => {
+      const lr = last.robots.find((item) => item.id === r.id);
+      return {
+        id: r.id,
+        x: r.x,
+        z: r.z,
+        heading: r.heading,
+        ...(lr && r.removed !== lr.removed ? { removed: r.removed } : {}),
+        ...(lr && r.penaltyRemaining !== lr.penaltyRemaining ? { penaltyRemaining: r.penaltyRemaining } : {}),
+      };
+    });
+
+    const delta: ViewDeltaFrame = {
+      clock: snapshot.clock,
+      ball: {
+        x: snapshot.ball.x,
+        z: snapshot.ball.z,
+        ...(snapshot.ball.y !== last.ball.y ? { y: snapshot.ball.y } : {}),
+      },
+      robots: deltaRobots,
+      ...(snapshot.commsActivity.violet !== last.commsActivity.violet ||
+      snapshot.commsActivity.lime !== last.commsActivity.lime
+        ? { commsActivity: snapshot.commsActivity }
+        : {}),
+      ...(snapshot.score.violet !== last.score.violet || snapshot.score.lime !== last.score.lime
+        ? { score: snapshot.score }
+        : {}),
+      ...(snapshot.kickoff.countdown !== last.kickoff.countdown ||
+      snapshot.kickoff.team !== last.kickoff.team
+        ? { kickoff: snapshot.kickoff }
+        : {}),
+      ...(snapshot.events.length !== last.events.length ||
+      (snapshot.events.length > 0 &&
+        snapshot.events[snapshot.events.length - 1] !== last.events[last.events.length - 1])
+        ? { events: snapshot.events }
+        : {}),
+      ...(snapshot.halfTime !== last.halfTime ? { halfTime: snapshot.halfTime } : {}),
+      ...(snapshot.running !== last.running ? { running: snapshot.running } : {}),
+      ...(snapshot.half !== last.half ? { half: snapshot.half } : {}),
+    };
+
+    this.lastBroadcastSnapshot = snapshot;
+    this.broadcast({ type: 'delta', delta });
   }
 
   // ── HTTP / WebSocket fetch handler ────────────────────────────────────────
@@ -792,6 +847,8 @@ export class MatchServer {
         options.kickoffCountdown ?? this.opts.kickoffCountdown ?? (this.realtime ? KICKOFF_COUNTDOWN_SECONDS : 0),
     });
     this.current = match;
+    this.lastBroadcastSnapshot = null;
+    this.broadcastTickCount = 0;
     this.lastResult = null;
     this.lastNextMatchIn = undefined;
     // A program that dropped out mid-match may not simply reconnect and carry

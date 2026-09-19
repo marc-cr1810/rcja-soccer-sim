@@ -25,10 +25,11 @@
  */
 
 import type { Subprocess } from 'bun';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 
 /** Host directories a Python interpreter needs to exist at all. */
 const HOST_LIB_ROOTS = ['/usr', '/lib', '/lib64', '/bin'];
+const SHARED_PYCACHE_DIR = '/tmp/rcja-pycache';
 
 /** Defaults sized for "prove it answers one tick" — see `SandboxOptions`. */
 const DEFAULT_MEMORY_LIMIT_MB = 256;
@@ -105,12 +106,21 @@ export interface SandboxOptions {
  * running unsandboxed or ungoverned if either prerequisite is missing.
  */
 export function spawnSandboxed(opts: SandboxOptions): Subprocess {
+  try {
+    mkdirSync(SHARED_PYCACHE_DIR, { recursive: true });
+  } catch {
+    // Ignore if already exists or cannot create
+  }
+
   const binds: string[] = [];
   for (const root of HOST_LIB_ROOTS) {
     if (existsSync(root)) binds.push('--ro-bind', root, root);
   }
   binds.push('--ro-bind', opts.pythonLibDir, opts.pythonLibDir);
   binds.push('--ro-bind', opts.cwd, opts.cwd);
+  if (existsSync(SHARED_PYCACHE_DIR)) {
+    binds.push('--bind', SHARED_PYCACHE_DIR, SHARED_PYCACHE_DIR);
+  }
   if (opts.controlDir) binds.push('--bind', opts.controlDir, opts.controlDir);
 
   const bwrapArgs = [
@@ -128,8 +138,8 @@ export function spawnSandboxed(opts: SandboxOptions): Subprocess {
     'PYTHONPATH',
     opts.pythonLibDir,
     '--setenv',
-    'PYTHONDONTWRITEBYTECODE',
-    '1',
+    'PYTHONPYCACHEPREFIX',
+    SHARED_PYCACHE_DIR,
     '--proc',
     '/proc',
     '--dev',
@@ -144,6 +154,8 @@ export function spawnSandboxed(opts: SandboxOptions): Subprocess {
     opts.cwd,
     '--',
     'python3',
+    '-u',
+    '-O',
     opts.entry,
     ...opts.args,
   ];

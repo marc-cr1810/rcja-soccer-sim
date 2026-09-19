@@ -25,7 +25,7 @@
 
 import { FieldRenderer } from '@rcja/shared/renderer';
 import type { League } from '@rcja/shared/leagues';
-import type { ViewFrame, ViewMessage } from '@rcja/shared/view';
+import { applyViewDelta, type ViewFrame, type ViewMessage } from '@rcja/shared/view';
 
 type SeatId = 'violet-1' | 'violet-2' | 'lime-1' | 'lime-2';
 const SEATS: SeatId[] = ['violet-1', 'violet-2', 'lime-1', 'lime-2'];
@@ -595,6 +595,12 @@ function receive(message: ViewMessage): void {
     previous = latest;
     previousAt = latestAt;
     latest = message.frame;
+    latestAt = performance.now();
+  } else if (message.type === 'delta') {
+    if (!latest) return;
+    previous = latest;
+    previousAt = latestAt;
+    latest = applyViewDelta(latest, message.delta);
     latestAt = performance.now();
   }
 }

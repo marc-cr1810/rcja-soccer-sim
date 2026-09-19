@@ -270,6 +270,159 @@ export function collideWithPerimeter(b: Body, allowGoalEntry: boolean, bounce = 
   return hit;
 }
 
+export interface SweptHit {
+  t: number;
+  nx: number;
+  nz: number;
+  hit: WallHit | 'robot';
+  robotId?: string;
+}
+
+/**
+ * Continuous collision detection for fast-moving balls to prevent tunneling.
+ * Resolves against goal posts, perimeter walls, goal boundaries, and robots.
+ */
+export function sweptBallCollision(
+  ball: Body,
+  x0: number,
+  z0: number,
+  x1: number,
+  z1: number,
+  robots: readonly (Body & { id?: string })[] = [],
+  allowGoalEntry = false,
+  bounce = BALL_BOUNCE,
+): SweptHit | null {
+  const dx = x1 - x0;
+  const dz = z1 - z0;
+  const distSq = dx * dx + dz * dz;
+  if (distSq < 1e-9) return null;
+
+  let earliestT = 1.0;
+  const result: { hit: SweptHit | null } = { hit: null };
+
+  const checkCircle = (
+    cx: number,
+    cz: number,
+    radius: number,
+    hitType: WallHit | 'robot',
+    robotId?: string,
+  ) => {
+    const vx = x0 - cx;
+    const vz = z0 - cz;
+    const rEff = ball.radius + radius;
+    const cTerm = vx * vx + vz * vz - rEff * rEff;
+    if (cTerm <= 0) return;
+
+    const a = distSq;
+    const bTerm = 2 * (vx * dx + vz * dz);
+    const disc = bTerm * bTerm - 4 * a * cTerm;
+    if (disc < 0) return;
+
+    const t = (-bTerm - Math.sqrt(disc)) / (2 * a);
+    if (t >= 0 && t < earliestT) {
+      earliestT = t;
+      const hitX = x0 + t * dx;
+      const hitZ = z0 + t * dz;
+      const nx = (hitX - cx) / rEff;
+      const nz = (hitZ - cz) / rEff;
+      result.hit = { t, nx, nz, hit: hitType, robotId };
+    }
+  };
+
+  const checkPlaneX = (
+    planeX: number,
+    zMin: number,
+    zMax: number,
+    normalX: number,
+    hitType: WallHit,
+  ) => {
+    const targetX = planeX + normalX * ball.radius;
+    if (dx === 0) return;
+    const t = (targetX - x0) / dx;
+    if (t >= 0 && t < earliestT) {
+      const hitZ = z0 + t * dz;
+      if (hitZ >= zMin && hitZ <= zMax) {
+        earliestT = t;
+        result.hit = { t, nx: normalX, nz: 0, hit: hitType };
+      }
+    }
+  };
+
+  const checkPlaneZ = (
+    planeZ: number,
+    xMin: number,
+    xMax: number,
+    normalZ: number,
+    hitType: WallHit,
+  ) => {
+    const targetZ = planeZ + normalZ * ball.radius;
+    if (dz === 0) return;
+    const t = (targetZ - z0) / dz;
+    if (t >= 0 && t < earliestT) {
+      const hitX = x0 + t * dx;
+      if (hitX >= xMin && hitX <= xMax) {
+        earliestT = t;
+        result.hit = { t, nx: 0, nz: normalZ, hit: hitType };
+      }
+    }
+  };
+
+  // 1. Perimeter walls
+  checkPlaneZ(-WALL_Z, -WALL_X, WALL_X, 1, 'side');
+  checkPlaneZ(WALL_Z, -WALL_X, WALL_X, -1, 'side');
+  checkPlaneX(-WALL_X, -WALL_Z, WALL_Z, 1, 'end');
+  checkPlaneX(WALL_X, -WALL_Z, WALL_Z, -1, 'end');
+
+  // 2. Goals
+  for (const sign of [-1, 1] as const) {
+    const mouthX = sign * GOAL_MOUTH_X;
+    const backX = sign * GOAL_BACK_X;
+    const normalX = -sign;
+
+    // Post corners
+    checkCircle(mouthX, -HALF_GOAL_WIDTH, 0, 'end');
+    checkCircle(mouthX, HALF_GOAL_WIDTH, 0, 'end');
+
+    if (allowGoalEntry) {
+      // Goal back
+      checkPlaneX(backX, -HALF_GOAL_WIDTH, HALF_GOAL_WIDTH, normalX, 'goal-back');
+      // Goal sides inside
+      const minX = Math.min(mouthX, backX);
+      const maxX = Math.max(mouthX, backX);
+      checkPlaneZ(-HALF_GOAL_WIDTH, minX, maxX, 1, 'goal-side');
+      checkPlaneZ(HALF_GOAL_WIDTH, minX, maxX, -1, 'goal-side');
+    } else {
+      // Goal mouth block front
+      checkPlaneX(mouthX, -HALF_GOAL_SHELL, HALF_GOAL_SHELL, normalX, 'end');
+    }
+
+    // Front goal walls outside the opening
+    checkPlaneX(mouthX, HALF_GOAL_WIDTH, HALF_GOAL_SHELL, normalX, 'end');
+    checkPlaneX(mouthX, -HALF_GOAL_SHELL, -HALF_GOAL_WIDTH, normalX, 'end');
+  }
+
+  // 3. Robots
+  for (let i = 0; i < robots.length; i++) {
+    const r = robots[i]!;
+    checkCircle(r.x, r.z, r.radius, 'robot', r.id);
+  }
+
+  const bestHit = result.hit;
+  if (bestHit) {
+    ball.x = x0 + bestHit.t * dx + bestHit.nx * 0.05;
+    ball.z = z0 + bestHit.t * dz + bestHit.nz * 0.05;
+    const normal = ball.vx * bestHit.nx + ball.vz * bestHit.nz;
+    if (normal < 0) {
+      const r = bestHit.hit === 'robot' ? BALL_ROBOT_BOUNCE : bounce;
+      ball.vx -= (1 + r) * normal * bestHit.nx;
+      ball.vz -= (1 + r) * normal * bestHit.nz;
+    }
+    return bestHit;
+  }
+
+  return null;
+}
+
 /** Resolve overlap between two circular bodies, conserving momentum. */
 export function collideBodies(a: Body, b: Body, minDistDelta = 0, restitution = BODY_BOUNCE): boolean {
   // If one body is an airborne ball elevated above bumper height (85 mm),

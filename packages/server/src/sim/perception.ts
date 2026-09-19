@@ -23,7 +23,7 @@ import {
   type Pose,
 } from './sensors';
 import { streamSeed, toSeed, type SeedInput } from './rand';
-import type { KickoffReading, SensorFrame, TeamMessage } from '../match/protocol';
+import type { BallReading, KickoffReading, LineReading, RangeReading, SensorFrame, TeamMessage } from '../match/protocol';
 
 export interface SensedRobot extends Pose {
   /** Stable id, e.g. 'c1'. */
@@ -130,7 +130,9 @@ export class Senses {
   }
 
   private readonly blockersBuffer: SensedRobot[] = [];
-  private readonly linesBuffer: import('./sensors').LineReading[] = [];
+  private readonly linesBuffer: LineReading[] = [];
+  private readonly ballBuffer: BallReading = { bearing: 0, strength: 0 };
+  private readonly rangeBuffer: RangeReading = { front: null, left: 0, right: 0, back: 0 };
 
   read(input: SenseInput): SensorFrame {
     const { view, self, wheelSpeeds, omega, held, messages, attackDirection, dt } = input;
@@ -169,11 +171,11 @@ export class Senses {
         ours: (view.kickoff.pending || view.kickoff.countdown > 0) && view.kickoff.team === self.team,
         countdown: view.kickoff.countdown,
       } satisfies KickoffReading,
-      ball: readIr(self, view.ball, { blockers, ideal }, this.ir),
+      ball: readIr(self, view.ball, { blockers, ideal }, this.ir, this.ballBuffer),
       compass: { heading: this.compass.read(self.heading, this.compassNoise, ideal) },
       gyro: { rate: this.gyro.read(omega, this.gyroNoise, ideal) },
       lines: readLines(self, this.lineNoise, ideal, this.linesBuffer),
-      range: readRange(self, this.rangeNoise, blockers, ideal),
+      range: readRange(self, this.rangeNoise, blockers, ideal, this.rangeBuffer),
       encoders: this.encoders.read(ideal),
       camera: this.camera.read(self, view.ball, blockers, this.cameraNoise, fresh, ideal),
       ballGate: { held },

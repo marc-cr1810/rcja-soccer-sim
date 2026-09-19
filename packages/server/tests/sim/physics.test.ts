@@ -69,4 +69,25 @@ describe('the ball rolls like a ball on carpet', () => {
     rollingIntegrate(b, 1 / 100, 1200);
     expect(Math.atan2(b.vz, b.vx)).toBeCloseTo(before, 6);
   });
+
+  it('prevents a 3500 mm/s kicked ball from tunneling through goal posts', () => {
+    // A 3500 mm/s ball aimed directly at the goal post corner at (915, 225)
+    // In one 60Hz tick (dt = 1/60), it travels ~58.3mm.
+    const { sweptBallCollision } = require('../../src/sim/physics');
+    const { GOAL_MOUTH_X, HALF_GOAL_WIDTH } = require('../../src/sim/field');
+    const b = ball(3500, 0);
+    b.x = 880;
+    b.z = HALF_GOAL_WIDTH;
+    const x0 = b.x;
+    const z0 = b.z;
+    const x1 = b.x + b.vx * (1 / 60);
+    const z1 = b.z;
+
+    const hit = sweptBallCollision(b, x0, z0, x1, z1, [], false);
+    expect(hit).not.toBeNull();
+    // Ball should stop before or at post contact, not jump to 938mm inside the post
+    expect(b.x).toBeLessThanOrEqual(GOAL_MOUTH_X);
+    // Velocity should be reflected backward
+    expect(b.vx).toBeLessThan(0);
+  });
 });

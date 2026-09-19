@@ -153,7 +153,7 @@ export class RemoteTransport implements Transport {
   onMessage(data: string | Uint8Array | Buffer): void {
     let clean: ActuatorFrame | null = null;
     if (typeof data !== 'string') {
-      const bytes = data instanceof Uint8Array ? data : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+      const bytes = data instanceof Uint8Array ? data : new Uint8Array(data as any);
       const decoded = decodeClientMessage(bytes);
       clean = decoded ? sanitise(decoded, this.motorCount) : null;
     } else {

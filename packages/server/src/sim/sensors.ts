@@ -216,6 +216,7 @@ export function readIr(
   ball: { x: number; z: number },
   opts: IrOptions,
   noise: Noise,
+  out?: BallReading,
 ): BallReading | null {
   const range = rangeTo(pose, ball.x, ball.z);
   if (range > IR_MAX_RANGE) return null;
@@ -245,6 +246,11 @@ export function readIr(
     strength = clamp01(idealStrength * (1 + noise.gaussian(0.06)));
   }
 
+  if (out) {
+    out.bearing = bearing;
+    out.strength = strength;
+    return out;
+  }
   return { bearing, strength };
 }
 
@@ -318,7 +324,8 @@ const GYRO_NOISE = 0.05;
  * half walks it close to sixty degrees on average, and past a full
  * half-turn on an unlucky seed - both several times worse than the compass
  * ever gets, which is the point: read the rate directly, the way `sense.py`'s
- * `YawRate` reads the encoders, and none of this is ever felt.
+ * `GyroRate` does, and leave integration to people with a compass to pin it
+ * to.
  */
 const GYRO_BIAS_DRIFT_RATE = 0.0004;
 
@@ -371,8 +378,11 @@ export function surfaceAt(x: number, z: number): Surface {
 
   // 25 mm black markings: penalty boxes and neutral points.
   const half = MARKING_THICKNESS / 2;
+  const markingRadiusSq = (MARKING_THICKNESS * 2) ** 2;
   for (const p of NEUTRAL_POINTS) {
-    if (Math.hypot(x - p.x, z - p.z) <= MARKING_THICKNESS * 2) return 'marking';
+    const dx = x - p.x;
+    const dz = z - p.z;
+    if (dx * dx + dz * dz <= markingRadiusSq) return 'marking';
   }
   const boxFront = HALF_LENGTH - PENALTY_DEPTH;
   if (Math.abs(z) <= PENALTY_WIDTH / 2 + half && Math.abs(Math.abs(x) - boxFront) <= half) {
@@ -393,10 +403,11 @@ export function readLines(pose: Pose, noise: Noise, ideal = false, out?: LineRea
     const sz = pose.z + Math.sin(a) * LINE_SENSOR_RADIUS;
     const surface = surfaceAt(sx, sz);
     const value = ideal ? REFLECTANCE[surface] : clamp01(REFLECTANCE[surface] + noise.gaussian(LINE_NOISE));
-    if (result[i]) {
-      result[i].bearing = bearing;
-      result[i].surface = surface;
-      result[i].value = value;
+    const item = result[i];
+    if (item) {
+      item.bearing = bearing;
+      item.surface = surface;
+      item.value = value;
     } else {
       result[i] = { bearing, surface, value };
     }
@@ -424,22 +435,39 @@ const SONAR_GRAZING = (65 * Math.PI) / 180;
 function wallDistance(pose: Pose, worldAngle: number): { dist: number; incidence: number } | null {
   const dx = Math.cos(worldAngle);
   const dz = Math.sin(worldAngle);
-  let best: { dist: number; incidence: number } | null = null;
+  let bestDist = Infinity;
+  let bestCosInc = 0;
 
-  const candidates: { t: number; nx: number; nz: number }[] = [];
-  if (dx > 1e-9) candidates.push({ t: (WALL_X - pose.x) / dx, nx: -1, nz: 0 });
-  if (dx < -1e-9) candidates.push({ t: (-WALL_X - pose.x) / dx, nx: 1, nz: 0 });
-  if (dz > 1e-9) candidates.push({ t: (WALL_Z - pose.z) / dz, nx: 0, nz: -1 });
-  if (dz < -1e-9) candidates.push({ t: (-WALL_Z - pose.z) / dz, nx: 0, nz: 1 });
-
-  for (const c of candidates) {
-    if (c.t <= 0) continue;
-    if (best && c.t >= best.dist) continue;
-    // Angle between the beam and the wall's normal.
-    const cosInc = -(dx * c.nx + dz * c.nz);
-    best = { dist: c.t, incidence: Math.acos(Math.max(-1, Math.min(1, cosInc))) };
+  if (dx > 1e-9) {
+    const t = (WALL_X - pose.x) / dx;
+    if (t > 0 && t < bestDist) {
+      bestDist = t;
+      bestCosInc = dx;
+    }
+  } else if (dx < -1e-9) {
+    const t = (-WALL_X - pose.x) / dx;
+    if (t > 0 && t < bestDist) {
+      bestDist = t;
+      bestCosInc = -dx;
+    }
   }
-  return best;
+
+  if (dz > 1e-9) {
+    const t = (WALL_Z - pose.z) / dz;
+    if (t > 0 && t < bestDist) {
+      bestDist = t;
+      bestCosInc = dz;
+    }
+  } else if (dz < -1e-9) {
+    const t = (-WALL_Z - pose.z) / dz;
+    if (t > 0 && t < bestDist) {
+      bestDist = t;
+      bestCosInc = -dz;
+    }
+  }
+
+  if (bestDist === Infinity) return null;
+  return { dist: bestDist, incidence: Math.acos(Math.max(-1, Math.min(1, bestCosInc))) };
 }
 
 /** Distance from a pose to another robot cylinder along a field-frame direction. */
@@ -479,6 +507,7 @@ export function readRange(
   noise: Noise,
   blockers: readonly { x: number; z: number }[] = [],
   ideal = false,
+  out?: RangeReading,
 ): RangeReading {
   const one = (offset: number): number | null => {
     const angle = wrapAngle(pose.heading + offset);
@@ -495,12 +524,19 @@ export function readRange(
     if (!ideal && hit.incidence > SONAR_GRAZING) return null;
     return ideal ? Math.max(0, dist) : Math.max(0, dist + noise.gaussian(SONAR_NOISE));
   };
-  return {
-    front: one(0),
-    left: one(Math.PI / 2),
-    back: one(Math.PI),
-    right: one(-Math.PI / 2),
-  };
+  const front = one(0);
+  const left = one(Math.PI / 2);
+  const back = one(Math.PI);
+  const right = one(-Math.PI / 2);
+
+  if (out) {
+    out.front = front;
+    out.left = left;
+    out.back = back;
+    out.right = right;
+    return out;
+  }
+  return { front, left, back, right };
 }
 
 // -------------------------------------------------------------------- camera

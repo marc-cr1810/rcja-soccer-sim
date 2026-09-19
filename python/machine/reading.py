@@ -14,22 +14,30 @@ class Reading:
     honest answer.
     """
 
-    __slots__ = ("_data",)
+    __slots__ = ("_data", "_cache")
 
     def __init__(self, data: dict[str, Any]) -> None:
         object.__setattr__(self, "_data", data)
+        object.__setattr__(self, "_cache", {})
 
     def __getattr__(self, name: str) -> Any:
+        cache = object.__getattribute__(self, "_cache")
+        if name in cache:
+            return cache[name]
         data = object.__getattribute__(self, "_data")
         if name in data:
-            return _wrap(data[name])
+            val = _wrap(data[name])
+            cache[name] = val
+            return val
         # The wire is camelCase because it is shared with a browser; Python is
         # not. Accept either, so ``s.ball_gate.held`` and ``s.ballGate.held``
         # both work and nobody has to remember which side of the socket they
         # are on.
         camel = _camel(name)
         if camel in data:
-            return _wrap(data[camel])
+            val = _wrap(data[camel])
+            cache[name] = val
+            return val
         raise AttributeError(
             f"no sensor called {name!r}; this robot has: " + ", ".join(sorted(data))
         )

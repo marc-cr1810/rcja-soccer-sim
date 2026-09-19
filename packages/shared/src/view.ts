@@ -269,6 +269,33 @@ export interface ViewUpdate {
   frame: ViewFrame;
 }
 
+export interface ViewDeltaRobot {
+  id: string;
+  x: number;
+  z: number;
+  heading: number;
+  removed?: boolean;
+  penaltyRemaining?: number;
+}
+
+export interface ViewDeltaFrame {
+  clock: number;
+  ball: { x: number; z: number; y?: number };
+  robots: ViewDeltaRobot[];
+  commsActivity?: { violet: number; lime: number };
+  score?: { violet: number; lime: number };
+  kickoff?: ViewKickoff;
+  events?: ViewEvent[];
+  halfTime?: HalfTime;
+  running?: boolean;
+  half?: 1 | 2;
+}
+
+export interface ViewDelta {
+  type: 'delta';
+  delta: ViewDeltaFrame;
+}
+
 export interface ViewSummary {
   type: 'summary';
   result: MatchResult;
@@ -276,7 +303,43 @@ export interface ViewSummary {
   nextMatchIn?: number;
 }
 
-export type ViewMessage = ViewHello | ViewUpdate | ViewSummary;
+export type ViewMessage = ViewHello | ViewUpdate | ViewDelta | ViewSummary;
+
+/**
+ * Applies a delta frame onto a full ViewFrame.
+ */
+export function applyViewDelta(current: ViewFrame, d: ViewDeltaFrame): ViewFrame {
+  const robots = current.robots.map((r) => {
+    const dr = d.robots.find((item) => item.id === r.id);
+    if (!dr) return r;
+    return {
+      ...r,
+      x: dr.x,
+      z: dr.z,
+      heading: dr.heading,
+      removed: dr.removed ?? r.removed,
+      penaltyRemaining: dr.penaltyRemaining ?? r.penaltyRemaining,
+    };
+  });
+  return {
+    ...current,
+    clock: d.clock,
+    ball: {
+      ...current.ball,
+      x: d.ball.x,
+      z: d.ball.z,
+      y: d.ball.y !== undefined ? d.ball.y : current.ball.y,
+    },
+    robots,
+    commsActivity: d.commsActivity ?? current.commsActivity,
+    score: d.score ?? current.score,
+    kickoff: d.kickoff ?? current.kickoff,
+    events: d.events ?? current.events,
+    halfTime: d.halfTime !== undefined ? d.halfTime : current.halfTime,
+    running: d.running !== undefined ? d.running : current.running,
+    half: d.half ?? current.half,
+  };
+}
 
 /** How often the server sends a frame. */
 export const VIEW_HZ = 30;

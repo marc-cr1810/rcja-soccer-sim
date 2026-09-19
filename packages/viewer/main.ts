@@ -13,7 +13,7 @@
 
 import { FieldRenderer } from '@rcja/shared/renderer';
 import type { League } from '@rcja/shared/leagues';
-import type { ViewFrame, ViewMessage } from '@rcja/shared/view';
+import { applyViewDelta, type ViewFrame, type ViewMessage } from '@rcja/shared/view';
 import type { MatchResult } from '@rcja/server/src/match/match';
 
 const canvas = document.getElementById('field') as HTMLCanvasElement;
@@ -332,10 +332,15 @@ function receive(message: ViewMessage): void {
     return;
   }
 
-  if (message.type === 'frame') {
+  if (message.type === 'frame' || message.type === 'delta') {
     previous = latest;
     previousAt = latestAt;
-    latest = message.frame;
+    if (message.type === 'frame') {
+      latest = message.frame;
+    } else {
+      if (!latest) return;
+      latest = applyViewDelta(latest, message.delta);
+    }
     latestAt = performance.now();
 
     // If a new match has started (or pre-match of half 1), ensure summary modal is hidden
