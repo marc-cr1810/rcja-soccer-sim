@@ -1,0 +1,31 @@
+{
+  "name": "@rcja/server",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Match server, simulator, and CLI for the RCJA Soccer Simulation league",
+  "bin": {
+    "rcja-soccer-sim": "../../bin/rcja-soccer-sim.js"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "cli": "bun src/infra/cli.ts",
+    "build:bin": "bun build --compile --outfile=../../dist/bin/rcja-soccer-sim ./src/infra/cli.ts"
+  },
+  "dependencies": {
+    "@rcja/shared": "workspace:*",
+    "@asteasolutions/zod-to-openapi": "^9.1.0",
+    "@scalar/api-reference": "^1.68.0",
+    "ws": "^8.21.3",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.18.1",
+    "bun-types": "^1.4.2",
+    "typescript": "^5.6.0"
+  },
+  "engines": {
+    "bun": ">=1.4"
+  }
+}

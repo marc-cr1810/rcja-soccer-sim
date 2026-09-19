@@ -4,26 +4,103 @@
   "workspaces": {
     "": {
       "name": "rcja-soccer-sim",
+      "devDependencies": {
+        "typescript": "^5.6.0",
+      },
+    },
+    "packages/practice": {
+      "name": "@rcja/practice",
+      "version": "0.0.0",
+      "dependencies": {
+        "@rcja/server": "workspace:*",
+        "@rcja/shared": "workspace:*",
+      },
+      "devDependencies": {
+        "typescript": "^5.6.0",
+        "vite": "^7.3.6",
+      },
+    },
+    "packages/referee": {
+      "name": "@rcja/referee",
+      "version": "0.0.0",
+      "dependencies": {
+        "@rcja/server": "workspace:*",
+        "@rcja/shared": "workspace:*",
+      },
+      "devDependencies": {
+        "typescript": "^5.6.0",
+        "vite": "^7.3.6",
+      },
+    },
+    "packages/server": {
+      "name": "@rcja/server",
+      "version": "0.0.0",
+      "bin": {
+        "rcja-soccer-sim": "../../bin/rcja-soccer-sim.js",
+      },
       "dependencies": {
         "@asteasolutions/zod-to-openapi": "^9.1.0",
+        "@rcja/shared": "workspace:*",
+        "@scalar/api-reference": "^1.68.0",
+        "ws": "^8.21.3",
+        "zod": "^4.6.5",
+      },
+      "devDependencies": {
+        "@types/ws": "^8.18.1",
+        "bun-types": "^1.4.2",
+        "typescript": "^5.6.0",
+      },
+    },
+    "packages/shared": {
+      "name": "@rcja/shared",
+      "version": "0.0.0",
+      "dependencies": {
+        "three": "^0.169.0",
+      },
+    },
+    "packages/site": {
+      "name": "@rcja/site",
+      "version": "0.0.0",
+      "dependencies": {
+        "@rcja/server": "workspace:*",
+        "@rcja/shared": "workspace:*",
+      },
+      "devDependencies": {
+        "typescript": "^5.6.0",
+        "vite": "^7.3.6",
+      },
+    },
+    "packages/viewer": {
+      "name": "@rcja/viewer",
+      "version": "0.0.0",
+      "dependencies": {
+        "@rcja/server": "workspace:*",
+        "@rcja/shared": "workspace:*",
+        "three": "^0.169.0",
+      },
+      "devDependencies": {
+        "@types/three": "^0.169.0",
+        "typescript": "^5.6.0",
+        "vite": "^7.3.6",
+      },
+    },
+    "packages/workspace": {
+      "name": "@rcja/workspace",
+      "version": "0.0.0",
+      "dependencies": {
         "@codemirror/commands": "^6.11.0",
         "@codemirror/lang-python": "^6.2.1",
         "@codemirror/language": "^6.12.4",
         "@codemirror/state": "^6.7.4",
         "@codemirror/view": "^6.43.11",
         "@lezer/highlight": "^1.2.3",
-        "@scalar/api-reference": "^1.68.0",
+        "@rcja/server": "workspace:*",
+        "@rcja/shared": "workspace:*",
         "codemirror": "^6.0.2",
-        "three": "^0.169.0",
-        "zod": "^4.6.5",
       },
       "devDependencies": {
-        "@types/three": "^0.169.0",
-        "@types/ws": "^8.18.1",
-        "bun-types": "^1.4.2",
         "typescript": "^5.6.0",
         "vite": "^7.3.6",
-        "ws": "^8.21.3",
       },
     },
   },
@@ -171,6 +248,20 @@
     "@opentelemetry/api": ["@opentelemetry/api@1.9.0", "", {}, "sha512-3giAOQvZiH5F9bMlMiv8+GSPMeqg0dbaeo58/0SlA9sxSqZhnUtxzX9/2FzyhS9sWQf5S0GJE0AKBrFqjpeYcg=="],
 
     "@phosphor-icons/core": ["@phosphor-icons/core@2.1.1", "", {}, "sha512-v4ARvrip4qBCImOE5rmPUylOEK4iiED9ZyKjcvzuezqMaiRASCHKcRIuvvxL/twvLpkfnEODCOJp5dM4eZilxQ=="],
+
+    "@rcja/practice": ["@rcja/practice@workspace:packages/practice"],
+
+    "@rcja/referee": ["@rcja/referee@workspace:packages/referee"],
+
+    "@rcja/server": ["@rcja/server@workspace:packages/server"],
+
+    "@rcja/shared": ["@rcja/shared@workspace:packages/shared"],
+
+    "@rcja/site": ["@rcja/site@workspace:packages/site"],
+
+    "@rcja/viewer": ["@rcja/viewer@workspace:packages/viewer"],
+
+    "@rcja/workspace": ["@rcja/workspace@workspace:packages/workspace"],
 
     "@replit/codemirror-css-color-picker": ["@replit/codemirror-css-color-picker@6.3.0", "", { "peerDependencies": { "@codemirror/language": "^6.0.0", "@codemirror/state": "^6.0.0", "@codemirror/view": "^6.0.0" } }, "sha512-19biDANghUm7Fz7L1SNMIhK48tagaWuCOHj4oPPxc7hxPGkTVY2lU/jVZ8tsbTKQPVG7BO2CBDzs7CBwb20t4A=="],
 

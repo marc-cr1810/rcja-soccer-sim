@@ -32,6 +32,11 @@ jobs:
         with:
           bun-version: latest
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
       - name: Install dependencies & build bundles
         run: |
           bun install
@@ -45,22 +50,22 @@ jobs:
           # Linux x64
           bun build --compile --target=bun-linux-x64 \
             --define APP_VERSION="\"$VER\"" \
-            --outfile=dist/bin/rcja-soccer-sim-linux-x64 ./src/cli.ts
+            --outfile=dist/bin/rcja-soccer-sim-linux-x64 ./packages/server/src/infra/cli.ts
 
           # Linux ARM64 (Raspberry Pi & ARM servers)
           bun build --compile --target=bun-linux-arm64 \
             --define APP_VERSION="\"$VER\"" \
-            --outfile=dist/bin/rcja-soccer-sim-linux-arm64 ./src/cli.ts
+            --outfile=dist/bin/rcja-soccer-sim-linux-arm64 ./packages/server/src/infra/cli.ts
 
           # macOS Apple Silicon
           bun build --compile --target=bun-darwin-arm64 \
             --define APP_VERSION="\"$VER\"" \
-            --outfile=dist/bin/rcja-soccer-sim-darwin-arm64 ./src/cli.ts
+            --outfile=dist/bin/rcja-soccer-sim-darwin-arm64 ./packages/server/src/infra/cli.ts
 
       - name: Build Python Package (Wheel and SDist)
         run: |
-          python3 -m pip install --upgrade build
-          python3 -m build python/ --wheel --sdist --outdir dist/python/
+          uv build python/ --wheel --sdist --out-dir dist/python/
+
 
       - name: Package Release Tarball
         env:

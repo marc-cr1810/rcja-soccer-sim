@@ -1,0 +1,17 @@
+{
+  "name": "@rcja/shared",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Shared types and renderer used by both the server and Vite frontends",
+  "exports": {
+    "./leagues": "./src/leagues.ts",
+    "./field": "./src/field.ts",
+    "./view": "./src/view.ts",
+    "./renderer": "./src/renderer.ts",
+    "./robot-model": "./src/robot-model.ts"
+  },
+  "dependencies": {
+    "three": "^0.169.0"
+  }
+}

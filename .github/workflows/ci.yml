@@ -37,8 +37,17 @@ jobs:
         with:
           bun-version: latest
 
-      - name: Install dependencies
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install Bun dependencies
         run: bun install
+
+      - name: Sync Python workspace (uv)
+        run: uv sync
+        working-directory: python
 
       - name: Static checks & typecheck
         run: make check
@@ -49,13 +58,11 @@ jobs:
       - name: Run Python unit tests (machine/ module)
         run: make test-py
 
-      - name: Run test suite
-        run: bun test
+      - name: Run TypeScript test suite
+        run: bun test --cwd packages/server
 
       - name: Compile standalone binary
         run: make build-bin
 
       - name: Build Python packages
-        run: |
-          python3 -m pip install --upgrade build || true
-          make build-py
+        run: make build-py

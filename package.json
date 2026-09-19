@@ -5,49 +5,26 @@
   "type": "module",
   "description": "Match server and simulator for the RCJA Soccer Simulation league",
   "license": "Apache-2.0",
+  "workspaces": ["packages/*"],
   "bin": {
     "rcja-soccer-sim": "./bin/rcja-soccer-sim.js"
   },
   "scripts": {
-    "test": "bun test",
-    "test:watch": "bun test --watch",
-    "typecheck": "tsc --noEmit",
-    "serve": "bun src/cli.ts",
-    "cli": "bun src/cli.ts",
-    "build": "bun run build:viewer && bun run build:referee && bun run build:practice && bun run build:workspace && bun run build:site",
-    "build:bin": "bun build --compile --outfile=dist/bin/rcja-soccer-sim ./src/cli.ts",
-    "build:viewer": "vite build",
-    "dev:viewer": "vite",
-    "build:referee": "vite build --config vite.referee.config.ts",
-    "build:practice": "vite build --config vite.practice.config.ts",
-    "build:workspace": "vite build --config vite.workspace.config.ts",
-    "build:site": "vite build --config vite.site.config.ts",
-    "dev:referee": "vite --config vite.referee.config.ts",
-    "dev:practice": "vite --config vite.practice.config.ts",
-    "dev:workspace": "vite --config vite.workspace.config.ts",
-    "dev:site": "vite --config vite.site.config.ts",
-    "bench": "bun src/cli.ts bench"
+    "test": "bun test --cwd packages/server",
+    "test:watch": "bun test --watch --cwd packages/server",
+    "typecheck": "tsc --build",
+    "build": "bun run --filter '@rcja/viewer' build && bun run --filter '@rcja/referee' build && bun run --filter '@rcja/practice' build && bun run --filter '@rcja/workspace' build && bun run --filter '@rcja/site' build",
+    "build:bin": "bun run --cwd packages/server build:bin",
+    "dev:viewer": "bun run --filter '@rcja/viewer' dev",
+    "dev:referee": "bun run --filter '@rcja/referee' dev",
+    "dev:practice": "bun run --filter '@rcja/practice' dev",
+    "dev:workspace": "bun run --filter '@rcja/workspace' dev",
+    "dev:site": "bun run --filter '@rcja/site' dev",
+    "cli": "bun packages/server/src/infra/cli.ts",
+    "bench": "bun packages/server/src/infra/cli.ts bench"
   },
   "devDependencies": {
-    "@types/three": "^0.169.0",
-    "@types/ws": "^8.18.1",
-    "bun-types": "^1.4.2",
-    "typescript": "^5.6.0",
-    "vite": "^7.3.6",
-    "ws": "^8.21.3"
-  },
-  "dependencies": {
-    "@asteasolutions/zod-to-openapi": "^9.1.0",
-    "@codemirror/commands": "^6.11.0",
-    "@codemirror/lang-python": "^6.2.1",
-    "@codemirror/language": "^6.12.4",
-    "@codemirror/state": "^6.7.4",
-    "@codemirror/view": "^6.43.11",
-    "@lezer/highlight": "^1.2.3",
-    "@scalar/api-reference": "^1.68.0",
-    "codemirror": "^6.0.2",
-    "three": "^0.169.0",
-    "zod": "^4.6.5"
+    "typescript": "^5.6.0"
   },
   "engines": {
     "bun": ">=1.4"

@@ -11,6 +11,8 @@ dist-*/
 bin/rcja-soccer-sim
 !bin/rcja-soccer-sim.js
 *.tsbuildinfo
+# uv lockfile — commit this if you want reproducible Python installs in CI
+# uv.lock
 
 # ─── Logs & Diagnostics ───────────────────────────────────────────────────────
 *.log
