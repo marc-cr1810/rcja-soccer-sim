@@ -56,7 +56,8 @@ help:
 	@echo "  make check                  Run typecheck and python compilation check"
 	@echo "  make typecheck              tsc --noEmit"
 	@echo "  make check-py               Validate python examples and library syntax"
-	@echo "  make test                   Run test suite (bun test)"
+	@echo "  make test                   Run test suite (python unittest + bun test)"
+	@echo "  make test-py                Run the machine/ module's python unittest suite"
 	@echo "  make test-watch             Run test suite in watch mode"
 	@echo "  make clean                  Remove build artifacts and scratch data"
 	@echo "  make clean-data             Remove local repository test state (rm -rf data)"
@@ -192,8 +193,11 @@ typecheck:
 check-py:
 	python3 -m py_compile python/rcja_soccer/*.py python/machine/*.py python/utime.py python/examples/*.py python/*.py
 
-test:
+test: test-py
 	bun test
+
+test-py:
+	python3 -m unittest discover -s python/tests -v
 
 test-watch:
 	bun run test:watch

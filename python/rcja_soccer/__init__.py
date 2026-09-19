@@ -1,20 +1,25 @@
 """Write a robot for the RCJA Soccer Simulation league.
 
-    from rcja_soccer import Robot, drive
+    import time
+    from machine import Runtime
+    from rcja_soccer import coast, drive
 
-    robot = Robot(team="violet", number=1, name="ACT")
+    rt = Runtime.get()
 
-    @robot.tick
-    def think(s, me):
+    while True:
+        s = rt.sensors()
         if s.ball is None:
-            return robot.coast()
-        return robot.motors(drive(bearing=s.ball.bearing, speed=0.8))
+            rt.send_command(motors=coast())
+        else:
+            rt.send_command(motors=drive(bearing=s.ball.bearing, speed=0.8))
+        time.sleep_ms(20)
 
-    robot.run()
-
-No dependencies, on purpose: the schools this league exists to reach are the
-ones where pip is behind a proxy, offline, or not something a student is
-allowed to run, and a dependency is a reason a team cannot enter.
+No dependencies of its own, on purpose: the schools this league exists to
+reach are the ones where pip is behind a proxy, offline, or not something a
+student is allowed to run, and a dependency is a reason a team cannot enter.
+``machine`` is what actually owns the connection - a real MicroPython board
+has one already - so a program needs both, but this half of it stays as
+plain, ordinary code you could paste anywhere.
 
 Three modules, in the order a team meets them:
 
@@ -22,15 +27,15 @@ Three modules, in the order a team meets them:
 ``field``   the rulebook's own dimensions. Facts, not help.
 ``sense``   turning readings into where you are and where the ball is.
 
-Everything outside ``robot`` is ordinary readable code with no privileged
-access to anything. Read it, copy it, and replace the parts you want to beat
-somebody with.
+Everything here is ordinary readable code with no privileged access to
+anything. Read it, copy it, and replace the parts you want to beat somebody
+with.
 """
 
 from ._ws import WebSocketError
 from .drive import WHEEL_AXES, clamp, coast, drive, wrap_angle
 from .frame import GoalFrame
-from .robot import DEFAULT_URL, PROTOCOL_VERSION, Memory, Reading, Robot
+from .memory import Memory
 from .sense import (
     BallTracker,
     GyroRate,
@@ -57,22 +62,13 @@ from .sense import (
 )
 from .transport import Channel, TransportError, use_join, use_transport
 
-try:
-    import machine  # noqa: F401
-except ImportError:
-    pass
-
 __all__ = [
-    "DEFAULT_URL",
-    "PROTOCOL_VERSION",
     "BallTracker",
     "Channel",
     "GoalFrame",
     "GyroRate",
     "Locator",
     "Memory",
-    "Reading",
-    "Robot",
     "TransportError",
     "WHEEL_AXES",
     "WebSocketError",

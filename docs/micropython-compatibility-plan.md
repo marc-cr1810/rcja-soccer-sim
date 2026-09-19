@@ -117,13 +117,13 @@ The simulator models a standard ESP32-inspired robotics controller pinout:
 | **Dribbler** | Pin 26 | PWM / Pin.OUT | `dribbler`: 0.0 to 1.0 (speed) |
 | **Kicker** | Pin 27 | Pin.OUT | `kicker`: True on rising edge / `value(1)` |
 | **Line Sensors (8x)**| Pins 32–39 | ADC / Pin.IN | `lines[0..7]`: 0–65535 (`read_u16()`) |
-| **Ball Sensor (IR)** | Pin 34 | ADC | `ball.strength`: 0–65535 (`read_u16()`) |
-| **Ball Angle (IR)**  | Pin 35 | ADC | `ball.bearing`: scaled -π..+π to 0–65535 |
-| **TSOP Ring (8x)**   | Pins 4,5,21,22,23,25,1,3 | ADC / Pin.IN | 8 directional IR zones around chassis |
+| **Ball Sensor (IR)** | Pin 4 | ADC | `ball.strength`: 0–65535 (`read_u16()`) |
+| **Ball Angle (IR)**  | Pin 5 | ADC | `ball.bearing`: scaled -π..+π to 0–65535 |
+| **TSOP Ring (8x)**   | Pins 0,6,7,8,23,25,1,3 | ADC / Pin.IN | 8 directional IR zones around chassis |
 | **Compass / IMU**   | I2C (`0x68`, `0x28`) | I2C / SoftI2C | Heading & gyro rate registers |
-| **Compass (Analog)** | Pin 36 | ADC | Heading: -π..+π mapped to 0–65535 |
-| **Gyro (Analog)**    | Pin 39 | ADC | Angular velocity `gyro.rate` |
-| **Ultrasonics (4x)** | Pins 2, 4, 15, 13 (alt)| ADC / Distance | Front, Back, Left, Right distances |
+| **Compass (Analog)** | Pin 21 | ADC | Heading: -π..+π mapped to 0–65535 |
+| **Gyro (Analog)**    | Pin 22 | ADC | Angular velocity `gyro.rate` |
+| **Ultrasonics (4x)** | Pins 2, 15, 9, 13 | ADC / Distance | Front, Back, Left, Right distances |
 
 ### Motor Driver Modes
 * **DIR + PWM Mode**: One PWM pin (duty 0–65535) and one digital output pin (0 = forward, 1 = reverse).

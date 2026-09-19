@@ -14,24 +14,15 @@ const pythonAvailable = spawnSync('python3', ['--version']).status === 0;
 const ready = pythonAvailable && sandboxAvailable();
 
 const COAST_ROBOT = `
-import argparse
-parser = argparse.ArgumentParser()
-parser.add_argument("--team", default="violet")
-parser.add_argument("--number", type=int, default=1)
-parser.add_argument("--name", default=None)
-parser.add_argument("--url", default="ws://localhost:8080/agent")
-parser.add_argument("--token", default=None)
-args = parser.parse_args()
+import time
+from machine import Runtime
+from rcja_soccer import coast
 
-from rcja_soccer import Robot
-
-robot = Robot(team=args.team, number=args.number, name=args.name, token=args.token)
-
-@robot.tick
-def think(s, me):
-    return robot.coast()
-
-robot.run(args.url)
+rt = Runtime.get()
+while True:
+    rt.sensors()
+    rt.send_command(motors=coast())
+    time.sleep_ms(20)
 `;
 
 async function submissionsRoot(): Promise<string> {

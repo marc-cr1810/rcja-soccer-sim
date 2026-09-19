@@ -11,9 +11,18 @@ from typing import Any, Callable
 
 from . import constants
 from .config import get_config
+from .reading import Reading
 
 PROTOCOL_VERSION = 5
 DEFAULT_URL = "ws://localhost:8080/agent"
+#: How long to keep retrying a lost connection, in seconds, before giving up
+#: and letting the error propagate. The clock restarts on every successful
+#: connection, so a practice session survives any number of server restarts;
+#: what it will not do is retry a port that is never coming back forever - the
+#: same budget `rcja_soccer.Robot.run()` used to give, and for the same
+#: reason: a harness that spawns robots detached cannot clean up a process
+#: that outlives it.
+DEFAULT_RECONNECT_FOR = 120.0
 
 
 def _clamp(val: float, low: float, high: float) -> float:
@@ -55,24 +64,54 @@ class Runtime:
         self.pwm_freqs: dict[int, int] = {}        # Pin ID -> frequency in Hz
         self.kicker_latched: bool = False
         self.say_data: Any = None
+        #: Set by `send_command()`; consumed and cleared by the next
+        #: `build_actuator_frame()` in place of the pin-derived command, for a
+        #: program that would rather hand over a command dict directly than
+        #: name individual motor pins.
+        self._direct_command: dict[str, Any] | None = None
 
         # Time accumulation for sub-tick sleeps
         self._sleep_accum_ms: float = 0.0
+
+        # Reconnection budget: how long ago the connection last succeeded,
+        # and how long to keep retrying a lost one before giving up.
+        self._last_connected: float = time.monotonic()
+        self.reconnect_for: float = DEFAULT_RECONNECT_FOR
 
     # -------------------------------------------------------------------------
     # Connection Lifecycle
     # -------------------------------------------------------------------------
 
     def ensure_connected(self) -> None:
-        """Connect to the match server if not already connected."""
+        """Connect to the match server if not already connected.
+
+        Retries with a one-second backoff for as long as `reconnect_for`
+        seconds since the last successful connection, then lets the error
+        propagate. This is the same retry `rcja_soccer.Robot.run()` used to
+        do around its own socket - ported here because `machine` is now the
+        only thing that owns a connection at all, so nothing else provides it.
+        """
         if self.connected:
             return
 
-        from rcja_soccer.transport import current_transport, join_token, join_url
+        from rcja_soccer.transport import TransportError, current_transport, join_token, join_url
 
+        opener = current_transport()
+        while True:
+            try:
+                self._connect_once(opener, join_url(), join_token())
+                return
+            except (TransportError, OSError) as error:
+                idle = time.monotonic() - self._last_connected
+                if idle > self.reconnect_for:
+                    raise
+                time.sleep(1.0)
+
+    def _connect_once(self, opener: Callable[[str], Any], join_url_value: str | None, join_token_value: str | None) -> None:
+        """One join attempt: open a socket, shake hands, wait for the first frame."""
         # 1. Parse connection arguments from sys.argv or join_url/token
-        url = join_url() or DEFAULT_URL
-        token = join_token()
+        url = join_url_value or DEFAULT_URL
+        token = join_token_value
 
         # Parse command line flags without crashing on unknown args
         args = sys.argv[1:] if len(sys.argv) > 1 else []
@@ -101,7 +140,6 @@ class Runtime:
                 i += 1
 
         self.token = token
-        opener = current_transport()
         self.socket = opener(url)
 
         # 2. Send join handshake
@@ -136,6 +174,7 @@ class Runtime:
                 pass
 
         self.connected = True
+        self._last_connected = time.monotonic()
 
         # 4. Wait for the first sensor frame before unblocking user hardware reads
         while True:
@@ -201,6 +240,11 @@ class Runtime:
 
     def build_actuator_frame(self) -> dict[str, Any]:
         """Convert current virtual pin/PWM states into a simulator ActuatorFrame."""
+        if self._direct_command is not None:
+            cmd = self._direct_command
+            self._direct_command = None
+            return cmd
+
         cfg = get_config()
         motor_powers: list[float] = [0.0] * self.motor_count
 
@@ -393,20 +437,75 @@ class Runtime:
         ticks = max(1, int(round(self._sleep_accum_ms / 20.0)))
         self._sleep_accum_ms = 0.0
 
-        for _ in range(ticks):
-            cmd = self.build_actuator_frame()
-            self.socket.send(json.dumps({"type": "command", "frame": cmd}))
+        from rcja_soccer.transport import TransportError
 
-            # Wait for next server response
+        for _ in range(ticks):
             while True:
-                msg = json.loads(self.socket.recv())
-                msg_type = msg.get("type")
-                if msg_type == "sensors":
-                    self._update_sensor_frame(msg["frame"])
-                    break
-                elif msg_type == "disabled":
-                    if not self.off_field:
-                        self.off_field = True
-                    # Zero motor outputs during stand-down
-                    self.pwm_duties.clear()
-                    break
+                try:
+                    cmd = self.build_actuator_frame()
+                    self.socket.send(json.dumps({"type": "command", "frame": cmd}))
+
+                    # Wait for next server response
+                    while True:
+                        msg = json.loads(self.socket.recv())
+                        msg_type = msg.get("type")
+                        if msg_type == "sensors":
+                            self._update_sensor_frame(msg["frame"])
+                            break
+                        elif msg_type == "disabled":
+                            if not self.off_field:
+                                self.off_field = True
+                            # Zero motor outputs during stand-down
+                            self.pwm_duties.clear()
+                            break
+                    break  # this tick advanced; move on to the next one
+                except (TransportError, OSError):
+                    # The far end is gone. `ensure_connected()` retries with a
+                    # backoff, then re-raises once `reconnect_for` is spent -
+                    # see its docstring.
+                    self.connected = False
+                    self.ensure_connected()
+
+    # -------------------------------------------------------------------------
+    # Full-frame reads and direct commands, for a program built on
+    # `rcja_soccer` rather than on named hardware pins.
+    # -------------------------------------------------------------------------
+
+    def sensors(self) -> Reading:
+        """The full sensor frame for this tick, as attributes.
+
+        Everything the server sent - camera goal blobs, team radio messages,
+        wheel encoders, attack direction and all - not just the
+        hardware-shaped subset the Pin/PWM/ADC/I2C classes expose. The same
+        shape `rcja_soccer.Robot`'s tick function used to hand a program as
+        `s`, before there were two connections to reconcile.
+        """
+        self.ensure_connected()
+        return Reading(self.last_frame)
+
+    def send_command(
+        self,
+        motors: list[float] | None = None,
+        dribbler: float = 0.0,
+        kicker: bool = False,
+        say: Any = None,
+    ) -> None:
+        """Set this tick's actuator command directly, bypassing Pin/PWM writes.
+
+        For a program built on `rcja_soccer.drive()` rather than on named
+        motor pins - the same shape `robot.motors()` used to return. Staged
+        here and consumed by the next `build_actuator_frame()` (on the next
+        `time.sleep_ms()`), the same as a Pin or PWM write is - so calling
+        this and then setting an individual Pin in the same tick has the Pin
+        write silently overridden, matching the general rule elsewhere in
+        this library that an explicit command wins over an installed default.
+        """
+        self.ensure_connected()
+        cmd: dict[str, Any] = {
+            "motors": list(motors) if motors is not None else [0.0] * self.motor_count,
+            "dribbler": dribbler,
+            "kicker": kicker,
+        }
+        if say is not None:
+            cmd["say"] = say
+        self._direct_command = cmd

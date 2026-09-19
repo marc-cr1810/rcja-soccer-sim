@@ -12,6 +12,7 @@ from .adc import ADC
 from .i2c import I2C, SoftI2C
 from .pin import Pin
 from .pwm import PWM
+from .reading import Reading
 
 
 def _patch_time_module() -> None:
@@ -92,6 +93,8 @@ __all__ = [
     "ADC",
     "I2C",
     "SoftI2C",
+    "Reading",
+    "Runtime",
     "reset",
     "freq",
     "idle",

@@ -52,6 +52,14 @@ script = [
     sensors(0.0, ball_strength=0.5),
     sensors(0.02, ball_strength=0.9),
     sensors(0.04, ball_strength=0.1),
+    # One more than the loop below consumes: machine.Runtime now retries a
+    # dropped connection instead of raising immediately (see
+    # test_runtime.py), so running this script dry mid-loop would trigger a
+    # real reconnect attempt against this same exhausted fake channel rather
+    # than the clean "TransportError propagates" this harness used to lean
+    # on incidentally. Giving it one spare frame keeps the loop finishing
+    # normally, which is what every assertion below actually checks.
+    sensors(0.06, ball_strength=0.1),
 ]
 
 channel = Fake(script)

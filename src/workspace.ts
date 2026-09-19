@@ -245,32 +245,24 @@ function starterManifest(team: string, robot: RobotNumber): string {
  */
 const STARTER_ROBOT = `"""Our robot."""
 
-import argparse
+import time
 
-from rcja_soccer import Robot, drive
+from machine import Runtime
+from rcja_soccer import coast, drive
 
-parser = argparse.ArgumentParser()
-parser.add_argument("--team", default="violet", choices=["violet", "lime"])
-parser.add_argument("--number", type=int, default=1, choices=[1, 2])
-parser.add_argument("--name", default=None)
-parser.add_argument("--url", default="ws://localhost:8080/agent")
-parser.add_argument("--token", default=None)
-args = parser.parse_args()
+rt = Runtime.get()
 
-robot = Robot(team=args.team, number=args.number, name=args.name, token=args.token)
+while True:
+    # s is what the sensors report - this loop runs fifty times a second.
+    s = rt.sensors()
 
-
-@robot.tick
-def think(s, me):
-    # s is what the sensors report. me is somewhere to remember things
-    # between ticks - this runs fifty times a second.
     if s.ball is None:
         # The infrared ring cannot see the ball. Sit still rather than guess.
-        return robot.coast()
+        rt.send_command(motors=coast())
+    else:
+        # Drive straight at it, and run the dribbler so it sticks.
+        rt.send_command(motors=drive(bearing=s.ball.bearing, speed=0.8), dribbler=1.0)
 
-    # Drive straight at it, and run the dribbler so it sticks.
-    return robot.motors(drive(bearing=s.ball.bearing, speed=0.8), dribbler=1.0)
-
-
-robot.run(url=args.url)
+    # Flushes the motor command above and waits for the next tick's sensors.
+    time.sleep_ms(20)
 `;

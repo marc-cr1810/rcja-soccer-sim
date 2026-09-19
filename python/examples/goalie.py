@@ -43,14 +43,17 @@ from __future__ import annotations
 import argparse
 import math
 import sys
+import time
 from pathlib import Path
 
-# Ensure rcja_soccer can be imported regardless of current working directory
+# Ensure rcja_soccer and machine can be imported regardless of current working directory
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from machine import Runtime
 from rcja_soccer import (
-    Robot,
+    Memory,
     clamp,
+    coast,
     drive,
     pass_is_open,
     relay_ball,
@@ -90,7 +93,24 @@ parser.add_argument("--token", default=None, help="server-issued at submit time"
 parser.add_argument("--debug", action="store_true", help="print telemetry")
 args = parser.parse_args()
 
-robot = Robot(team=args.team, number=args.number, name=args.name, token=args.token)
+rt = Runtime.get()
+
+
+def motors(powers, dribbler: float = 0.0, kicker: bool = False, say=None) -> dict:
+    """Drive the motors, and optionally the dribbler and kicker.
+
+    The same shape `Robot.motors()` used to build - a plain command dict for
+    `rt.send_command(**...)`, so every branch below that used to `return
+    motors(...)` still can.
+    """
+    command: dict = {"motors": list(powers)}
+    if dribbler:
+        command["dribbler"] = dribbler
+    if kicker:
+        command["kicker"] = True
+    if say is not None:
+        command["say"] = say
+    return command
 
 #: Which goal this robot is guarding is its own team's colour wherever on the
 #: field it stands (rule 1.4/5.4 only swaps which end that is). The frame finds
@@ -138,23 +158,26 @@ ball = BallTracker()
 drift = CompassBias()
 
 
-@robot.tick
 def think(s, me):
     if not s.playing:
-        return robot.coast()
+        return motors(coast())
 
     # Placed but not live: the whistle ends the countdown, and until it blows
     # nothing has been re-anchored for a keeper either. Post-goal the clock is
     # still running, so `playing` says true while the countdown runs — hold.
     if s.kickoff.countdown > 0:
-        return robot.coast()
+        return motors(coast())
 
-    # `me` is emptied at every kick-off, so an empty one is the signal that the
-    # previous passage of play is over. The trackers are not in `me` and have
-    # to be told: a ball estimate from before the restart is an estimate of
-    # where the ball no longer is.
-    if s.kickoff.pending and not me.get("restarted"):
-        me.restarted = True
+    # A tick-callback framework used to empty `me` at every kick-off, which
+    # doubled as the signal that the previous passage of play was over. A
+    # plain loop keeps its own `me` for good, so the rising edge of
+    # `kickoff.pending` is tracked explicitly instead - once True, once per
+    # kick-off. The trackers are not in `me` and have to be told separately: a
+    # ball estimate from before the restart is an estimate of where the ball
+    # no longer is.
+    was_pending = me.get("kickoff_was_pending", False)
+    me.kickoff_was_pending = s.kickoff.pending
+    if s.kickoff.pending and not was_pending:
         ball.reset()
         yaw.reset()
 
@@ -195,7 +218,7 @@ def think(s, me):
     if abs(me_x) > HALF_LENGTH + 25 or abs(me_z) > HALF_WIDTH + 25:
         home_x, home_z = back_inside(me_x, me_z, margin=170.0)
         say(me, "RECOVER")
-        return robot.motors(
+        return motors(
             drive(
                 bearing=wrap_angle(math.atan2(home_z - me_z, home_x - me_x) - heading),
                 speed=1.0,
@@ -289,7 +312,7 @@ def think(s, me):
         else:
             state = "CLEAR" if safe else "TURN_TO_CLEAR"
         say(me, state)
-        return robot.motors(
+        return motors(
             drive(
                 bearing=wrap_angle(travel - heading),
                 speed=clamp(gap / 200.0, 0.0, 0.5),
@@ -307,7 +330,7 @@ def think(s, me):
             math.atan2(-me_z * 0.3, (guard_x - me_x)), me_x, me_z, 210.0, LEASH_X, LEASH_Z
         )
         say(me, "OFF_THE_LINE", abs(me_x - guard_x))
-        return robot.motors(
+        return motors(
             drive(bearing=wrap_angle(travel - heading), speed=1.0, spin=square),
             dribbler=1.0,
             say=report("OFF_THE_LINE", me_x, me_z, held=False),
@@ -328,7 +351,7 @@ def think(s, me):
         )
         reach = math.hypot(bx - me_x, bz - me_z)
         say(me, "SMOTHER", reach)
-        return robot.motors(
+        return motors(
             drive(bearing=wrap_angle(travel - heading), speed=1.0, spin=square),
             dribbler=1.0,
             # The one state where the net is actually empty: this keeper has
@@ -451,7 +474,7 @@ def hold(s, me, me_x, me_z, target_x, target_z, spin, heading, state, bx=None, b
 
     if gap < 18.0:
         say(me, state)
-        return robot.motors(drive(speed=0.0, spin=spin), dribbler=0.0, say=message)
+        return motors(drive(speed=0.0, spin=spin), dribbler=0.0, say=message)
 
     travel = steer_clear_of_edges(math.atan2(dz, dx), me_x, me_z, 210.0, LEASH_X, LEASH_Z)
     # Sideways along the mouth is the move a keeper makes most, and it is the
@@ -459,7 +482,7 @@ def hold(s, me, me_x, me_z, target_x, target_z, spin, heading, state, bx=None, b
     # real, and ease off only at the end.
     speed = clamp(gap / 90.0, 0.3, 1.0)
     say(me, state, gap)
-    return robot.motors(
+    return motors(
         drive(bearing=wrap_angle(travel - heading), speed=speed, spin=spin),
         dribbler=0.0,
         say=message,
@@ -487,4 +510,15 @@ def say(me, state: str, distance: float | None = None) -> None:
 
 
 if __name__ == "__main__":
-    robot.run(args.url)
+    memory = Memory()
+    while True:
+        s = rt.sensors()
+        # A robot stood down under rule 5.7 gets no sensors worth reading -
+        # `off_field` says so, the same as `Robot._play()` used to skip
+        # calling `think()` on a "disabled" message rather than deciding
+        # anything from a frame that stopped updating.
+        if not rt.off_field:
+            command = think(s, memory)
+            if command is not None:
+                rt.send_command(**command)
+        time.sleep_ms(20)

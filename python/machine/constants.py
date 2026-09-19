@@ -42,7 +42,9 @@ DEFAULT_BALL_STRENGTH_PIN = 4
 DEFAULT_BALL_BEARING_PIN = 5
 
 # Directional IR photodiode ring (8 zones matching angles: 0, 45, 90, 135, 180, 225, 270, 315 deg)
-DEFAULT_IR_RING_PINS = [4, 5, 21, 22, 23, 25, 1, 3]
+# Must not collide with any other ADC pin below - read_adc() picks the first
+# matching category, so a shared pin number silently shadows one of them.
+DEFAULT_IR_RING_PINS = [0, 6, 7, 8, 23, 25, 1, 3]
 
 # Analog Compass & Gyro
 DEFAULT_COMPASS_PIN = 21
@@ -52,7 +54,7 @@ DEFAULT_GYRO_PIN = 22
 DEFAULT_ULTRASONIC_PINS = {
     "front": 2,
     "back": 15,
-    "left": 4,
+    "left": 9,
     "right": 13,
 }
 

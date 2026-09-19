@@ -48,14 +48,17 @@ import argparse
 import math
 import os
 import sys
+import time
 from pathlib import Path
 
-# Ensure rcja_soccer can be imported regardless of current working directory
+# Ensure rcja_soccer and machine can be imported regardless of current working directory
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from machine import Runtime
 from rcja_soccer import (
-    Robot,
+    Memory,
     clamp,
+    coast,
     drive,
     pass_is_open,
     opening,
@@ -102,7 +105,24 @@ parser.add_argument("--token", default=None, help="server-issued at submit time"
 parser.add_argument("--debug", action="store_true", help="print telemetry")
 args = parser.parse_args()
 
-robot = Robot(team=args.team, number=args.number, name=args.name, token=args.token)
+rt = Runtime.get()
+
+
+def motors(powers, dribbler: float = 0.0, kicker: bool = False, say=None) -> dict:
+    """Drive the motors, and optionally the dribbler and kicker.
+
+    The same shape `Robot.motors()` used to build - a plain command dict for
+    `rt.send_command(**...)`, so every branch below that used to `return
+    motors(...)` still can.
+    """
+    command: dict = {"motors": list(powers)}
+    if dribbler:
+        command["dribbler"] = dribbler
+    if kicker:
+        command["kicker"] = True
+    if say is not None:
+        command["say"] = say
+    return command
 
 #: Which goal this robot scores in is whatever end its team currently defends,
 #: which a kick-off places it on (rule 1.4/5.4 only swaps which end that is).
@@ -142,24 +162,27 @@ ball = BallTracker()
 drift = CompassBias()
 
 
-@robot.tick
 def think(s, me):
     if not s.playing:
-        return robot.coast()
+        return motors(coast())
 
     # The ball is on the spot but play is not live until the whistle ends the
     # countdown. This is easy to miss post-goal, where the clock is still
     # running: `playing` is true while `kickoff.countdown` ticks down, and a
     # robot that makes for the ball early is encroaching before the restart.
     if s.kickoff.countdown > 0:
-        return robot.coast()
+        return motors(coast())
 
-    # `me` is emptied at every kick-off, so an empty one is the signal that the
-    # previous passage of play is over. The trackers are not in `me` and have
-    # to be told: a ball estimate from before the restart is an estimate of
-    # where the ball no longer is.
-    if s.kickoff.pending and not me.get("restarted"):
-        me.restarted = True
+    # A tick-callback framework used to empty `me` at every kick-off, which
+    # doubled as the signal that the previous passage of play was over. A
+    # plain loop keeps its own `me` for good, so the rising edge of
+    # `kickoff.pending` is tracked explicitly instead - once True, once per
+    # kick-off. The trackers are not in `me` and have to be told separately: a
+    # ball estimate from before the restart is an estimate of where the ball
+    # no longer is.
+    was_pending = me.get("kickoff_was_pending", False)
+    me.kickoff_was_pending = s.kickoff.pending
+    if s.kickoff.pending and not was_pending:
         ball.reset()
         yaw.reset()
         effort.reset()
@@ -208,11 +231,11 @@ def think(s, me):
     if s.kickoff.pending:
         if not s.kickoff.ours:
             # Rule 5.4.5 has us in our own box and 5.4.6 keeps us off the ball.
-            return robot.motors(drive(speed=0.0), dribbler=0.0)
+            return motors(drive(speed=0.0), dribbler=0.0)
         square = spin_towards(wrap_angle(frame.up_angle() - heading), yaw)
         if holding:
             say(me, "KICK_OFF_WAIT")
-            return robot.motors(drive(speed=0.0, spin=square), dribbler=1.0, kicker=True)
+            return motors(drive(speed=0.0, spin=square), dribbler=1.0, kicker=True)
         # The approach must not chase the ball estimate. A kick-off starts you
         # right behind the ball, facing up the field; the estimate has not
         # converged again after the restart, and steering by it for the first
@@ -223,7 +246,7 @@ def think(s, me):
         # let the kicker do the rest. The roller has to stay OFF while
         # creeping - on, it drags the ball along with you before you hold it.
         say(me, "KICK_OFF")
-        return robot.motors(
+        return motors(
             drive(bearing=0.0, speed=0.15, spin=0.0), dribbler=0.0, kicker=True
         )
 
@@ -242,7 +265,7 @@ def think(s, me):
     if abs(me_x) > HALF_LENGTH + 25 or abs(me_z) > HALF_WIDTH + 25:
         home_x, home_z = back_inside(me_x, me_z, margin=170.0)
         say(me, "RECOVER")
-        return robot.motors(
+        return motors(
             drive(
                 bearing=wrap_angle(math.atan2(home_z - me_z, home_x - me_x) - heading),
                 speed=1.0,
@@ -272,7 +295,7 @@ def think(s, me):
             home_x, home_z = frame.from_our_goal(HALF_LENGTH * 0.65)
             travel = wrap_angle(math.atan2(home_z - me_z, home_x - me_x) - heading)
             say(me, "SEARCH")
-            return robot.motors(
+            return motors(
                 drive(bearing=travel, speed=0.55, spin=spin_towards(wrap_angle(frame.up_angle() - heading), yaw)),
                 dribbler=1.0,
                 say=report("SEARCH", me_x, me_z, held=False),
@@ -487,7 +510,7 @@ def think(s, me):
     )
 
     say(me, state, range_to_ball)
-    return robot.motors(
+    return motors(
         drive(bearing=wrap_angle(travel_field - heading), speed=speed, spin=spin),
         dribbler=dribbler,
         kicker=kick,
@@ -576,7 +599,7 @@ def receive(s, me, me_x, me_z, heading, yaw, frame):
     ready = gap < 150.0 and abs(error) < 0.35
 
     say(me, "RECEIVE")
-    return robot.motors(
+    return motors(
         drive(
             bearing=wrap_angle(travel - heading),
             speed=0.0 if gap < 70.0 else clamp(gap / 260.0, 0.3, 1.0),
@@ -681,7 +704,7 @@ def cover(s, me, me_x, me_z, bz, heading, spin, frame: GoalFrame, guard_mouth: b
     travel = math.atan2(wait_z - me_z, wait_x - me_x)
     state = "COVER_MOUTH" if guard_mouth else "COVER"
     say(me, state)
-    return robot.motors(
+    return motors(
         drive(
             bearing=wrap_angle(travel - heading),
             speed=clamp(gap / 140.0, 0.0, 1.0) if gap > 30 else 0.0,
@@ -766,4 +789,15 @@ def say(me, state: str, distance: float | None = None) -> None:
 
 
 if __name__ == "__main__":
-    robot.run(args.url)
+    memory = Memory()
+    while True:
+        s = rt.sensors()
+        # A robot stood down under rule 5.7 gets no sensors worth reading -
+        # `off_field` says so, the same as `Robot._play()` used to skip
+        # calling `think()` on a "disabled" message rather than deciding
+        # anything from a frame that stopped updating.
+        if not rt.off_field:
+            command = think(s, memory)
+            if command is not None:
+                rt.send_command(**command)
+        time.sleep_ms(20)
