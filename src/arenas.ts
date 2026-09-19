@@ -294,6 +294,40 @@ export class ArenaSupervisor {
     this.sampler.unref?.();
   }
 
+  /**
+   * Change what this was built with, while it is running.
+   *
+   * Nearly free, and that is not luck: every one of these is already read from
+   * `this.opts` at the moment it matters rather than captured — the ceiling and
+   * the fixture reserve on each `create`, the seat grants when a child's argv
+   * is assembled, the quiet time and the grace on every `sweep`. So a venue
+   * that changes its mind mid-afternoon has to be *written to*, not restarted.
+   *
+   * Two consequences worth saying out loud, because an organiser will meet
+   * them: lowering `maxArenas` below what is running **refuses the next
+   * arena**, it does not evict a match in progress; and new seat grants reach
+   * arenas started from now, never the children already playing with the argv
+   * they were given.
+   */
+  reconfigure(
+    opts: Pick<
+      ArenaSupervisorOptions,
+      'maxArenas' | 'fixtureSlots' | 'idleMinutes' | 'graceMinutes' | 'seatCpuPercent' | 'seatMemoryMb'
+    >,
+  ): void {
+    for (const key of [
+      'maxArenas',
+      'fixtureSlots',
+      'idleMinutes',
+      'graceMinutes',
+      'seatCpuPercent',
+      'seatMemoryMb',
+    ] as const) {
+      const value = opts[key];
+      if (value !== undefined) this.opts[key] = value;
+    }
+  }
+
   get count(): number {
     return this.arenas.size;
   }

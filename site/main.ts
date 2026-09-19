@@ -20,7 +20,7 @@ const nav = document.getElementById('nav') as HTMLElement;
 const who = document.getElementById('who') as HTMLElement;
 
 interface Me {
-  account: { slug: string; displayName: string; role: string } | null;
+  account: { id: string; slug: string; displayName: string; role: string } | null;
   can: { workspace: boolean; referee: boolean; admin: boolean };
 }
 
@@ -99,6 +99,9 @@ const ROUTES: [RegExp, Route][] = [
   [/^\/admin\/arenas$/, adminArenas],
   [/^\/admin\/tournaments$/, adminTournaments],
   [/^\/admin\/teams$/, adminTeams],
+  [/^\/admin\/people$/, adminPeople],
+  [/^\/admin\/audit$/, adminAudit],
+  [/^\/admin\/settings$/, adminSettings],
   [/^\/referee\/?$/, refereeList],
   [/^\/referee\/m\/([^/]+)$/, (p) => refereeMatch(p[0]!)],
   // END-STATE.md's own name for the pre-game screen, pointed at the same
@@ -2157,17 +2160,17 @@ async function refereeMatch(fixtureId: string): Promise<void> {
  * Phase 12 is the real admin area. What is here is what Phase 6 itself creates
  * and therefore has to be able to undo: who exists, and who may register.
  */
+/**
+ * An index, and nothing else.
+ *
+ * Until Phase 12 G this page also held the invitation form and the list of
+ * accounts, which is where they went when there was nowhere else to put them.
+ * Everything else about running a venue has had its own screen since slice E;
+ * people are the last subject to get one, and a hub that is six links reads in
+ * one glance where a hub with a form buried under it did not.
+ */
 async function admin(): Promise<void> {
   if (!me.can.admin) return void go('/login?next=%2Fadmin');
-  const [accounts, invites] = await Promise.all([
-    api<{ accounts: { id: string; slug: string; displayName: string; role: string; disabled: boolean }[] }>(
-      '/api/admin/accounts',
-    ),
-    api<{ invites: { code: string; role: string; team: string | null; usedAt: string | null }[] }>(
-      '/api/admin/invites',
-    ),
-  ]);
-
   const load = await api<AdminArenas>('/api/admin/arenas');
 
   view.innerHTML = h(`
@@ -2188,65 +2191,20 @@ async function admin(): Promise<void> {
         <span class="grow">Team files</span>
         <span class="state">what is loaded, and putting an earlier push back</span>
       </a>
-    </div>
-
-    <h2>Invite somebody</h2>
-    <form class="panel" id="form">
-      <label for="role">Role</label>
-      <select id="role">
-        <option value="team">Team</option>
-        <option value="referee">Referee</option>
-        <option value="admin">Organiser</option>
-      </select>
-      <label for="team">Team name <span class="dim">(teams only — this is the name they will play under)</span></label>
-      <input id="team" />
-      <button class="primary" type="submit">Issue a code</button>
-      <div class="error" id="error" hidden></div>
-    </form>
-    <div class="note" id="fresh" hidden></div>
-
-    <h2>Invitations</h2>
-    ${
-      invites.invites.length
-        ? `<div class="rows">${invites.invites
-            .map(
-              (invite) => `<div class="row">
-                <span class="grow">${esc(invite.team ?? invite.role)}</span>
-                <span class="mono">${esc(invite.code)}</span>
-                <span class="state">${invite.usedAt ? 'used' : 'open'}</span>
-              </div>`,
-            )
-            .join('')}</div>`
-        : `<div class="empty">None issued.</div>`
-    }
-
-    <h2>Accounts</h2>
-    <div class="rows">
-      ${accounts.accounts
-        .map(
-          (account) => `<div class="row">
-            <span class="grow">${esc(account.displayName)}</span>
-            <span class="state">${esc(account.slug)}</span>
-            <span class="state">${esc(account.role)}${account.disabled ? ', disabled' : ''}</span>
-          </div>`,
-        )
-        .join('')}
+      <a class="row" href="/admin/people">
+        <span class="grow">People</span>
+        <span class="state">accounts, invitations, who may do what, and who referees what</span>
+      </a>
+      <a class="row" href="/admin/audit">
+        <span class="grow">Who did what</span>
+        <span class="state">every act at this venue, newest first</span>
+      </a>
+      <a class="row" href="/admin/settings">
+        <span class="grow">Settings</span>
+        <span class="state">what this venue has turned, and it takes effect now</span>
+      </a>
     </div>
   `);
-
-  form('#form', async () => {
-    const res = await api<{ ok: boolean; reason?: string; invite?: { code: string } }>('/api/admin/invites', {
-      method: 'POST',
-      body: JSON.stringify({ role: value('#role'), team: value('#team') }),
-    });
-    if (!res.ok) return res.reason ?? 'that did not work';
-    const fresh = document.getElementById('fresh')!;
-    fresh.hidden = false;
-    fresh.innerHTML = h(`Hand this over — it works once:
-      <div class="mono" style="margin-top:.4rem">${esc(res.invite?.code)}</div>`);
-    await admin();
-    return null;
-  });
 }
 
 interface AdminArenas {
@@ -2978,6 +2936,721 @@ async function submitRollback(): Promise<string | null> {
     note.textContent = res.notice;
     view.querySelector('h1')?.after(note);
   }
+  return null;
+}
+
+// ----------------------------------------------------------------- people
+
+interface Grant {
+  capability: string;
+  scope: string;
+  target: string | null;
+}
+
+interface Person {
+  id: string;
+  slug: string;
+  displayName: string;
+  role: string;
+  kind: string;
+  createdAt: string;
+  disabledAt: string | null;
+  grants: Grant[];
+  roleCapabilities: { capability: string; scope: string }[];
+  assignments: { drawId: string; fixtureId: string }[];
+}
+
+interface PeopleLoad {
+  people: Person[];
+  invites: { code: string; role: string; team: string | null; createdAt: string; usedAt: string | null }[];
+  draw: {
+    id: string;
+    name: string;
+    fixtures: {
+      id: string;
+      home: string;
+      away: string;
+      voided?: boolean;
+      referees: { accountId: string; displayName: string }[];
+    }[];
+  } | null;
+  capabilities: string[];
+  scopes: string[];
+}
+
+/** Which person's card is open. One at a time, like the team files screen. */
+let openPerson: string | null = null;
+
+/**
+ * Everybody at the venue, and what each of them may do.
+ *
+ * Three things that had never been on one screen: a role, the rows in `grants`
+ * that go beyond it, and the fixtures somebody has been given. Two of them had
+ * never been on *any* screen — until Phase 12 G, `capability.grant` and
+ * `referee.assign` had no HTTP route at all, so handing a referee a match
+ * meant a shell on the machine running the venue.
+ */
+async function adminPeople(): Promise<void> {
+  if (!me.can.admin) return void go('/login?next=%2Fadmin%2Fpeople');
+  const load = await api<PeopleLoad>('/api/admin/people');
+  const open = load.people.find((one) => one.id === openPerson) ?? null;
+
+  view.innerHTML = h(`
+    <p class="dim"><a href="/admin">Administration</a></p>
+    <h1>People</h1>
+
+    <h2>Accounts</h2>
+    <div class="rows">
+      ${load.people.map((one) => personRow(one, open)).join('')}
+    </div>
+    ${open ? personCard(open, load) : ''}
+
+    ${refereeFixtures(load)}
+
+    <h2>Invite somebody</h2>
+    <form class="panel" id="form">
+      <label for="role">Role</label>
+      <select id="role">
+        <option value="team">Team</option>
+        <option value="referee">Referee</option>
+        <option value="admin">Organiser</option>
+      </select>
+      <label for="team">Team name <span class="dim">(teams only — this is the name they will play under)</span></label>
+      <input id="team" />
+      <button class="primary" type="submit">Issue a code</button>
+      <div class="error" id="error" hidden></div>
+    </form>
+    <div class="note" id="fresh" hidden></div>
+
+    <h2>Invitations</h2>
+    ${
+      load.invites.length
+        ? `<div class="rows">${load.invites
+            .map(
+              (invite) => `<div class="row">
+                <span class="grow">${esc(invite.team ?? invite.role)}</span>
+                <span class="mono">${esc(invite.code)}</span>
+                <span class="state">${invite.usedAt ? 'used' : 'open'}</span>
+              </div>`,
+            )
+            .join('')}</div>`
+        : `<div class="empty">None issued.</div>`
+    }
+  `);
+
+  wirePeople(open);
+}
+
+function personRow(one: Person, open: Person | null): string {
+  return h(`<div class="row">
+    <button class="link grow" data-person="${esc(one.id)}">${esc(one.displayName)}${
+      one.id === me.account?.id ? ' <span class="dim">(you)</span>' : ''
+    }</button>
+    <span class="mono dim">${esc(one.slug)}</span>
+    <span class="state">${esc(one.role)}</span>
+    ${one.grants.length ? `<span class="state">+${one.grants.length}</span>` : ''}
+    ${one.disabledAt ? `<span class="state closing">disabled</span>` : ''}
+    <span class="state">${one.id === open?.id ? 'open' : ''}</span>
+  </div>`);
+}
+
+/**
+ * What a grant is worth saying out loud.
+ *
+ * The form offers every combination the `grants` table can hold rather than a
+ * curated subset, because a screen narrower than the table is a second answer
+ * to the same question. The price of that is that some combinations need a
+ * sentence, and this is where they get one — against the choice actually being
+ * made, not in a block of help above the form.
+ */
+function grantNote(capability: string, scope: string, target: string, person: Person): string {
+  if (scope === 'assigned' && !target) {
+    return 'A grant scoped to "assigned" with nothing named reaches nothing at all — being assigned is naming the thing. This will be refused.';
+  }
+  if (target) {
+    return `Named things win: this reaches ${target} and nothing else, whatever the scope says.`;
+  }
+
+  // What the role already carries, *and how far*. The bare name is not enough:
+  // a referee holds `match.control` over nothing until a fixture is named, so
+  // "they already have it" and "this changes nothing" are different sentences.
+  const held = person.roleCapabilities.find((one) => one.capability === capability);
+  if (held?.scope === 'any') {
+    return `Their role already carries ${capability} over everything. This row would change nothing.`;
+  }
+  if (held?.scope === 'assigned' && scope !== 'assigned') {
+    return `Their role holds ${capability} only over the fixtures they are assigned. This widens it to every match at the venue — including the one on the next pitch over.`;
+  }
+  if (held?.scope === 'own' && scope === 'any') {
+    return `Their role carries ${capability} over their own things only. This widens it to everybody's.`;
+  }
+  if (scope === 'own') {
+    return `Reaches only things named "${person.slug}", which is what "own" means.`;
+  }
+  return '';
+}
+
+function personCard(one: Person, load: PeopleLoad): string {
+  return h(`
+    <div class="panel">
+      <h3>${esc(one.displayName)}</h3>
+      <div class="rows">
+        <div class="row"><span class="grow">Signs in as</span><span class="mono">${esc(one.slug)}</span></div>
+        <div class="row"><span class="grow">Role</span><span class="state">${esc(one.role)} <span class="dim">(fixed when the account was made)</span></span></div>
+        <div class="row"><span class="grow">Made</span><span class="state">${esc(when(one.createdAt))}</span></div>
+        <div class="row">
+          <span class="grow">${one.disabledAt ? 'Disabled — cannot sign in' : 'Can sign in'}</span>
+          <button class="${one.disabledAt ? 'primary' : ''}" data-disable="${esc(one.id)}" data-to="${one.disabledAt ? 'false' : 'true'}">
+            ${one.disabledAt ? 'Let them back in' : 'Disable'}
+          </button>
+        </div>
+      </div>
+      <div class="error" id="person-error" hidden></div>
+
+      <h3>What they may do</h3>
+      <p class="dim">Their role carries ${one.roleCapabilities.length}: ${esc(
+        one.roleCapabilities.map((r) => `${r.capability} (${r.scope})`).join(', '),
+      )}.</p>
+      ${
+        one.grants.length
+          ? `<div class="rows">${one.grants
+              .map(
+                (grant) => `<div class="row">
+                  <span class="grow mono">${esc(grant.capability)}</span>
+                  <span class="state">${esc(grant.scope)}</span>
+                  <span class="mono dim">${esc(grant.target ?? '')}</span>
+                  <button data-revoke="${esc(grant.capability)}" data-scope="${esc(grant.scope)}"
+                          data-target="${esc(grant.target ?? '')}">Revoke</button>
+                </div>`,
+              )
+              .join('')}</div>`
+          : `<div class="empty">Nothing beyond their role.</div>`
+      }
+
+      <form class="panel" id="grant-form">
+        <label for="capability">Also let them</label>
+        <select id="capability">
+          ${load.capabilities.map((cap) => `<option value="${esc(cap)}">${esc(cap)}</option>`).join('')}
+        </select>
+        <label for="scope">Reaching</label>
+        <select id="scope">
+          ${load.scopes.map((scope) => `<option value="${esc(scope)}"${scope === 'any' ? ' selected' : ''}>${esc(scope)}</option>`).join('')}
+        </select>
+        <label for="target">Only this thing <span class="dim">(a team slug, or draw:fixture — leave empty for everything)</span></label>
+        <input id="target" />
+        <p class="dim" id="grant-note"></p>
+        <button class="primary" type="submit">Grant it</button>
+        <div class="error" id="error" hidden></div>
+      </form>
+
+      <h3>Fixtures they referee</h3>
+      ${
+        one.assignments.length
+          ? `<div class="rows">${one.assignments
+              .map(
+                // With a Take back of its own, and not only for tidiness: a
+                // voided fixture nobody is standing at drops out of the draw
+                // and off the list below, so an assignment to one would be
+                // visible here and removable nowhere.
+                (a) => `<div class="row"><span class="grow mono">${esc(a.fixtureId)}</span>
+                  <span class="state dim">${esc(a.drawId)}</span>
+                  <button data-unassign="${esc(a.fixtureId)}" data-who="${esc(one.id)}">Take back</button></div>`,
+              )
+              .join('')}</div>`
+          : `<div class="empty">None. ${
+              one.role === 'referee' || one.role === 'admin'
+                ? 'Give them one below.'
+                : 'A ' + esc(one.role) + ' account does not referee.'
+            }</div>`
+      }
+    </div>
+  `);
+}
+
+/**
+ * Who referees what, fixture first.
+ *
+ * The buttons live on this side rather than on a person's card because this is
+ * the organiser's actual question on the day — *has match 7 got somebody* —
+ * and a screen that could only answer it person by person would be asking them
+ * to hold the draw in their head.
+ */
+function refereeFixtures(load: PeopleLoad): string {
+  if (!load.draw) return '';
+  // Referees first, because a picker that defaults to an organiser quietly
+  // suggests the wrong answer on every row — and nobody who is disabled, because
+  // giving a match to an account that cannot sign in is giving it to nobody.
+  const referees = load.people
+    .filter((one) => (one.role === 'referee' || one.role === 'admin') && !one.disabledAt)
+    .sort((a, b) => (a.role === b.role ? 0 : a.role === 'referee' ? -1 : 1));
+  if (!referees.length) {
+    return h(`<h2>Who referees what</h2>
+      <div class="empty">No referee accounts yet — invite one above.</div>`);
+  }
+  return h(`
+    <h2>Who referees what</h2>
+    <p class="dim">${esc(load.draw.name)}. A referee holds the matches named here and no others.</p>
+    <div class="rows">
+      ${load.draw.fixtures
+        .map(
+          (fixture) => `<div class="row">
+            <span class="grow">${esc(fixture.home)} v ${esc(fixture.away)}${
+              fixture.voided ? ' <span class="dim">(voided)</span>' : ''
+            }</span>
+            ${
+              fixture.referees.length
+                ? fixture.referees
+                    .map(
+                      (ref) => `<span class="state">${esc(ref.displayName)}</span>
+                        <button data-unassign="${esc(fixture.id)}" data-who="${esc(ref.accountId)}">Take back</button>`,
+                    )
+                    .join('')
+                : `<span class="state dim">unassigned</span>`
+            }
+            ${
+              fixture.voided
+                ? ''
+                : `<select data-pick="${esc(fixture.id)}">
+                    ${referees.map((one) => `<option value="${esc(one.id)}">${esc(one.displayName)}</option>`).join('')}
+                  </select>
+                  <button data-assign="${esc(fixture.id)}">Assign</button>`
+            }
+          </div>`,
+        )
+        .join('')}
+    </div>
+    <div class="error" id="assign-error" hidden></div>
+  `);
+}
+
+/** Everything the people screen listens to. One place, because it is a long page. */
+function wirePeople(open: Person | null): void {
+  for (const button of view.querySelectorAll<HTMLButtonElement>('button[data-person]')) {
+    button.addEventListener('click', async () => {
+      const id = button.dataset.person!;
+      openPerson = openPerson === id ? null : id;
+      await adminPeople();
+    });
+  }
+
+  const complain = (selector: string, reason: string): void => {
+    const box = view.querySelector(selector) as HTMLElement | null;
+    if (!box) return;
+    box.textContent = reason;
+    box.hidden = false;
+  };
+
+  for (const button of view.querySelectorAll<HTMLButtonElement>('button[data-disable]')) {
+    button.addEventListener('click', async () => {
+      const res = await api<{ ok: boolean; reason?: string }>(
+        `/api/admin/accounts/${encodeURIComponent(button.dataset.disable!)}/disabled`,
+        { method: 'POST', body: JSON.stringify({ disabled: button.dataset.to === 'true' }) },
+      );
+      if (!res.ok) return complain('#person-error', res.reason ?? 'that did not work');
+      await adminPeople();
+    });
+  }
+
+  for (const button of view.querySelectorAll<HTMLButtonElement>('button[data-revoke]')) {
+    button.addEventListener('click', async () => {
+      const target = button.dataset.target ?? '';
+      const res = await api<{ ok: boolean; reason?: string }>(
+        `/api/admin/accounts/${encodeURIComponent(open!.id)}/grants/revoke`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            capability: button.dataset.revoke,
+            scope: button.dataset.scope,
+            ...(target ? { target } : {}),
+          }),
+        },
+      );
+      if (!res.ok) return complain('#person-error', res.reason ?? 'that did not work');
+      await adminPeople();
+    });
+  }
+
+  if (open && view.querySelector('#grant-form')) {
+    // The note follows the choice being made rather than sitting above the
+    // form, because the thing worth saying depends on all three fields.
+    const note = (): void => {
+      const element = view.querySelector('#grant-note') as HTMLElement;
+      element.textContent = grantNote(value('#capability'), value('#scope'), value('#target'), open);
+    };
+    for (const selector of ['#capability', '#scope', '#target']) {
+      view.querySelector(selector)!.addEventListener('input', note);
+      view.querySelector(selector)!.addEventListener('change', note);
+    }
+    note();
+
+    form('#grant-form', async () => {
+      const target = value('#target');
+      const res = await api<{ ok: boolean; reason?: string }>(
+        `/api/admin/accounts/${encodeURIComponent(open.id)}/grants`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            capability: value('#capability'),
+            scope: value('#scope'),
+            ...(target ? { target } : {}),
+          }),
+        },
+      );
+      if (!res.ok) return res.reason ?? 'that did not work';
+      await adminPeople();
+      return null;
+    });
+  }
+
+  const assign = async (fixtureId: string, accountId: string, remove: boolean): Promise<void> => {
+    const res = await api<{ ok: boolean; reason?: string }>('/api/admin/assignments', {
+      method: 'POST',
+      body: JSON.stringify({ fixtureId, accountId, ...(remove ? { remove: true } : {}) }),
+    });
+    if (!res.ok) return complain('#assign-error', res.reason ?? 'that did not work');
+    await adminPeople();
+  };
+
+  for (const button of view.querySelectorAll<HTMLButtonElement>('button[data-assign]')) {
+    button.addEventListener('click', async () => {
+      const fixtureId = button.dataset.assign!;
+      const picker = view.querySelector(`select[data-pick="${CSS.escape(fixtureId)}"]`) as HTMLSelectElement;
+      await assign(fixtureId, picker.value, false);
+    });
+  }
+  for (const button of view.querySelectorAll<HTMLButtonElement>('button[data-unassign]')) {
+    button.addEventListener('click', () => void assign(button.dataset.unassign!, button.dataset.who!, true));
+  }
+
+  form('#form', async () => {
+    const res = await api<{ ok: boolean; reason?: string; invite?: { code: string } }>('/api/admin/invites', {
+      method: 'POST',
+      body: JSON.stringify({ role: value('#role'), team: value('#team') }),
+    });
+    if (!res.ok) return res.reason ?? 'that did not work';
+    const code = res.invite?.code;
+    await adminPeople();
+    const fresh = document.getElementById('fresh')!;
+    fresh.hidden = false;
+    fresh.innerHTML = h(`Hand this over — it works once:
+      <div class="mono" style="margin-top:.4rem">${esc(code)}</div>`);
+    return null;
+  });
+}
+
+// ------------------------------------------------------------- who did what
+
+interface AuditRow {
+  at: string;
+  actorId: string | null;
+  actorName: string | null;
+  capability: string;
+  target: string | null;
+  detail: string | null;
+}
+
+interface AuditLoad {
+  audit: AuditRow[];
+  counts: { capability: string; rows: number }[];
+  people: { id: string; slug: string; displayName: string }[];
+}
+
+/**
+ * What the screen opens on hides, and why.
+ *
+ * The venue records **everything**, the browser editor's autosave included —
+ * which on an afternoon with twenty students typing is tens of thousands of
+ * rows. Nothing is dropped; this list is what the first page leaves out, the
+ * count beside the toggle says how much, and one press brings it all back. A
+ * log that buried the dozen rows somebody came for would be a log nobody
+ * opened twice.
+ */
+const NOISY = ['team.workspace.write'];
+
+let auditShowAll = false;
+let auditCapability = '';
+let auditActor = '';
+
+async function adminAudit(): Promise<void> {
+  if (!me.can.admin) return void go('/login?next=%2Fadmin%2Faudit');
+
+  const ask = new URLSearchParams();
+  if (auditCapability) ask.set('capability', auditCapability);
+  else if (!auditShowAll) for (const one of NOISY) ask.append('without', one);
+  if (auditActor) ask.set('actor', auditActor);
+  const load = await api<AuditLoad>(`/api/admin/audit?${ask.toString()}`);
+
+  const hidden = load.counts
+    .filter((one) => NOISY.includes(one.capability))
+    .reduce((sum, one) => sum + one.rows, 0);
+  const kinds = load.counts.map((one) => one.capability).sort();
+
+  view.innerHTML = h(`
+    <p class="dim"><a href="/admin">Administration</a></p>
+    <h1>Who did what</h1>
+
+    <div class="panel">
+      <label for="cap">Act</label>
+      <select id="cap">
+        <option value="">Everything</option>
+        ${kinds
+          .map(
+            (kind) =>
+              `<option value="${esc(kind)}"${kind === auditCapability ? ' selected' : ''}>${esc(kind)}</option>`,
+          )
+          .join('')}
+      </select>
+      <label for="who">Person</label>
+      <select id="who">
+        <option value="">Anybody</option>
+        ${load.people
+          .map(
+            (one) =>
+              `<option value="${esc(one.id)}"${one.id === auditActor ? ' selected' : ''}>${esc(
+                one.displayName,
+              )}</option>`,
+          )
+          .join('')}
+      </select>
+      ${
+        auditCapability
+          ? ''
+          : `<p class="dim">${
+              auditShowAll
+                ? 'Showing everything, editor saves included.'
+                : `Editor autosaves are hidden — ${hidden} ${hidden === 1 ? 'row' : 'rows'} of them.`
+            }
+             <button class="link" id="toggle" type="button">${
+               auditShowAll ? 'Hide them again' : 'Show them anyway'
+             }</button></p>`
+      }
+    </div>
+
+    ${auditRows(load.audit)}
+  `);
+
+  const cap = view.querySelector('#cap') as HTMLSelectElement;
+  cap.addEventListener('change', () => {
+    auditCapability = cap.value;
+    void adminAudit();
+  });
+  const who = view.querySelector('#who') as HTMLSelectElement;
+  who.addEventListener('change', () => {
+    auditActor = who.value;
+    void adminAudit();
+  });
+  view.querySelector('#toggle')?.addEventListener('click', () => {
+    auditShowAll = !auditShowAll;
+    void adminAudit();
+  });
+}
+
+function auditRows(rows: AuditRow[]): string {
+  if (!rows.length) {
+    return '<p class="note">Nothing here yet under those terms.</p>';
+  }
+  return `<div class="rows">${rows
+    .map(
+      (row) => `<div class="row">
+        <span class="mono">${esc(whenExact(row.at))}</span>
+        <span class="grow">
+          <strong>${esc(row.actorName ?? 'nobody signed in')}</strong>
+          ${row.detail ? `<br><span class="dim">${esc(row.detail)}</span>` : ''}
+        </span>
+        <span class="state">${esc(row.capability)}</span>
+        ${row.target ? `<span class="mono dim">${esc(row.target)}</span>` : ''}
+      </div>`,
+    )
+    .join('')}</div>`;
+}
+
+// -------------------------------------------------------------- the settings
+
+interface SettingsLoad {
+  settings: Record<string, Record<string, unknown>>;
+  sources: Record<string, 'default' | 'file' | 'flag'>;
+  budget: { max: number; guaranteed?: number; limitedBy?: string; practice: number; warnings: string[] };
+  complaints?: string[];
+}
+
+type FieldKind = 'number' | 'nullable' | 'text' | 'switch';
+
+interface Field {
+  path: string;
+  label: string;
+  kind: FieldKind;
+  note?: string;
+}
+
+/**
+ * The file, as a form.
+ *
+ * Grouped as `league.json` is grouped, because the promise this repository
+ * keeps making is that an organiser can open the broken thing in a text editor
+ * at eleven at night — and a screen that reorganised the file into something
+ * prettier would be a second arrangement to hold in your head at exactly the
+ * wrong moment.
+ *
+ * No bounds here. They live in `loadSettings`, the browser's change goes
+ * through it, and a second copy of them in this file would be a second thing
+ * to get out of step with the first.
+ */
+const SETTING_GROUPS: { title: string; note?: string; fields: Field[] }[] = [
+  {
+    title: 'Arenas',
+    note: 'Lowering the ceiling refuses the next arena. It never stops a match already being played.',
+    fields: [
+      { path: 'arenas.max', label: 'How many at once', kind: 'nullable', note: 'blank = whatever this machine can guarantee' },
+      { path: 'arenas.concurrentFixtures', label: 'Held for fixtures', kind: 'number' },
+      { path: 'arenas.seatCpuPercent', label: 'CPU per seat (% of a core)', kind: 'number', note: 'arenas started from now' },
+      { path: 'arenas.seatMemoryMb', label: 'Memory per seat (MB)', kind: 'number', note: 'arenas started from now' },
+      { path: 'arenas.reserveCores', label: 'Cores held back for the hub', kind: 'number' },
+    ],
+  },
+  {
+    title: 'Practice fields',
+    fields: [
+      { path: 'practice.open', label: 'Practice is open', kind: 'switch' },
+      { path: 'practice.max', label: 'Cap on practice fields', kind: 'nullable', note: 'blank = whatever is spare' },
+      { path: 'practice.idleMins', label: 'Quiet minutes before a warning', kind: 'number' },
+      { path: 'practice.graceMins', label: 'Minutes between the warning and closing', kind: 'number' },
+      { path: 'practice.perTeam', label: 'Fields one team may own', kind: 'number' },
+      { path: 'practice.claimSecs', label: 'Seconds a freed field is held', kind: 'number' },
+    ],
+  },
+  {
+    title: 'Before kick-off',
+    fields: [
+      { path: 'pregame.autoStartMins', label: 'Start itself after (minutes)', kind: 'nullable', note: 'blank = never, and a referee can always start it' },
+      { path: 'pregame.penaltyPerMin', label: 'Penalty goals a minute', kind: 'number', note: '0 removes the button' },
+    ],
+  },
+  {
+    title: 'Rules this venue sets',
+    fields: [
+      { path: 'rules.mercyMargin', label: 'Goal difference that ends a match', kind: 'nullable', note: 'blank = no limit' },
+      { path: 'rules.halfTimeSeconds', label: 'Half-time (seconds)', kind: 'number' },
+    ],
+  },
+  {
+    title: 'Team code',
+    fields: [{ path: 'pushes.keep', label: 'Pushes kept per robot', kind: 'number' }],
+  },
+];
+
+async function adminSettings(): Promise<void> {
+  if (!me.can.admin) return void go('/login?next=%2Fadmin%2Fsettings');
+  const load = await api<SettingsLoad>('/api/admin/settings');
+  renderSettings(load);
+}
+
+function renderSettings(load: SettingsLoad): void {
+  view.innerHTML = h(`
+    <p class="dim"><a href="/admin">Administration</a></p>
+    <h1>Settings</h1>
+    <p class="dim">Saved to <span class="mono">league.json</span> and in force straight away —
+      this venue is not restarted for any of it.</p>
+
+    <form id="form">
+      ${SETTING_GROUPS.map((group) => settingGroup(group, load)).join('')}
+      <button class="primary" type="submit">Save</button>
+      <div class="error" id="error" hidden></div>
+    </form>
+    <div class="note" id="said" hidden></div>
+  `);
+
+  form('#form', () => saveVenueSettings(load));
+}
+
+function settingGroup(group: { title: string; note?: string; fields: Field[] }, load: SettingsLoad): string {
+  return `
+    <h2>${esc(group.title)}</h2>
+    ${group.note ? `<p class="dim">${esc(group.note)}</p>` : ''}
+    <div class="rows">
+      ${group.fields.map((field) => settingField(field, load)).join('')}
+    </div>`;
+}
+
+/**
+ * One setting, as a row.
+ *
+ * A row rather than a stacked label-over-input, because `form.panel`'s column
+ * layout is on the *form* and these are groups inside one — and a settings
+ * sheet whose labels have come away from their boxes is worse than no screen:
+ * the boxes are all short numbers and every one of them looks like every
+ * other. Found by looking at it.
+ */
+function settingField(field: Field, load: SettingsLoad): string {
+  const [section, key] = field.path.split('.') as [string, string];
+  const value = load.settings[section]?.[key];
+  const source = load.sources[field.path] ?? 'default';
+  // Only a flag is worth saying out loud. "default" and "file" both just mean
+  // "this is the number", and a badge on every row is a badge nobody reads.
+  const flagged =
+    source === 'flag'
+      ? `<br><span class="dim">set by a flag for this run — saving here takes it back</span>`
+      : '';
+  const id = `set-${field.path.replace('.', '-')}`;
+
+  const control =
+    field.kind === 'switch'
+      ? `<select id="${id}" data-path="${esc(field.path)}" data-kind="switch">
+           <option value="yes"${value === true ? ' selected' : ''}>Yes</option>
+           <option value="no"${value === true ? '' : ' selected'}>No</option>
+         </select>`
+      : `<input class="setting" id="${id}" data-path="${esc(field.path)}" data-kind="${field.kind}" value="${
+          value === null || value === undefined ? '' : esc(String(value))
+        }" />`;
+
+  return `<div class="row">
+    <label class="grow" for="${id}">${esc(field.label)}${
+      field.note ? `<br><span class="dim">${esc(field.note)}</span>` : ''
+    }${flagged}</label>
+    ${control}
+  </div>`;
+}
+
+async function saveVenueSettings(load: SettingsLoad): Promise<string | null> {
+  const change: Record<string, Record<string, unknown>> = {};
+  for (const element of view.querySelectorAll<HTMLInputElement | HTMLSelectElement>('[data-path]')) {
+    const path = element.dataset.path!;
+    const [section, key] = path.split('.') as [string, string];
+    const kind = element.dataset.kind as FieldKind;
+    const raw = element.value.trim();
+
+    let next: unknown;
+    if (kind === 'switch') next = raw === 'yes';
+    else if (raw === '') {
+      if (kind !== 'nullable') return `${path} cannot be left empty.`;
+      next = null;
+    } else {
+      next = Number(raw);
+      if (!Number.isFinite(next as number)) return `${path} must be a number.`;
+    }
+
+    // Only what actually changed. A change that named every key would take
+    // every flag back at once, and somebody adjusting one number has not asked
+    // for that.
+    if (next === (load.settings[section]?.[key] ?? null)) continue;
+    (change[section] ??= {})[key] = next;
+  }
+
+  if (Object.keys(change).length === 0) return 'Nothing has changed.';
+
+  const res = await api<SettingsLoad & { ok: boolean; reason?: string }>('/api/admin/settings', {
+    method: 'PUT',
+    body: JSON.stringify(change),
+  });
+  if (!res.ok) return res.reason ?? 'that did not work';
+
+  renderSettings(res);
+  const said = view.querySelector('#said') as HTMLElement;
+  // The file's own complaints, in the file's own words — an out-of-range
+  // number is clamped rather than refused, and the screen would be lying if it
+  // showed the number back without saying that happened.
+  const lines = [...(res.complaints ?? []), ...(res.budget.warnings ?? [])];
+  said.textContent = lines.length ? lines.join(' · ') : 'Saved, and in force now.';
+  said.hidden = false;
   return null;
 }
 

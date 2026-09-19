@@ -346,15 +346,29 @@ tbody tr { transition: background-color 0.12s ease; }
 tbody tr:hover { background: var(--raised); }
 
 /* --- forms --------------------------------------------------------------- */
+/*
+ * A raised box.
+ *
+ * Until Phase 12 G only `form.panel` was styled, and `div.panel` — used on the
+ * arenas screen's load figures and the audit screen's filters — matched
+ * nothing at all: the markup said card and the page drew plain text. Same
+ * shape of mistake as slice I's settings sheet, where a rule written for a
+ * form was asked to lay out divs inside one.
+ */
+.panel {
+  padding: 1rem 1.2rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--raised);
+}
+.panel > h2:first-child, .panel > h3:first-child { margin-top: 0; }
+
 form.panel {
   display: flex;
   flex-direction: column;
   gap: 0.6rem;
   width: min(24rem, 100%);
   padding: 1.5rem;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: var(--raised);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
 }
 /* A correction opened under the row it acts on, rather than a page away. */
@@ -956,6 +970,9 @@ button.stop:disabled { opacity: 0.5; cursor: default; }
 /* A field that has been warned it is closing. Coloured like the warning block
    it corresponds to, so the row and the banner are recognisably the same news. */
 .row .state.closing { color: #f87171; font-weight: 600; }
+/* A whole row you press to open somebody: it reads as a link, and lines up on
+ * the left like every other `.grow` beside it rather than being nudged in. */
+.row button.link.grow { margin-left: 0; text-align: left; }
 
 /* --- a team's files, read-only ------------------------------------------- */
 /* A push row opens; saying so with the cursor is cheaper than a chevron. */
@@ -986,3 +1003,30 @@ h3 {
   font-weight: 600;
   color: var(--muted);
 }
+
+/* --- who did what --------------------------------------------------------- */
+/* A button that is a choice about the view, not an act on the venue: it reads
+ * as a link so it never sits beside "Stop" looking like the same weight. */
+button.link {
+  border: 0;
+  padding: 0;
+  margin-left: 0.4rem;
+  background: none;
+  color: var(--rcja-green);
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+/* The log is read down the left: the instant is the anchor, so it keeps its
+ * own column rather than wrapping with the sentence beside it. */
+.row .mono:first-child { flex: 0 0 5.5rem; }
+/* ...unless it is the thing that grows. A fixture id is monospaced *and* the
+ * subject of its row, and at 5.5rem it wraps at every hyphen —
+ * "qld-thunder-v-act-robotics" down four lines. The two rules are asking for
+ * opposite things, and `.grow` is the one that said so on purpose. */
+.row .mono.grow:first-child { flex: 1; }
+/* A settings row: the label grows, the box keeps a fixed width so a column of
+ * short numbers lines up down the page instead of each one hugging its value. */
+.row input.setting { width: 7rem; text-align: right; }
+.row label { cursor: pointer; }

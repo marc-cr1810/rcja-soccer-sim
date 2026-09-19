@@ -839,6 +839,123 @@ without seeing the queue beside it is reading half the sentence.
 **Stop** needs two presses. The list re-renders while you read it, and one
 press on a row that moved under the cursor is not a decision anybody made.
 
+## Who may do what
+
+**`/admin/people`** is every account at the venue: who they are, what their
+role carries, anything granted on top of it, and which fixtures they referee.
+Invitations are issued from the bottom of the same page.
+
+**A role is fixed when the account is made.** There is no promotion. A referee
+who should also be able to correct the draw is given that one thing as a
+*grant*, which is the whole reason the capability table has grants in it: "Sam
+may also amend the draw" should be a row somebody can read and take back, not a
+fifth kind of account invented on the morning of an event.
+
+Click a name to open them. Under **What they may do** is their role's list,
+each with its reach, then any grants, each with a Revoke. To add one, pick a
+capability, a reach, and — if it should only apply to one thing — name that
+thing:
+
+- **any** — everything of that kind.
+- **own** — only things named after them. A team account's slug is also its
+  folder on the server, so "own" means the same thing to the check and to the
+  disk.
+- **assigned** — only what they have been assigned, one fixture at a time.
+  **On its own this reaches nothing**, and the page refuses it: being assigned
+  *is* naming the thing, so give it a target or use `any`.
+
+**Naming a thing beats the reach.** A grant with a target applies to that
+target and nothing else, whatever the reach says, because the narrower of the
+two is the one you meant. The page tells you what the combination in front of
+you will actually do — including when it would change nothing, and when it
+would widen something much further than it looks.
+
+### Who referees what
+
+The same page lists the draw and who has each fixture. Assign somebody, or take
+it back; it is in force on their next request, with no restart. A referee holds
+the matches named there and no others — that is what `assigned` means — so a
+referee with nothing assigned has no match to control, which is the intended
+state rather than a fault.
+
+A voided fixture is not offered to anybody. An assignment already made to one
+stays on that person's own card with a **Take back** beside it, because voiding
+a fixture does not unassign anybody and a row nobody can remove outlives its
+reason.
+
+`assign` does the same from a terminal:
+
+```bash
+bun run serve -- assign --referee sam-referee --draw state-round-1 --fixture alpha-v-bravo
+bun run serve -- assign --referee sam-referee --draw state-round-1 --fixture alpha-v-bravo --remove
+bun run serve -- assign --list
+```
+
+### Passwords, and being locked out
+
+Each person's card has a password reset — the eleven-at-night hatch, for
+somebody who cannot log in with their match next. Disabling an account stops it
+signing in and ends every session it had.
+
+**The last organiser who can still sign in cannot be disabled**, whoever asks.
+A venue with nobody able to reach `/admin` on a Saturday has no way back in
+from a browser. The terminal is not held to this, on purpose:
+
+```bash
+bun run serve -- account --create --role admin --name "Another Organiser" --password '…'
+```
+
+## Who did what
+
+**`/admin/audit`** is the log, newest first: when, who, what they did, and what
+they did it to. Everything gated by a capability writes a row — amending a
+draw, rolling a team's file back, stopping an arena, opening and running a
+practice field, and every save the browser editor makes.
+
+Two things about it are worth knowing before you need it.
+
+**The editor's saves are hidden by default.** The editor autosaves about once a
+second while somebody is typing, so on an afternoon with twenty students they
+are tens of thousands of rows. They are all recorded — nothing is thrown away —
+but the page opens without them and says how many it is leaving out. One press
+brings them back.
+
+**Some rows have no name against them.** A field closed by the idle sweep says
+*nobody signed in*, because nobody asked for it — and so does an account made
+with the `account` command, because a terminal is not an account either. That row is the answer to the
+most common complaint of the day — *my field disappeared while I was at lunch*
+— and attributing it to whoever happened to be signed in would be worse than
+saying nothing.
+
+Filter by act or by person at the top. The log is not pruned: it grows by a few
+megabytes on a busy day, inside `league.db` beside the accounts.
+
+## Changing settings
+
+**`/admin/settings`** is `league.json` as a form, grouped the way the file is
+grouped, and **everything on it takes effect immediately**. The venue is not
+restarted for any of it: the next practice field is opened under the new
+ceiling, the next sweep uses the new quiet time, the next push prunes to the
+new history cap.
+
+Two things it will not do, and says so on the page:
+
+- **Lowering the arena ceiling refuses the next arena — it never stops a match
+  already being played.** Nothing is evicted because a number changed.
+- **New per-seat grants reach arenas started from now.** A child process is
+  given its grants when it starts and keeps them until it ends.
+
+A value out of range is **clamped rather than refused**, and the page tells you
+in the file's own words — the same sentence you would get from
+`league.json` at eleven at night, because it is the same reader. The file is
+then written with the number that will actually be obeyed, so the file and the
+screen never disagree.
+
+If you started the server with a flag — `--idle-mins`, say — that key shows
+*set by a flag for this run*. Saving takes it back: the value you type wins and
+becomes the file's. Flags on keys you did not touch keep working for the rest
+of the run and are **not** written into the file, because a flag is for one run.
+
 ## From a terminal
 
 `arenas` lists what a league server is running, and stops one — over HTTP, with

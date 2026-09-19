@@ -255,6 +255,7 @@ export function mergeSettings(partial: Partial<LeagueSettings> | undefined): Lea
     pregame: { ...defaults.pregame, ...partial.pregame },
     rules: { ...defaults.rules, ...partial.rules },
     demo: { ...defaults.demo, ...partial.demo },
+    pushes: { ...defaults.pushes, ...partial.pushes },
   };
 }
 

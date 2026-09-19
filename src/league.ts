@@ -50,7 +50,7 @@ import { TeamApi } from './team-api';
 import { WorkspaceStore } from './workspace';
 import type { PlayRequest, PlayedMatch, ArenaState, LineupSeat, SeatStatus } from './arena';
 import type { HalfTime } from './view';
-import { mergeSettings, type LeagueSettings, type SettingSource } from './settings';
+import { loadSettings, mergeSettings, saveSettings, type LeagueSettings, type SettingSource } from './settings';
 import {
   decided,
   wholeMinutes,
@@ -61,7 +61,17 @@ import {
 import { readMachine, resolveBudget, type Budget, type Machine } from './capacity';
 import { totalUsage } from './usage';
 import { Accounts, type Account } from './accounts';
-import { can, capabilitiesOf, fixtureTarget, GUEST, type Actor, type Capability } from './capabilities';
+import {
+  CAPABILITIES,
+  SCOPES,
+  can,
+  capabilitiesOf,
+  reachOf,
+  fixtureTarget,
+  GUEST,
+  type Actor,
+  type Capability,
+} from './capabilities';
 import { bearer, type Authority, type AuthRequest, type Submitter } from './authority';
 import { parseManifest, slugifyTeam, TOKEN_FILENAME } from './manifest';
 import { listPushes, readPush } from './pushes';
@@ -81,11 +91,13 @@ import type { Confirmation } from './tournament-run';
 import { handleDocs } from './api/docs';
 import {
   AmendBodySchema,
+  AssignBodySchema,
   CreateInviteBodySchema,
   CreateKeyBodySchema,
   LoginBodySchema,
   RegisterBodySchema,
   InviteTeamBodySchema,
+  GrantBodySchema,
   ResetPasswordBodySchema,
   ReplayBodySchema,
   RollbackBodySchema,
@@ -93,6 +105,7 @@ import {
   SeatActionBodySchema,
   SeatBodySchema,
   SetDisabledBodySchema,
+  SettingsBodySchema,
 } from './api/schemas';
 import { badBody, readJsonBody, validateBody } from './api/validate';
 
@@ -388,12 +401,23 @@ export class LeagueServer {
   private readonly log: (line: string) => void;
   private readonly authority: Authority;
   private readonly teams: TeamApi;
-  private readonly settings: LeagueSettings;
+  private settings: LeagueSettings;
+  /**
+   * Where each setting's value came from — file, flag, or nobody.
+   *
+   * A copy rather than `this.opts.settingSources`, because Phase 12's settings
+   * screen changes it: a value edited from the browser stops being the flag's
+   * and becomes the file's, and a screen that went on saying `flag` beside a
+   * number the flag no longer decides is the disagreement `settings.ts` opens
+   * by refusing.
+   */
+  private readonly settingSources: Record<string, SettingSource>;
   /** See `LeagueServerOptions.now`. Read by the pre-game clock and nothing else. */
   private readonly now: () => number;
   private readonly machine: Machine;
   /** What this machine can hold, resolved once from the settings and the hardware. */
-  readonly budget: Budget;
+  /** Re-resolved whenever the settings change; see `applySettings`. */
+  budget: Budget;
   /** Fixtures in progress, by fixture id. Set by whoever is running the draw. */
   private readonly liveFixtures = new Map<string, LiveArena>();
   /**
@@ -492,6 +516,7 @@ export class LeagueServer {
     this.authority = accountsAuthority(this.accounts);
     this.now = opts.now ?? Date.now;
     this.settings = mergeSettings(opts.settings);
+    this.settingSources = { ...(opts.settingSources ?? {}) };
     this.machine = readMachine();
     this.budget = resolveBudget(this.settings, this.machine);
     this.teams = new TeamApi({
@@ -507,6 +532,23 @@ export class LeagueServer {
       // locked. Kept as a hook so `TeamApi` still knows nothing about draws,
       // and a laptop running `serve` supplies none.
       noticeFor: (team) => this.lockNoticeFor(slugifyTeam(team)),
+      // Every save the editor makes, and it autosaves — so this is by a wide
+      // margin the loudest thing in the log, and `/admin/audit` hides it by
+      // default rather than the venue declining to record it. An organiser
+      // typing in somebody else's editor is exactly what nothing else would
+      // ever show.
+      onWrite: (req, what) => {
+        // Slugified, so the target reads `act-robotics/1` like every other
+        // row about a team's code — `authority.team` answers with the display
+        // name, which is what the workspace store is keyed by and not what a
+        // log is read by.
+        this.accounts.record(
+          this.accountFor(req)?.id ?? null,
+          'team.workspace.write',
+          `${slugifyTeam(what.team)}/${what.robot}`,
+          `${what.action} ${what.name ?? ''}`.trim(),
+        );
+      },
     });
     this.tenancy = new Tenancy({
       perTeam: this.settings.practice.perTeam,
@@ -606,6 +648,19 @@ export class LeagueServer {
    * the team that owns that robot. Only then is the freed slot offered on.
    */
   private arenaEnded(arena: { id: string; kind: string; owner: string | null }): void {
+    // Warned, then closed — so a field that was in `closing` when its process
+    // went is one the idle sweep took, and not one a person stopped. It is the
+    // only act in the venue with no actor at all, and the single most likely
+    // "what happened to my field?" of the day: the owner was at lunch, and
+    // until now nothing anywhere recorded that it had gone.
+    if (arena.kind === 'practice' && this.closing.has(arena.id)) {
+      this.accounts.record(
+        null,
+        'field.control',
+        arena.id,
+        `closed by the idle sweep${arena.owner ? `, ${arena.owner}'s field` : ''}`,
+      );
+    }
     this.occupancy.releaseArena(arena.id);
     this.tenancy.forget(arena.id);
     this.fieldNotices.delete(arena.id);
@@ -1850,6 +1905,21 @@ export class LeagueServer {
   }
 
   /**
+   * The sentence an audit row carries for an act on a field.
+   *
+   * A team working its own field is the system working; an organiser reaching
+   * into somebody else's is the thing the log exists for, and the difference
+   * has to be readable from the row rather than worked out by looking up who
+   * owned which field at what time — by the time anybody reads this, the field
+   * is gone and `tenancy` has forgotten it.
+   */
+  private onWhoseField(actor: Actor, arenaId: string, what: string): string {
+    const owner = this.tenancy.ownerOf(arenaId);
+    if (owner === null) return what;
+    return owner === actor.slug ? `${what}, on their own field` : `${what}, on ${owner}'s field`;
+  }
+
+  /**
    * Open a practice field for this team, or tell them where they are in line.
    *
    * Three different refusals, and they are different on purpose: *practice is
@@ -1902,6 +1972,7 @@ export class LeagueServer {
       // Only now: a field that failed to start must not consume anybody's turn.
       this.tenancy.claimed(slug);
       this.log(`[practice] ${slug} opened ${field.id}`);
+      this.accounts.record(actor.id, 'field.open', field.id, `opened a practice field for ${slug}`);
       return Response.json({ ok: true, field }, { status: 201 });
     } catch (err) {
       return Response.json({ ok: false, reason: (err as Error).message }, { status: 503 });
@@ -2061,6 +2132,7 @@ export class LeagueServer {
         { status: 403 },
       );
     }
+    this.accounts.record(actor.id, 'field.control', id, this.onWhoseField(actor, id, action));
     return await this.forward(id, port, rest, req, new Headers(req.headers));
   }
 
@@ -2131,6 +2203,16 @@ export class LeagueServer {
         return Response.json(
           { ok: false, reason: 'only the team itself can run its unpushed code' },
           { status: 403 },
+        );
+      }
+      if (fill.kind === 'workspace') {
+        // Not a push, so nothing in the push history will ever show it: the
+        // only record that this seat played code nobody submitted is this row.
+        this.accounts.record(
+          actor.id,
+          'team.workspace.write',
+          `${team}/${number}`,
+          `seated unpushed code on ${id}${actor.slug === team ? '' : ` (${team}'s)`}`,
         );
       }
       const claim = this.occupancy.claim(team, number, id, seat);
@@ -2427,7 +2509,7 @@ export class LeagueServer {
             seatCpuPercent: this.budget.grant.seatCpuPercent,
             seatMemoryMb: this.budget.grant.seatMemoryMb,
           },
-          sources: this.opts.settingSources ?? {},
+          sources: this.settingSources,
           inUse: totalUsage(arenas.map((a) => a.usage).filter((u) => u !== null)),
           running: arenas.length,
           arenas,
@@ -2629,8 +2711,45 @@ export class LeagueServer {
       return await this.handleRollback(req, actor, path.slice('teams/'.length, -'/rollback'.length));
     }
 
+    /**
+     * Who referees what, from a browser.
+     *
+     * `referee.assign` has been in the capability table since Phase 6 and
+     * `can()` has never been called with it: `assign` / `unassign` existed
+     * with no caller but `cli.ts`, so deciding who runs a match was a
+     * terminal-only act. It is the thing an organiser reaches for most on the
+     * day, and the day is not when to be shelling into a laptop.
+     */
+    if (path === 'assignments' && req.method === 'POST') {
+      if (!can(actor, 'referee.assign')) return this.refuse(req, actor, '/admin');
+      return await this.handleAssign(req, actor.id);
+    }
+
+    /**
+     * One extra thing, outside a role — and taking it back.
+     *
+     * `capability.grant` is the other capability nothing has ever checked.
+     * `grant()` could write a row; nothing could remove one, and no screen
+     * ever showed one, so a grant made at Phase 6 was permanent and invisible.
+     */
+    const grants = path.split('/');
+    if (grants[0] === 'accounts' && grants[2] === 'grants' && req.method === 'POST') {
+      if (!can(actor, 'capability.grant')) return this.refuse(req, actor, '/admin');
+      const accountId = grants[1];
+      const verb = grants[3];
+      if (!accountId) return Response.json({ ok: false, reason: 'no such account' }, { status: 404 });
+      if (verb !== undefined && verb !== 'revoke') {
+        return Response.json({ ok: false, reason: 'no such grant action' }, { status: 404 });
+      }
+      return await this.handleGrant(req, actor.id, accountId, verb === 'revoke');
+    }
+
     if (!can(actor, 'account.manage')) return this.refuse(req, actor, '/admin');
     const admin = actor.id;
+
+    if (path === 'people' && req.method === 'GET') {
+      return Response.json(await this.adminPeople());
+    }
 
     if (path === 'accounts' && req.method === 'GET') {
       return Response.json({ ok: true, accounts: this.accounts.list().map(publicAccount) });
@@ -2652,8 +2771,44 @@ export class LeagueServer {
       this.accounts.record(admin, 'account.manage', made.value.team ?? validated.value.role, 'issued an invitation');
       return Response.json({ ok: true, invite: made.value });
     }
+    if (path === 'settings' && req.method === 'GET') {
+      return Response.json({
+        ok: true,
+        settings: this.settings,
+        sources: this.settingSources,
+        budget: {
+          max: this.budget.max,
+          guaranteed: this.budget.guaranteed,
+          limitedBy: this.budget.limitedBy,
+          practice: this.budget.practice,
+          warnings: this.budget.warnings,
+        },
+      });
+    }
+    if (path === 'settings' && req.method === 'PUT') {
+      return await this.handleSettings(req, admin);
+    }
     if (path === 'audit' && req.method === 'GET') {
-      return Response.json({ ok: true, audit: this.accounts.audit() });
+      const ask = new URL(req.url).searchParams;
+      // `without` rather than a hard-coded exclusion: the screen decides what
+      // it is too noisy to open on, and the counts beside it say what that
+      // costs, so nothing is hidden without saying how much.
+      const without = ask.getAll('without').filter((one) => one !== '');
+      const limit = Number(ask.get('limit') ?? '200');
+      return Response.json({
+        ok: true,
+        audit: this.accounts.audit({
+          capability: ask.get('capability') ?? undefined,
+          without: without.length ? without : undefined,
+          actorId: ask.get('actor') ?? undefined,
+          since: ask.get('since') ?? undefined,
+          limit: Number.isFinite(limit) ? Math.min(2000, Math.max(1, limit)) : 200,
+        }),
+        counts: this.accounts.auditCounts(),
+        people: this.accounts
+          .list()
+          .map((one) => ({ id: one.id, slug: one.slug, displayName: one.displayName })),
+      });
     }
     if (path.startsWith('accounts/') && req.method === 'POST') {
       const [, accountId, what] = path.split('/');
@@ -2675,6 +2830,27 @@ export class LeagueServer {
         const validated = validateBody(body.payload, SetDisabledBodySchema, '"disabled" must be true or false');
         if (!validated.ok) return validated.response;
         const disabled = validated.value.disabled === true;
+        /**
+         * Somebody has to be able to get back in.
+         *
+         * One rule covering both halves of the same accident: an organiser
+         * turning themselves off, and one turning off the only colleague who
+         * could turn them back on. Refused here rather than in `setDisabled`,
+         * so `bun src/cli.ts account` stays the hatch that can undo it — a
+         * venue locked out of its own admin area on a Saturday has no other
+         * way in, and a rule with no override is what would strand it.
+         */
+        if (disabled && target.role === 'admin' && !target.disabledAt && this.accounts.enabledAdmins() <= 1) {
+          return Response.json(
+            {
+              ok: false,
+              reason:
+                `${target.displayName} is the only organiser who can still sign in. ` +
+                'Make another one first, or disable this account from a terminal.',
+            },
+            { status: 409 },
+          );
+        }
         this.accounts.setDisabled(target.id, disabled);
         this.accounts.record(admin, 'account.manage', target.slug, disabled ? 'disabled' : 'enabled');
         return Response.json({ ok: true });
@@ -2682,6 +2858,287 @@ export class LeagueServer {
     }
 
     return Response.json({ ok: false, reason: 'no such admin action' }, { status: 404 });
+  }
+
+  // -------------------------------------------------- administering a venue
+
+  /**
+   * Everybody at the venue, and what each of them may do.
+   *
+   * Three things that have never been on one screen: an account's role, the
+   * rows in `grants` that go *beyond* it, and the fixtures it has been
+   * assigned. Sent with the capability and scope vocabularies attached, so the
+   * grant form offers exactly what `capabilities.ts` holds rather than a
+   * second copy of the table maintained in a browser.
+   */
+  private async adminPeople(): Promise<unknown> {
+    const accounts = this.accounts.list();
+    const assignments = this.accounts.listAssignments();
+
+    const people = accounts.map((account) => ({
+      ...publicAccount(account),
+      // Only the extra rows. What the role itself carries is beside it, named
+      // separately, because "granted" and "comes with the job" are different
+      // answers to "why may they do this" and a screen that merged them could
+      // offer a Revoke button for something no row holds.
+      grants: this.accounts.grantsFor(account.id),
+      // With the scope of each, not just the names: a referee "has"
+      // `match.control` over nothing at all, and a screen that could not tell
+      // that from having it over everything would call widening it a no-op.
+      roleCapabilities: reachOf(account.role),
+      assignments: this.accounts
+        .assignmentsFor(account.id)
+        .map((one) => ({ drawId: one.drawId, fixtureId: one.fixtureId })),
+    }));
+
+    const loaded = await this.tournament();
+    const draw = loaded
+      ? {
+          id: loaded.draw.id,
+          name: loaded.draw.name,
+          fixtures: [...loaded.draw.fixtures, ...this.heldButVoided(loaded.draw)].map((fixture) => ({
+            id: fixture.id,
+            home: fixture.home,
+            away: fixture.away,
+            ...(loaded.draw.fixtures.some((f) => f.id === fixture.id) ? {} : { voided: true }),
+            referees: assignments
+              .filter((one) => one.drawId === loaded.draw.id && one.fixtureId === fixture.id)
+              .map((one) => ({ accountId: one.accountId, displayName: one.displayName })),
+          })),
+        }
+      : null;
+
+    return {
+      ok: true,
+      people,
+      invites: this.accounts.listInvites(),
+      draw,
+      capabilities: CAPABILITIES,
+      scopes: SCOPES,
+    };
+  }
+
+  /**
+   * Add one row to `grants`, or take one away.
+   *
+   * The screen offers **every** combination the table can hold, and this
+   * refuses exactly one of them — `assigned` with no target. That is not a
+   * matter of taste: `satisfies()` returns `false` for it unconditionally, so
+   * the row could never once be true, and a grant that silently does nothing
+   * is the defect class this repository has met most often. Everything else
+   * goes in, including the combinations worth thinking twice about, which the
+   * screen says out loud rather than hiding.
+   */
+  private async handleGrant(
+    req: Request,
+    admin: string | null,
+    accountId: string,
+    revoking: boolean,
+  ): Promise<Response> {
+    const target = this.accounts.byId(accountId);
+    if (!target) return Response.json({ ok: false, reason: 'no such account' }, { status: 404 });
+    const body = await readJsonBody(req);
+    if (!body.ok) return Response.json({ ok: false, reason: body.reason }, { status: body.status });
+    const validated = validateBody(body.payload, GrantBodySchema, 'a capability and a scope are required');
+    if (!validated.ok) return validated.response;
+
+    const { capability, scope } = validated.value;
+    const on = validated.value.target ?? null;
+    if (scope === 'assigned' && on === null) {
+      return Response.json(
+        {
+          ok: false,
+          reason:
+            'a grant scoped to "assigned" with nothing named reaches nothing at all — ' +
+            'being assigned is naming the thing. Give it a target, or use "any".',
+        },
+        { status: 400 },
+      );
+    }
+
+    // The same sentence the row is written as, so the audit log reads the way
+    // the screen does.
+    const said = `${capability} (${scope}${on === null ? '' : ` on ${on}`})`;
+    if (revoking) {
+      if (!this.accounts.revokeGrant(accountId, capability, scope, on)) {
+        return Response.json({ ok: false, reason: `${target.displayName} does not have ${said}` }, { status: 404 });
+      }
+      this.accounts.record(admin, 'capability.grant', target.slug, `revoked ${said}`);
+      return Response.json({ ok: true });
+    }
+
+    this.accounts.grant(accountId, capability, scope, on);
+    this.accounts.record(admin, 'capability.grant', target.slug, `granted ${said}`);
+    return Response.json({ ok: true });
+  }
+
+  /**
+   * Give a referee a fixture, or take it back.
+   *
+   * The draw comes from the server rather than the body: a league server hosts
+   * exactly one tournament, so a `drawId` in a request could only ever be the
+   * right one or a wrong one. The two rules are `cli.ts`'s own — a fixture has
+   * to be in the draw, and the account has to be somebody who can referee —
+   * with its exception kept as well: **taking an assignment back works for a
+   * fixture that is no longer in the draw**, because voiding a fixture does
+   * not unassign anybody and a row nobody can remove outlives its reason.
+   */
+  private async handleAssign(req: Request, admin: string | null): Promise<Response> {
+    const body = await readJsonBody(req);
+    if (!body.ok) return Response.json({ ok: false, reason: body.reason }, { status: body.status });
+    const validated = validateBody(body.payload, AssignBodySchema, 'a fixture and an account are required');
+    if (!validated.ok) return validated.response;
+    const { fixtureId, accountId } = validated.value;
+    const removing = validated.value.remove === true;
+
+    const loaded = await this.tournament();
+    if (!loaded) {
+      return Response.json({ ok: false, reason: 'this server is not running a tournament' }, { status: 409 });
+    }
+    const target = this.accounts.byId(accountId);
+    if (!target) return Response.json({ ok: false, reason: 'no such account' }, { status: 404 });
+    if (target.role !== 'referee' && target.role !== 'admin') {
+      return Response.json(
+        { ok: false, reason: `${target.displayName} is a ${target.role} account, not a referee` },
+        { status: 400 },
+      );
+    }
+
+    const drawId = loaded.draw.id;
+    if (removing) {
+      const had = this.accounts.unassign({ accountId, drawId, fixtureId });
+      if (!had) {
+        return Response.json(
+          { ok: false, reason: `${target.displayName} was not assigned that fixture` },
+          { status: 404 },
+        );
+      }
+      this.accounts.record(admin, 'referee.assign', fixtureTarget(drawId, fixtureId), `unassigned ${target.slug}`);
+      return Response.json({ ok: true });
+    }
+
+    const fixture = loaded.draw.fixtures.find((one) => one.id === fixtureId);
+    if (!fixture) {
+      // A voided fixture is gone from the effective draw, and nobody should be
+      // given one to referee — the same refusal `cli.ts` makes, for the same
+      // reason. Removal above is deliberately not held to it.
+      return Response.json(
+        { ok: false, reason: `"${loaded.draw.name}" has no fixture "${fixtureId}"` },
+        { status: 404 },
+      );
+    }
+    this.accounts.assign({ accountId, drawId, fixtureId, by: admin });
+    this.accounts.record(admin, 'referee.assign', fixtureTarget(drawId, fixtureId), `assigned ${target.slug}`);
+    return Response.json({ ok: true });
+  }
+
+  /**
+   * Change a venue's settings, from a browser, without restarting it.
+   *
+   * **The file stays the truth.** The partial is applied to what is on disk —
+   * not to what is running — written, and then read back through
+   * `loadSettings`, which is what makes it impossible to set from a browser
+   * anything the file itself would have refused: the bounds, the clamping and
+   * the complaints are all the ones an organiser would meet in a text editor
+   * at eleven at night. If reading it back produced a different number from
+   * the one that went in, the clamped number is written again, because a file
+   * that silently disagreed with the screen displaying it is the thing
+   * `settings.ts` opens by refusing.
+   *
+   * A `--flag` set for this run keeps its value for every key the request did
+   * not name, and **loses** for every key it did: an organiser who changes a
+   * number and watches nothing happen has been told a lie by the screen. That
+   * key's source becomes `file`, which is now true of it.
+   */
+  private async handleSettings(req: Request, admin: string | null): Promise<Response> {
+    if (!this.opts.dataDir) {
+      return Response.json({ ok: false, reason: 'this server has no settings file' }, { status: 409 });
+    }
+    const body = await readJsonBody(req, 16_384);
+    if (!body.ok) return Response.json({ ok: false, reason: body.reason }, { status: body.status });
+    const validated = validateBody(body.payload, SettingsBodySchema, 'that is not a settings change');
+    if (!validated.ok) return validated.response;
+
+    const change = validated.value as Record<string, unknown>;
+    const asked = leafPaths(change);
+    if (asked.length === 0) {
+      return Response.json({ ok: false, reason: 'that change says nothing' }, { status: 400 });
+    }
+
+    const dataDir = resolve(this.opts.dataDir);
+    const before = this.settings;
+
+    // What gets written is **what this venue is running**, with the change on
+    // top — not what happens to be on disk. Basing it on the file loses every
+    // setting the file never held: a league started with settings passed in,
+    // or one whose `league.json` does not exist yet, would have one number
+    // edited and the other twenty silently reset to defaults. Found by a test
+    // asserting that editing `practice.idleMins` left `arenas.max` alone.
+    //
+    // The exception is a `--flag`, which is for this run and does not belong
+    // in the file: those keys are written as the file already has them, unless
+    // this change is about one, in which case the change is what it now is.
+    const onDisk = loadSettings(dataDir).settings;
+    const base = structuredClone(this.settings) as unknown as Record<string, unknown>;
+    for (const [path, source] of Object.entries(this.settingSources)) {
+      if (source === 'flag' && !asked.includes(path)) setAt(base, path, valueAt(onDisk, path));
+    }
+    saveSettings(dataDir, withChanges(base as unknown as LeagueSettings, change));
+
+    const read = loadSettings(dataDir);
+    // The file holds what it will actually be obeyed as, clamping included.
+    saveSettings(dataDir, read.settings);
+
+    // Every key keeps whatever was deciding it, except the ones just asked
+    // about — those are the file's now, flag or no flag.
+    const next = structuredClone(read.settings) as unknown as Record<string, unknown>;
+    for (const [path, source] of Object.entries(this.settingSources)) {
+      if (source === 'flag' && !asked.includes(path)) setAt(next, path, valueAt(before, path));
+    }
+    for (const path of asked) this.settingSources[path] = 'file';
+
+    this.settings = next as unknown as LeagueSettings;
+    this.applySettings();
+
+    this.accounts.record(admin, 'account.manage', 'settings', `changed ${asked.join(', ')}`);
+    this.log(`[settings] ${asked.join(', ')} changed from the browser`);
+
+    return Response.json({
+      ok: true,
+      settings: this.settings,
+      sources: this.settingSources,
+      // What the file said back. An out-of-range number is not refused, it is
+      // clamped and complained about — the same answer the file gives — and
+      // the screen shows the sentence rather than pretending it went in whole.
+      complaints: read.complaints,
+      budget: { max: this.budget.max, practice: this.budget.practice, warnings: this.budget.warnings },
+    });
+  }
+
+  /**
+   * Push the settings out to the three things that hold them.
+   *
+   * Cheap, because none of them captured anything: the supervisor reads its
+   * ceiling on each `create` and its quiet time on each `sweep`, the tenancy
+   * reads its per-team cap behind a getter, and the push store reads its cap
+   * when it archives. Changing a number here is therefore the whole change —
+   * there is no second copy anywhere to fall out of step with this one.
+   */
+  private applySettings(): void {
+    this.budget = resolveBudget(this.settings, this.machine);
+    this.arenas.reconfigure({
+      maxArenas: this.budget.max,
+      fixtureSlots: this.budget.fixtures,
+      idleMinutes: this.settings.practice.idleMins,
+      graceMinutes: this.settings.practice.graceMins,
+      seatCpuPercent: this.settings.arenas.seatCpuPercent,
+      seatMemoryMb: this.settings.arenas.seatMemoryMb,
+    });
+    this.tenancy.reconfigure({
+      perTeam: this.settings.practice.perTeam,
+      claimSeconds: this.settings.practice.claimSecs,
+    });
+    this.teams.reconfigure({ pushesKept: this.settings.pushes.keep });
   }
 
   // ------------------------------------------------------ administering a draw
@@ -3869,6 +4326,7 @@ export class LeagueServer {
 
     if (verb === 'close') {
       if (!this.mayRunField(actor, id)) return this.refuse(req, actor, '/team');
+      this.accounts.record(actor.id, 'field.control', id, this.onWhoseField(actor, id, 'close'));
       this.arenas.close(id);
       return Response.json({ ok: true }, { status: 200 });
     }
@@ -4136,6 +4594,68 @@ function cookie(req: AuthRequest, name: string): string {
  * through as mojibake would make the screen lie about what is in the folder,
  * so they come back named and sized and nothing else.
  */
+/**
+ * The dotted paths a settings change actually names, e.g. `practice.idleMins`.
+ *
+ * What makes "the browser wins over a flag, but only where it said something"
+ * expressible: the alternative is comparing values, and a change that sets a
+ * key to what it already was would then be indistinguishable from not
+ * mentioning it at all.
+ */
+function leafPaths(change: Record<string, unknown>, prefix = ''): string[] {
+  const out: string[] = [];
+  for (const [key, value] of Object.entries(change)) {
+    const path = prefix ? `${prefix}.${key}` : key;
+    if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+      out.push(...leafPaths(value as Record<string, unknown>, path));
+    } else {
+      out.push(path);
+    }
+  }
+  return out;
+}
+
+/** One dotted path's value, out of a settings object. */
+function valueAt(from: unknown, path: string): unknown {
+  let at: unknown = from;
+  for (const step of path.split('.')) {
+    if (at === null || typeof at !== 'object') return undefined;
+    at = (at as Record<string, unknown>)[step];
+  }
+  return at;
+}
+
+/** The same path, written back. Nothing is created that was not already there. */
+function setAt(into: Record<string, unknown>, path: string, value: unknown): void {
+  const steps = path.split('.');
+  const last = steps.pop();
+  if (!last) return;
+  let at: Record<string, unknown> = into;
+  for (const step of steps) {
+    const found = at[step];
+    if (found === null || typeof found !== 'object') return;
+    at = found as Record<string, unknown>;
+  }
+  at[last] = value;
+}
+
+/**
+ * A settings change applied section by section.
+ *
+ * Not a top-level spread: every key of `LeagueSettings` is a section object,
+ * so `{ practice: { idleMins: 1 } }` spread over the whole would **replace**
+ * practice and quietly reset the other five numbers in it to their defaults.
+ */
+function withChanges(base: LeagueSettings, change: Record<string, unknown>): LeagueSettings {
+  const next = structuredClone(base) as unknown as Record<string, Record<string, unknown>>;
+  for (const [section, values] of Object.entries(change)) {
+    if (values === null || typeof values !== 'object') continue;
+    if (next[section] === undefined) continue;
+    Object.assign(next[section], values);
+  }
+  return next as unknown as LeagueSettings;
+}
+
 function textOf(content: Buffer): { text: string } | { binary: true } {
   const text = content.toString('utf8');
   // The round trip is the test: anything that does not survive it was not

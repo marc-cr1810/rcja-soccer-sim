@@ -13,6 +13,9 @@
 import { z } from 'zod';
 import { extendZodWithOpenApi } from '@asteasolutions/zod-to-openapi';
 
+import { CAPABILITIES, SCOPES } from '../capabilities';
+import type { Capability, Scope } from '../capabilities';
+
 extendZodWithOpenApi(z);
 
 // ─── Scalar enums ─────────────────────────────────────────────────────────────
@@ -29,6 +32,24 @@ export const AccountKindSchema = z
   .enum(['team', 'person'])
   .openapi('AccountKind');
 export type AccountKind = z.infer<typeof AccountKindSchema>;
+
+/**
+ * The capability and scope vocabularies, taken from the capability table
+ * itself rather than written out a second time.
+ *
+ * `Role` above *is* written twice, and that is a small standing risk this
+ * file already carries. These two are not allowed to join it: the whole point
+ * of `CAPABILITIES` being compiler-checked in `capabilities.ts` is that a
+ * capability cannot exist in the table and be missing from a screen, and a
+ * duplicate list here would put it right back.
+ */
+export const CapabilitySchema = z
+  .enum(CAPABILITIES as unknown as [Capability, ...Capability[]])
+  .openapi('Capability', { description: 'One of the capabilities in the league capability table' });
+
+export const ScopeSchema = z
+  .enum(SCOPES as unknown as [Scope, ...Scope[]])
+  .openapi('Scope', { description: 'How far a capability reaches: own, assigned or any' });
 
 // ─── Shared value objects ──────────────────────────────────────────────────────
 
@@ -657,6 +678,53 @@ export const RollbackBodySchema = z
   .openapi('RollbackBody', { description: 'Body for POST /api/admin/teams/:slug/:robot/rollback' });
 export type RollbackBody = z.infer<typeof RollbackBodySchema>;
 
+/**
+ * One extra thing, outside a role.
+ *
+ * Loose on purpose: every combination the `grants` table can hold is offered,
+ * because narrowing the screen to a curated subset would make the table and
+ * the screen two different answers to the same question. The one combination
+ * the *route* refuses — `assigned` with no target — is refused there and with
+ * a sentence, because it is not a matter of taste: `satisfies()` returns false
+ * for it unconditionally, so the row could never once be true.
+ */
+export const GrantBodySchema = z
+  .object({
+    capability: CapabilitySchema,
+    scope: ScopeSchema,
+    target: z
+      .string()
+      .trim()
+      .min(1)
+      .optional()
+      .openapi({ description: 'The one thing this grant is about. Narrows it whatever the scope says' }),
+  })
+  .strict()
+  .openapi('GrantBody', {
+    description: 'Body for POST /api/admin/accounts/{id}/grants and .../grants/revoke',
+  });
+export type GrantBody = z.infer<typeof GrantBodySchema>;
+
+/**
+ * A referee, and the fixture they are to run.
+ *
+ * No `drawId`: a league server hosts exactly one tournament, so a draw named
+ * in the body could only ever be the right one or a wrong one. The server
+ * uses its own.
+ */
+export const AssignBodySchema = z
+  .object({
+    fixtureId: z.string().trim().min(1),
+    accountId: z.string().trim().min(1),
+    remove: z
+      .boolean()
+      .optional()
+      .openapi({ description: 'Take the fixture back. Works even for a fixture no longer in the draw' }),
+  })
+  .strict()
+  .openapi('AssignBody', { description: 'Body for POST /api/admin/assignments' });
+export type AssignBody = z.infer<typeof AssignBodySchema>;
+
 export const SetDisabledBodySchema = z
   .object({ disabled: z.boolean().optional() })
   .openapi('SetDisabledBody', { description: 'Body for POST /api/admin/accounts/{id}/disabled' });
@@ -990,10 +1058,145 @@ export const AdminInviteCreatedResponseSchema = z
   .openapi('AdminInviteCreatedResponse', { description: 'POST /api/admin/invites' });
 export type AdminInviteCreatedResponse = z.infer<typeof AdminInviteCreatedResponseSchema>;
 
+/**
+ * A change to a venue's settings, from the browser.
+ *
+ * Deliberately loose about *values* and strict about *shape*: the numbers are
+ * held to their bounds by `loadSettings`, which is the same reader an
+ * organiser editing `league.json` in a text editor meets, and a second copy of
+ * those bounds here is a second thing to get out of step with the first. What
+ * this refuses is a key that is not a setting, so a typo is a 400 rather than
+ * a line silently written into the file and ignored for ever after.
+ */
+export const SettingsBodySchema = z
+  .object({
+    arenas: z
+      .object({
+        max: z.number().nullable().optional(),
+        seatCpuPercent: z.number().optional(),
+        seatMemoryMb: z.number().optional(),
+        reserveCores: z.number().optional(),
+        concurrentFixtures: z.number().optional(),
+      })
+      .strict()
+      .optional(),
+    practice: z
+      .object({
+        open: z.boolean().optional(),
+        max: z.number().nullable().optional(),
+        idleMins: z.number().optional(),
+        graceMins: z.number().optional(),
+        perTeam: z.number().optional(),
+        claimSecs: z.number().optional(),
+      })
+      .strict()
+      .optional(),
+    pregame: z
+      .object({
+        autoStartMins: z.number().nullable().optional(),
+        penaltyPerMin: z.number().optional(),
+      })
+      .strict()
+      .optional(),
+    rules: z
+      .object({
+        mercyMargin: z.number().nullable().optional(),
+        halfTimeSeconds: z.number().optional(),
+      })
+      .strict()
+      .optional(),
+    pushes: z.object({ keep: z.number().optional() }).strict().optional(),
+    demo: z
+      .object({
+        on: z.boolean().optional(),
+        bots: z.string().optional(),
+        home: z.string().optional(),
+        away: z.string().optional(),
+        homeBots: z.string().optional(),
+        awayBots: z.string().optional(),
+        halfSeconds: z.number().optional(),
+        league: z.string().nullable().optional(),
+        gapSeconds: z.number().optional(),
+        randomSides: z.boolean().optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict()
+  .openapi('SettingsBody', { description: 'Body for PUT /api/admin/settings — any subset of league.json' });
+export type SettingsBody = z.infer<typeof SettingsBodySchema>;
+
 export const AdminAuditResponseSchema = z
-  .object({ ok: z.literal(true), audit: z.array(AuditRowSchema) })
-  .openapi('AdminAuditResponse', { description: 'GET /api/admin/audit — newest 200 entries' });
+  .object({
+    ok: z.literal(true),
+    audit: z.array(AuditRowSchema),
+    /** Every capability in the log and how many rows it has, so the screen can say what it is hiding. */
+    counts: z.array(z.object({ capability: z.string(), rows: z.number().int() })),
+    /** Who the actor filter can choose between. */
+    people: z.array(z.object({ id: z.string(), slug: z.string(), displayName: z.string() })),
+  })
+  .openapi('AdminAuditResponse', {
+    description:
+      'GET /api/admin/audit — newest first, narrowed by ?capability, ?without (repeatable), ?actor, ?since and ?limit',
+  });
 export type AdminAuditResponse = z.infer<typeof AdminAuditResponseSchema>;
+
+/** One row of the `grants` table, as a screen shows it. */
+export const GrantSchema = z
+  .object({ capability: CapabilitySchema, scope: ScopeSchema, target: z.string().nullable() })
+  .openapi('Grant');
+
+export const AdminPeopleResponseSchema = z
+  .object({
+    ok: z.literal(true),
+    people: z.array(
+      z.object({
+        id: z.string(),
+        slug: z.string(),
+        displayName: z.string(),
+        role: RoleSchema,
+        kind: AccountKindSchema,
+        createdAt: z.string(),
+        disabledAt: z.string().nullable(),
+        /** Only the rows in `grants`. What the role itself carries is `roleCapabilities`. */
+        grants: z.array(GrantSchema),
+        /** What the role carries and how far each reaches — never the bare names. */
+        roleCapabilities: z.array(z.object({ capability: CapabilitySchema, scope: ScopeSchema })),
+        assignments: z.array(z.object({ drawId: z.string(), fixtureId: z.string() })),
+      }),
+    ),
+    invites: z.array(
+      z.object({
+        code: z.string(),
+        role: RoleSchema,
+        team: z.string().nullable(),
+        createdAt: z.string(),
+        expiresAt: z.string(),
+        usedAt: z.string().nullable(),
+      }),
+    ),
+    /** The draw's fixtures and who has each, or null on a server hosting no tournament. */
+    draw: z
+      .object({
+        id: z.string(),
+        name: z.string(),
+        fixtures: z.array(
+          z.object({
+            id: z.string(),
+            home: z.string(),
+            away: z.string(),
+            voided: z.boolean().optional(),
+            referees: z.array(z.object({ accountId: z.string(), displayName: z.string() })),
+          }),
+        ),
+      })
+      .nullable(),
+    /** The vocabularies the grant form offers, so the browser holds no second copy of the table. */
+    capabilities: z.array(CapabilitySchema),
+    scopes: z.array(ScopeSchema),
+  })
+  .openapi('AdminPeopleResponse', { description: 'GET /api/admin/people' });
+export type AdminPeopleResponse = z.infer<typeof AdminPeopleResponseSchema>;
 
 export const OkResponseSchema = z
   .object({ ok: z.literal(true) })

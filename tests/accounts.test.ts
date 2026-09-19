@@ -243,6 +243,61 @@ describe('who may do what', () => {
     expect(can(actor, 'team.submit', 'act-robotics')).toBe(true);
     expect(can(actor, 'team.submit', 'nsw-lightning')).toBe(false);
   });
+
+  it('takes a grant back, blanket or targeted', () => {
+    const accounts = open();
+    const made = accounts.createAccount({ role: 'referee', displayName: 'Sam', password: PASSWORD });
+    if (!made.ok) throw new Error(made.reason);
+    accounts.grant(made.value.id, 'tournament.amend', 'any');
+    accounts.grant(made.value.id, 'team.submit', 'any', 'act-robotics');
+
+    // A blanket grant's target is NULL, and SQL's `=` is never true of NULL —
+    // a revoke written with `target = ?` would silently remove nothing and
+    // report success, which is the shape of defect this project meets most.
+    expect(accounts.revokeGrant(made.value.id, 'tournament.amend', 'any')).toBe(true);
+    expect(can(accounts.actorFor(made.value), 'tournament.amend')).toBe(false);
+
+    expect(accounts.revokeGrant(made.value.id, 'team.submit', 'any', 'act-robotics')).toBe(true);
+    expect(can(accounts.actorFor(made.value), 'team.submit', 'act-robotics')).toBe(false);
+    expect(accounts.grantsFor(made.value.id)).toHaveLength(0);
+  });
+
+  it('will not revoke a grant that names a different thing', () => {
+    const accounts = open();
+    const made = accounts.createAccount({ role: 'referee', displayName: 'Sam', password: PASSWORD });
+    if (!made.ok) throw new Error(made.reason);
+    accounts.grant(made.value.id, 'team.submit', 'any', 'act-robotics');
+
+    expect(accounts.revokeGrant(made.value.id, 'team.submit', 'any', 'nsw-lightning')).toBe(false);
+    expect(accounts.revokeGrant(made.value.id, 'team.submit', 'any')).toBe(false);
+    expect(can(accounts.actorFor(made.value), 'team.submit', 'act-robotics')).toBe(true);
+  });
+
+  it('is one row however many times it is given', () => {
+    const accounts = open();
+    const made = accounts.createAccount({ role: 'referee', displayName: 'Sam', password: PASSWORD });
+    if (!made.ok) throw new Error(made.reason);
+    accounts.grant(made.value.id, 'tournament.amend', 'any');
+    accounts.grant(made.value.id, 'tournament.amend', 'any');
+    accounts.grant(made.value.id, 'team.submit', 'any', 'act-robotics');
+    accounts.grant(made.value.id, 'team.submit', 'any', 'act-robotics');
+
+    // Otherwise one Revoke leaves the capability in place, and a screen
+    // showing the row twice has two buttons that mean the same thing.
+    expect(accounts.grantsFor(made.value.id)).toHaveLength(2);
+  });
+
+  it('counts the organisers who could still sign in', () => {
+    const accounts = open();
+    const ana = accounts.createAccount({ role: 'admin', displayName: 'Ana', password: PASSWORD });
+    const ben = accounts.createAccount({ role: 'admin', displayName: 'Ben', password: PASSWORD });
+    accounts.createAccount({ role: 'referee', displayName: 'Sam', password: PASSWORD });
+    if (!ana.ok || !ben.ok) throw new Error('could not make the organisers');
+    expect(accounts.enabledAdmins()).toBe(2);
+
+    accounts.setDisabled(ben.value.id, true);
+    expect(accounts.enabledAdmins()).toBe(1);
+  });
 });
 
 describe('the audit log', () => {

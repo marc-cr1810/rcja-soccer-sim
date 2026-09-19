@@ -81,10 +81,32 @@ export interface TeamApiOptions {
   pushesKept?: number;
   /** Where a swallowed archive failure goes, so it is not silent as well. */
   log?: (line: string) => void;
+  /**
+   * Told that somebody changed a team's workspace, if anybody is listening.
+   *
+   * The same shape as `noticeFor`, and for the same reason: writing a file is
+   * a workspace act, and *who* did it is an accounts question this class has
+   * no business answering — it holds an `Authority`, not a ledger. The request
+   * goes back out with it so the caller can resolve its own actor, which on a
+   * league server is `accountFor(req)`. A laptop running `serve` supplies
+   * none and records nothing.
+   */
+  onWrite?: (req: Request, what: { team: string; robot: RobotNumber; action: string; name?: string }) => void;
 }
 
 export class TeamApi {
   constructor(private readonly opts: TeamApiOptions) {}
+
+  /**
+   * How many pushes to keep, changed while the venue is running.
+   *
+   * Read at the moment a push is archived rather than captured, so this is the
+   * whole of it. A lower number does not go back and delete: the next push
+   * prunes to it, which is what `keep` has always meant.
+   */
+  reconfigure(opts: { pushesKept?: number }): void {
+    if (opts.pushesKept !== undefined) this.opts.pushesKept = opts.pushesKept;
+  }
 
   /**
    * Take a request if it is one of ours, or hand it back.
@@ -144,6 +166,7 @@ export class TeamApi {
         const { name, content } = validated.value;
         const result = await workspaces.write(team, robot, name, content);
         if (!result.ok) return Response.json({ ok: false, reason: result.reason }, { status: 400 });
+        this.opts.onWrite?.(req, { team, robot, action: 'save', name });
         return Response.json({ ok: true, name });
       }
 
@@ -152,6 +175,7 @@ export class TeamApi {
         if (!validated.ok) return validated.response;
         const result = await workspaces.remove(team, robot, validated.value.name);
         if (!result.ok) return Response.json({ ok: false, reason: result.reason }, { status: 400 });
+        this.opts.onWrite?.(req, { team, robot, action: 'delete', name: validated.value.name });
         return Response.json({ ok: true, files: await workspaces.read(team, robot) });
       }
 

@@ -819,16 +819,21 @@ the code that plays.
 
 ---
 
-## Phase 12 — Administering a venue
+## Phase 12 — Administering a venue ✅
 
 *Gate: an admin reschedules a fixture, stops a runaway practice field, fixes a
 team's mis-uploaded file, and re-runs an abandoned game — all from a browser,
 with the audit log saying who did each one.*
 
-**In progress**, in slices — [PHASE-12.md](PHASE-12.md) is the working record:
-what each slice settled, what running it caught, and what is left. All four
-clauses of the gate now work from a browser and were verified live; what is
-left is the people screen, the audit screen, and settings.
+**Done**, in nine slices — [PHASE-12.md](PHASE-12.md) is the working record:
+what each slice settled and what running it caught. All four clauses of the
+gate work from a browser, audit log included, and each was verified live.
+
+The last slice was the people screen, and it was bigger than the record said:
+`referee.assign` and `capability.grant` had been in the capability table since
+Phase 6 with **no HTTP route anywhere**, so giving a referee a match and
+granting somebody one extra thing were both terminal-only acts. Both are
+browser acts now, with a row in the log against each.
 
 Last, because it is the only one of these whose absence can be worked around
 with a terminal and an ssh session. Not optional, though: at a real event the

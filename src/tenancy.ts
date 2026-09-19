@@ -92,6 +92,19 @@ export class Tenancy {
     this.opts = { ...this.opts, ...opts };
   }
 
+  /**
+   * Change what this was built with, while it is running.
+   *
+   * Everything below reads `this.opts` at the moment it is asked rather than
+   * capturing it, so a venue that changes its mind at eleven o'clock does not
+   * have to be restarted to mean it. Phase 12's settings screen is the only
+   * caller; a partial, so it can say one thing without restating the rest.
+   */
+  reconfigure(opts: Pick<TenancyOptions, 'perTeam' | 'claimSeconds'>): void {
+    if (opts.perTeam !== undefined) this.opts.perTeam = opts.perTeam;
+    if (opts.claimSeconds !== undefined) this.opts.claimSeconds = opts.claimSeconds;
+  }
+
   private get perTeam(): number {
     return Math.min(2, Math.max(1, this.opts.perTeam ?? DEFAULT_PER_TEAM));
   }

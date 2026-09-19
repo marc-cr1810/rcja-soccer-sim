@@ -72,6 +72,17 @@ export interface ApiKeyInfo {
   revokedAt: string | null;
 }
 
+/** How a reader narrows the log. Every field is optional; none of them drop rows from it. */
+export interface AuditQuery {
+  capability?: string;
+  /** Capabilities to leave out — how the screen hides the editor's autosave. */
+  without?: string[];
+  actorId?: string;
+  /** ISO instant; rows at or after it. */
+  since?: string;
+  limit?: number;
+}
+
 export interface AuditRow {
   at: string;
   actorId: string | null;
@@ -153,6 +164,10 @@ CREATE TABLE IF NOT EXISTS assignments (
   PRIMARY KEY (draw_id, fixture_id, account_id)
 );
 CREATE INDEX IF NOT EXISTS audit_at ON audit(at);
+-- Phase 12 H records every gated act, the browser editor's autosave included,
+-- so the audit table is the one that grows by tens of thousands of rows a day
+-- and the one screen that reads it always narrows by capability.
+CREATE INDEX IF NOT EXISTS audit_capability ON audit(capability, at);
 CREATE INDEX IF NOT EXISTS grants_account ON grants(account_id);
 CREATE INDEX IF NOT EXISTS keys_account ON api_keys(account_id);
 CREATE INDEX IF NOT EXISTS assignments_account ON assignments(account_id);
@@ -360,6 +375,22 @@ export class Accounts {
     return ok(account);
   }
 
+  /**
+   * How many organisers could still sign in.
+   *
+   * The question behind "do not let the last one be turned off". It is asked
+   * here and *refused* in the route rather than in `setDisabled`, so a shell
+   * keeps the hatch: a venue that has locked itself out of its own admin area
+   * at a weekend event has no other way back in, and a rule with no override
+   * would be the thing that stranded it.
+   */
+  enabledAdmins(): number {
+    const row = this.db
+      .prepare(`SELECT COUNT(*) AS n FROM accounts WHERE role = 'admin' AND disabled_at IS NULL`)
+      .get() as { n: number };
+    return row.n;
+  }
+
   setDisabled(accountId: string, disabled: boolean): void {
     this.db
       .prepare('UPDATE accounts SET disabled_at = ? WHERE id = ?')
@@ -557,10 +588,52 @@ export class Accounts {
 
   // ------------------------------------------------------------------ grants
 
+  /**
+   * Give somebody one extra thing, outside their role.
+   *
+   * Writes nothing if the identical row is already there. The table has no
+   * unique index and cannot safely grow one — `CREATE UNIQUE INDEX` throws on
+   * a `league.db` that already holds a duplicate — so the insert asks instead.
+   * Before Phase 12 G the only caller was a test and pressing it twice was not
+   * possible; now there is a button, and a grant listed twice with a Revoke
+   * against each would be a lie about what revoking did.
+   */
   grant(accountId: string, capability: Capability, scope: Scope, target: string | null = null): void {
     this.db
-      .prepare('INSERT INTO grants (account_id, capability, scope, target) VALUES (?, ?, ?, ?)')
+      .prepare(
+        `INSERT INTO grants (account_id, capability, scope, target)
+         SELECT ?, ?, ?, ?
+          WHERE NOT EXISTS (
+            SELECT 1 FROM grants
+             WHERE account_id = ? AND capability = ? AND scope = ?
+               AND target IS ?
+          )`,
+      )
+      .run(accountId, capability, scope, target, accountId, capability, scope, target);
+  }
+
+  /**
+   * Take one back. True if they had it.
+   *
+   * A grant has no id of its own — the `grants` table is four columns and no
+   * key — so it is identified by all four, which is also what makes the
+   * screen's Revoke button unambiguous about which row it means.
+   * `target IS ?` rather than `target = ?` because SQL's `=` is never true of
+   * NULL, and a blanket grant is exactly the row whose target is NULL.
+   */
+  revokeGrant(
+    accountId: string,
+    capability: Capability,
+    scope: Scope,
+    target: string | null = null,
+  ): boolean {
+    const done = this.db
+      .prepare(
+        `DELETE FROM grants
+          WHERE account_id = ? AND capability = ? AND scope = ? AND target IS ?`,
+      )
       .run(accountId, capability, scope, target);
+    return done.changes > 0;
   }
 
   grantsFor(accountId: string): Grant[] {
@@ -675,14 +748,48 @@ export class Accounts {
       .run(now(), actorId, capability, target, detail ?? null);
   }
 
-  audit(limit = 200): AuditRow[] {
+  /**
+   * The log, newest first, narrowed.
+   *
+   * It grew filters the moment Phase 12 decided to record **everything** —
+   * including the browser editor's 700ms autosave, which on an afternoon with
+   * twenty students typing is tens of thousands of rows. Nothing is dropped;
+   * the reader narrows instead. `without` is what lets the screen open on the
+   * dozen rows somebody came for and still say how many it is not showing.
+   */
+  audit(query: AuditQuery = {}): AuditRow[] {
+    // `rowid` breaks a tie on `at`. The editor autosaves about once a second
+    // and two rows can land in the same millisecond, and a log whose order is
+    // whatever the storage engine felt like within a tie is not an account of
+    // what happened.
+    const where: string[] = [];
+    const args: (string | number)[] = [];
+    if (query.capability) {
+      where.push('au.capability = ?');
+      args.push(query.capability);
+    }
+    if (query.without?.length) {
+      where.push(`au.capability NOT IN (${query.without.map(() => '?').join(', ')})`);
+      args.push(...query.without);
+    }
+    if (query.actorId) {
+      where.push('au.actor_id = ?');
+      args.push(query.actorId);
+    }
+    if (query.since) {
+      where.push('au.at >= ?');
+      args.push(query.since);
+    }
+    const filter = where.length ? `WHERE ${where.join(' AND ')}` : '';
+
     const rows = this.db
       .prepare(
         `SELECT au.at, au.actor_id, au.capability, au.target, au.detail, a.display_name
            FROM audit au LEFT JOIN accounts a ON a.id = au.actor_id
-          ORDER BY au.at DESC LIMIT ?`,
+           ${filter}
+          ORDER BY au.at DESC, au.rowid DESC LIMIT ?`,
       )
-      .all(limit) as {
+      .all(...args, query.limit ?? 200) as {
       at: string;
       actor_id: string | null;
       capability: string;
@@ -698,6 +805,23 @@ export class Accounts {
       target: row.target,
       detail: row.detail,
     }));
+  }
+
+  /**
+   * How many rows there are of each capability, for the whole log.
+   *
+   * The screen hides the noisy ones by default, and a toggle that cannot say
+   * what it is hiding is a toggle nobody presses.
+   */
+  auditCounts(since?: string): { capability: string; rows: number }[] {
+    const rows = this.db
+      .prepare(
+        `SELECT capability, COUNT(*) AS rows FROM audit
+          ${since ? 'WHERE at >= ?' : ''}
+          GROUP BY capability ORDER BY rows DESC`,
+      )
+      .all(...(since ? [since] : [])) as { capability: string; rows: number }[];
+    return rows;
   }
 }
 

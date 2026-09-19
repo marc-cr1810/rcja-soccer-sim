@@ -632,3 +632,74 @@ describe('the fields, as an organiser sees them', () => {
     expect(seen.status).toBeGreaterThanOrEqual(400);
   }, 20_000);
 });
+
+/**
+ * Every act on a field, in the log.
+ *
+ * Until Phase 12's H these three recorded nothing at all, so the log could say
+ * who amended a draw and not who took somebody's field away. The third is the
+ * one worth having: the idle sweep is the only act at the venue with **no
+ * actor**, and it is also the most likely "what happened to my field?" of the
+ * day, because the owner was at lunch when it happened.
+ */
+describe('a field, in the audit log', () => {
+  it('records who opened it, and whose it is', async () => {
+    const started = await start();
+    const act = await team(started, 'ACT Robotics');
+
+    const opened = await openField(started, act);
+    expect(opened.status).toBe(201);
+
+    const rows = started.server.accounts.audit({ capability: 'field.open' });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.target).toBe(opened.payload.field.id);
+    expect(rows[0]!.actorName).toBe('ACT Robotics');
+  }, 20_000);
+
+  it('says when the field somebody closed was not their own', async () => {
+    const started = await start();
+    const act = await team(started, 'ACT Robotics');
+    const organiser = await admin(started);
+
+    const opened = await openField(started, act);
+    const id = opened.payload.field.id as string;
+
+    const closed = await call(started.port, `/api/fields/${id}/close`, { method: 'POST', cookie: organiser });
+    expect(closed.status).toBe(200);
+
+    const rows = started.server.accounts.audit({ capability: 'field.control' });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.actorName).toBe('Organiser');
+    // The point of the sentence: by the time anybody reads this the field is
+    // gone and `tenancy` has forgotten who owned it, so the row has to carry
+    // it or the answer is unrecoverable.
+    expect(rows[0]!.detail).toBe("close, on act-robotics's field");
+  }, 20_000);
+
+  it('records the idle sweep as having done it, and nobody as having asked', async () => {
+    // Quiet the moment it opens, and no grace, so two direct sweeps take it —
+    // `sweep()` is public for exactly this, rather than waiting half a minute.
+    const started = await start({ idleMins: 0, graceMins: 0 });
+    const act = await team(started, 'ACT Robotics');
+
+    const opened = await openField(started, act);
+    const id = opened.payload.field.id as string;
+
+    started.server.arenas.sweep(); // warns
+    started.server.arenas.sweep(); // and now takes it
+    // The close is the child process going, which the supervisor hears about
+    // rather than assumes.
+    for (let n = 0; n < 60 && started.server.arenas.info(id); n += 1) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+
+    const rows = started.server.accounts.audit({ capability: 'field.control' });
+    expect(rows).toHaveLength(1);
+    // Nobody did this. A log that attributed it to whoever happened to be
+    // looking would be worse than one that said nothing.
+    expect(rows[0]!.actorId).toBeNull();
+    expect(rows[0]!.actorName).toBeNull();
+    expect(rows[0]!.detail).toContain('idle sweep');
+    expect(rows[0]!.detail).toContain('act-robotics');
+  }, 30_000);
+});

@@ -163,9 +163,63 @@ const ROLE_CAPABILITIES: Record<Role, Partial<Record<Capability, Scope>>> = {
   },
 };
 
+/**
+ * Every capability there is, in a list a screen can offer.
+ *
+ * Written as a `Record<Capability, true>` rather than an array so that the
+ * *compiler* keeps it complete: adding a capability to the union above and
+ * forgetting this list is a type error, not a dropdown that quietly stops
+ * offering the newest thing. `capabilitiesOf('admin')` happens to name all of
+ * them today, but that is a fact about who an organiser is, not about what
+ * exists — a capability no role held would vanish from a screen built on it.
+ */
+const EVERY_CAPABILITY: Record<Capability, true> = {
+  'match.watch': true,
+  'results.read': true,
+  'match.join': true,
+  'team.workspace.write': true,
+  'team.submit': true,
+  'field.open': true,
+  'field.control': true,
+  'field.invite': true,
+  'field.join': true,
+  'fixture.setup': true,
+  'match.control': true,
+  'match.score.correct': true,
+  'match.abandon': true,
+  'arena.list': true,
+  'arena.kill': true,
+  'tournament.create': true,
+  'tournament.amend': true,
+  'referee.assign': true,
+  'account.manage': true,
+  'capability.grant': true,
+};
+
+export const CAPABILITIES: readonly Capability[] = Object.keys(EVERY_CAPABILITY) as Capability[];
+
+export const SCOPES: readonly Scope[] = ['own', 'assigned', 'any'];
+
 /** Every capability a role carries, for showing a person what they can do. */
 export function capabilitiesOf(role: Role): Capability[] {
   return Object.keys(ROLE_CAPABILITIES[role]) as Capability[];
+}
+
+/**
+ * What a role carries, **with the reach of each**.
+ *
+ * `capabilitiesOf` answers "does this role have it at all", which is the right
+ * question for a menu and the wrong one for a screen that is about to widen
+ * something. A referee *has* `match.control` — over nothing, until a fixture
+ * is named — so a grant of it at `any` hands them every match at the venue
+ * while a list of bare names says they already had it. That sentence was on
+ * the screen for about an hour of Phase 12 G before anybody read it properly.
+ */
+export function reachOf(role: Role): { capability: Capability; scope: Scope }[] {
+  return Object.entries(ROLE_CAPABILITIES[role]).map(([capability, scope]) => ({
+    capability: capability as Capability,
+    scope: scope as Scope,
+  }));
 }
 
 /**

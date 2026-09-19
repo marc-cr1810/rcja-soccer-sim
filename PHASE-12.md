@@ -8,9 +8,8 @@ slice decided, what running it taught, and what is still ahead.
 When the phase closes, its result collapses into PHASES.md the way Phase 10's
 did, and this file goes with it.
 
-**Where it stands: A to F are built and verified live (19 September 2026).
-G, H and I are not started — and the gate itself is now met in all four
-clauses.**
+**Where it stands: complete (19 September 2026). A to I are built and verified
+live; the gate is met in all four clauses, audit included.**
 
 ## The gate, clause by clause
 
@@ -24,7 +23,7 @@ clauses.**
 | stops a runaway practice field | **Done** — it already worked; E gave it its own screen and the reasons beside it |
 | fixes a team's mis-uploaded file | **Done** — F1 kept the pushes, F2 put them behind a button |
 | re-runs an abandoned game | **Done** — D |
-| the audit log saying who did each one | **Partly.** D made it true for draw corrections; H closes the rest |
+| the audit log saying who did each one | **Done** — D made it true for draw corrections, H filled the three gates that recorded nothing and put it behind `/admin/audit` |
 
 ## Four decisions, taken before any of it was built
 
@@ -48,8 +47,11 @@ A ─→ B ─→ C ─→ D      E      F1 ─→ F2      G      (A..G) ─→ 
 ```
 
 A to D are a chain: each needs the one before it. E, F and G are independent of
-them and of each other. H wants the rest done, because it is the screen that
-shows what they all recorded.
+them and of each other. H wanted the rest done, because it is the screen that
+shows what they all recorded — G excepted, which it does not depend on. G was
+built last, after H and I, because reading its code properly showed it to be
+two capabilities built from nothing rather than the one missing method this
+file had recorded.
 
 ### A — an amendment is an appended record ✅
 
@@ -198,22 +200,97 @@ The gate's *fixes a team's mis-uploaded file*.
   next Run puts it back. Rewriting a student's editor during a competition
   would destroy work with no record of it.
 
-### G — `/admin/people`
+### G — `/admin/people` ✅
 
-Accounts, roles, grants. `accounts.ts` already has list / grant / grantsFor /
-assign / unassign / listAssignments / record / audit; the one thing missing is
-**revoking a grant**.
+**It was bigger than this file first recorded, and that correction is why it
+was held back as its own slice.** Revoking a grant turned out to be one of
+three missing pieces. The other two had no HTTP route anywhere in the tree:
 
-### H — `/admin/audit`, and a sweep
+- **`referee.assign`** — `assign` / `unassign` / `listAssignments` were all in
+  `accounts.ts` with no caller outside `cli.ts`, so deciding who referees what
+  was a terminal-only act. It is the thing an organiser reaches for most on the
+  day, and the day is not when to be shelling into a laptop.
+- **`capability.grant`** — in the admin row of `ROLE_CAPABILITIES`, and
+  `can(actor, 'capability.grant')` was called nowhere. `grant()` could write a
+  row; nothing could remove one and no screen ever showed one, so a grant made
+  at Phase 6 was permanent and invisible.
 
-The screen, plus filling the holes it would expose. The real gaps today are
-field control, practice open/close, and workspace writes, none of which record
-anything.
+What was decided and built:
 
-### I — settings from the browser
+- **The screen offers the whole grants table** — every capability, every
+  reach, a free target — rather than a curated subset, because a screen
+  narrower than the table is a second answer to the same question. The price is
+  that some combinations need a sentence, and the form carries one *against the
+  choice being made*. The route refuses exactly one row and it is not a matter
+  of taste: `assigned` with no target, for which `satisfies()` returns false
+  unconditionally. A grant that can never once be true is the silent-no-op
+  defect class this repository has met most.
+- **Roles stay fixed at creation.** No `setRole`. `capabilities.ts` says in as
+  many words that "this referee may also amend the draw" should be a `grants`
+  row rather than a fifth role, and adding promotions would be building the
+  thing the grants table exists to avoid. A team account's slug is also its
+  folder on disk, so the rule would have needed an exception the day it was
+  written.
+- **The last organiser who can still sign in cannot be disabled**, whoever
+  asks — one rule covering both self-lockout and lockout-by-colleague. Refused
+  in the route rather than in `setDisabled`, so the terminal stays the hatch
+  that can undo it: a venue locked out of its own admin area on a Saturday has
+  no other way back in.
+- **The assignment's draw comes from the server, not the body.** A league
+  server hosts one tournament, so a `drawId` in a request could only ever be
+  the right one or a wrong one. `cli.ts`'s two rules are kept, including its
+  exception: taking an assignment back works for a fixture that is no longer in
+  the draw, because voiding one does not unassign anybody.
+- **The hub became a pure index.** The invitation form and the accounts list
+  had been on `/admin` since Phase 6 for want of anywhere else; people are the
+  last subject to get their own screen.
 
-`saveSettings()` in settings.ts exists with **zero callers** — it was written
-for this.
+### H — `/admin/audit`, and a sweep ✅
+
+- **Three gates recorded nothing**, and now do: `field.open`, `field.control`
+  and `team.workspace.write`. Before this the log could say who amended a draw
+  and not who took somebody's field away.
+- **The idle sweep records itself, with no actor.** Warned-then-closed is the
+  promise, and `this.closing` having the arena when its process goes is what
+  distinguishes the sweep from a person. It is the only act at the venue nobody
+  asked for, and the most likely *what happened to my field?* of the day — the
+  owner was at lunch when it happened. A log that attributed it to whoever
+  happened to be signed in would be worse than one that said nothing.
+- **Everything is recorded, the editor's autosave included** — a decision taken
+  knowing the cost. The editor saves on a 700ms debounce, so a hall of twenty
+  students is tens of thousands of rows, about 10 MB a day. The *reader*
+  carries that, not the writer: `audit()` grew `capability` / `without` /
+  `actorId` / `since` / `limit`, `auditCounts()` says how many rows each
+  capability has, and the screen opens with workspace writes hidden and a count
+  saying what it is hiding.
+- **`TeamApi` still holds no accounts.** The `onWrite` hook is shaped like
+  `noticeFor` for the same reason: writing a file is a workspace act and *who
+  did it* is an accounts question this class has no business answering. The
+  league resolves its own actor with `accountFor(req)`; `server.ts` supplies no
+  hook and a laptop records nothing.
+
+### I — settings from the browser ✅
+
+- **It takes effect now, and that was nearly free.** Nothing that holds a
+  setting had captured it: `ArenaSupervisor` reads its ceiling on every
+  `create`, the seat grants when a child's argv is assembled, and the quiet
+  time and grace on every `sweep`; `Tenancy` reads `perTeam` and `claimSeconds`
+  behind getters. One `reconfigure()` on each of the three holders is the whole
+  of it. A venue that changes its mind at eleven o'clock is *written to*, not
+  restarted.
+- **The file stays the truth, including the bounds.** A change is applied,
+  written, and read back through `loadSettings` — so the browser cannot set
+  anything a text editor could not, and out of range is clamped and complained
+  about in the file's own words. The clamped value is then written again, so
+  the file never disagrees with the screen displaying it.
+- **A browser edit beats a `--flag`, but only on the key it names.** An
+  organiser who changes a number and watches nothing happen has been told a lie
+  by the screen. Flags on keys the change did not mention keep deciding those
+  keys for the rest of the run, and are **not** written into the file — a flag
+  is for one run.
+- **Two things it will not do, and says so**: lowering the arena ceiling
+  refuses the next arena rather than evicting a match in progress, and new seat
+  grants reach arenas started from now.
 
 ## What running it taught, that the tests did not
 
@@ -241,10 +318,76 @@ is why the phase is being walked in slices with a live pass at the end of each.
   and there is no DOM harness.
 - **`bun test` forces `TZ=UTC`; a spawned CLI runs in the machine's own zone.**
   A test asserting on a bare `09:00` fails by the offset. Spell UTC in those.
+- **A settings sheet whose labels had come away from their boxes.** Found by
+  looking at it. `form.panel`'s column layout is on the *form*, and the groups
+  are `div`s inside one — so every label flowed inline and ended up beside the
+  previous input. On a page where every box is a short number and they all look
+  alike, that is not a cosmetic bug. Built as `.rows`/`.row` like every other
+  admin screen instead.
+- **"The server itself" was a lie about half the rows it appeared on.** A row
+  with no account against it is not always the server: an account made from the
+  terminal has none either, and a person made it. The log now says *nobody
+  signed in*, which is true of both.
+- **A tie on `at` had no defined order.** The editor autosaves about once a
+  second and two rows can land in the same millisecond; `ORDER BY at DESC` alone
+  leaves their order to the storage engine. `rowid` breaks it. Spotted live by
+  two field rows arriving in the same second.
+- **An organiser's `team.workspace.write: any` does nothing at the editor
+  door.** Found while writing H's tests, not live. `authority.team(req)`
+  answers with the *requesting account's* display name, so an organiser who
+  opens `/workspace-api/` is in a workspace of their own — named after them —
+  and never in a team's. The `any` scope is real at the seat door
+  (`fill.kind === 'workspace'`) and nowhere else. Nothing depends on it today
+  and nothing was changed; `tests/audit.test.ts` asserts the current answer, so
+  that assertion is what fails first if it is ever revisited.
+- **The base for a settings write is the running venue, not the file.** Caught
+  by a test that changed `practice.idleMins` and then asked whether
+  `arenas.max` had survived. Basing the write on what happens to be on disk
+  loses every setting the file never held — a league started with settings
+  passed in, or one whose `league.json` does not exist yet, would have one
+  number edited and the rest silently reset to defaults on the first save.
 - **A history nobody can put in order is not a history.** Two pushes forty
   seconds apart both read *10:54 AM*, because `when()` stops at minutes — right
   for a kick-off, wrong for the one list whose entire job is *which came
   first*. `whenExact()` exists for that, and for nothing else.
+
+## What G's live pass found
+
+Five defects, none of which a green suite would have shown. Recorded separately
+because four of the five are the *screen lying*, which is the failure mode an
+admin area has that a library does not.
+
+- **The grant form said that handing a referee every match at the venue would
+  change nothing.** `roleCapabilities` was a list of bare capability *names*, so
+  the screen could not tell "a referee holds `match.control` over nothing until
+  a fixture is named" from "holds it over everything". `reachOf()` sends the
+  scope beside each name, and the note now says what widening it actually does.
+  The worst kind of defect an authorisation screen can have: it advised
+  confidently and it was backwards.
+- **`div.panel` matched no CSS rule at all.** Only `form.panel` was ever
+  styled, so the arenas screen's load figures and the audit screen's filters
+  had been rendering as plain text since the markup said card. The same shape
+  as slice I's settings sheet — a rule written for a form asked to lay out divs
+  inside one — and the second time in one phase.
+- **`.row .mono:first-child { flex: 0 0 5.5rem }`**, added in I to give the
+  audit log its timestamp column, pinned a fixture id to 5.5rem, so
+  `qld-thunder-v-act-robotics` wrapped down four lines. Two rules asking for
+  opposite things, and `.grow` is the one that said so on purpose.
+- **An assignment to a voided fixture was visible and unremovable.** The
+  fixture list is the draw, and a voided fixture nobody is standing at is not
+  in the draw — so the row vanished from the list while the assignment stayed.
+  That is exactly the case `cli.ts` has a comment about. The Take back moved
+  onto the person's own card as well.
+- **A refusal was written in markdown.** `being assigned *is* naming the thing`
+  renders as asterisks in an error box. A test now asserts the sentence
+  contains none.
+
+And the one found by reading rather than running: **the old `/admin` accounts
+list never showed a disabled account as disabled.** It declared
+`disabled: boolean` and rendered `account.disabled`; the server sends
+`publicAccount`, which has `disabledAt` and no `disabled`, so the expression
+was `undefined` on every row. The one screen an organiser would open to find
+out why somebody cannot log in.
 
 ## Known gaps, carried deliberately
 
@@ -253,3 +396,17 @@ is why the phase is being walked in slices with a live pass at the end of each.
 - `ScheduleFixtureSchema.state` and `MatchResponseSchema.state` still say
   `['played', 'playing', 'upcoming']` — three of the seven states that have
   existed since Phase 11.
+- **The audit table is never pruned.** With H recording every editor save it
+  grows by a few megabytes on a busy day, inside `league.db`. Measured and
+  accepted rather than overlooked: a venue runs for a weekend, and a retention
+  policy is a decision about evidence that should be taken deliberately rather
+  than bolted onto the slice that made the rows.
+- A team seeing their own push history. `yoursOnly()` shows fields and robots
+  and nothing about submitted code; carried from F.
+- **No `grant` command in `cli.ts`.** The terminal never had one either, so
+  nothing was lost; after G the browser is the way. Adding a second writer on
+  the day the first one was born is how the two drift.
+- **`Role` is written out twice** — once in `capabilities.ts` and once as
+  `RoleSchema` in `api/schemas.ts`. G kept `Capability` and `Scope` out of that
+  by importing them, since a screen offering "the whole table" has to *be* the
+  table, but the older duplication is still there.

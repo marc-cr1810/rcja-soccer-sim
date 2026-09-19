@@ -739,7 +739,7 @@ describe('the pre-game room', () => {
     void inPregame(started, 'alpha-v-bravo').catch(() => {});
     await post(started, '/api/referee/match/alpha-v-bravo/start', cookie);
 
-    const rows = started.server.accounts.audit(10);
+    const rows = started.server.accounts.audit({ limit: 10 });
     // `fixture.setup` rather than `match.control`: the capability table has
     // carried it since Phase 6 and this is the thing it was named for.
     expect(rows[0]).toMatchObject({
