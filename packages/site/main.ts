@@ -3531,6 +3531,7 @@ const SETTING_GROUPS: { title: string; note?: string; fields: Field[] }[] = [
     fields: [
       { path: 'rules.mercyMargin', label: 'Goal difference that ends a match', kind: 'nullable', note: 'blank = no limit' },
       { path: 'rules.halfTimeSeconds', label: 'Half-time (seconds)', kind: 'number' },
+      { path: 'rules.heldBallSeconds', label: 'Sitting on the ball (seconds)', kind: 'number', note: '0 = a robot may keep it as long as it likes' },
     ],
   },
   {

@@ -224,6 +224,17 @@ export interface MatchOptions {
    */
   kickoffCountdown?: number;
   /**
+   * How long one robot may sit on a motionless ball, unopposed, before rule
+   * 5.6 takes it off them. Defaults to the simulator's 8 seconds; 0 turns the
+   * test off, which restores unlimited possession.
+   *
+   * A setting rather than a constant because 5.6 does not describe this ball:
+   * no opponent is contesting it, so 5.6.1.2 does not apply, and a robot is
+   * touching it, so "no robot has any chance of locating the ball" is plainly
+   * false. What to do about it is the referee's call, and referees differ.
+   */
+  heldBallSeconds?: number;
+  /**
    * Called after every physics step, with the match.
    *
    * The one way to watch a match closely from outside without the watcher
@@ -393,6 +404,7 @@ export class Match {
       autoResolve: opts.autoResolve,
       autoDamaged: opts.autoDamaged,
       kickoffCountdown: opts.kickoffCountdown ?? 0,
+      heldBallSeconds: opts.heldBallSeconds,
     });
     if (opts.arrangement) this.world.stage(opts.arrangement);
     else this.world.resetRobots('violet');

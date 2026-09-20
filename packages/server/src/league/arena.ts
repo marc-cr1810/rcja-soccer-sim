@@ -175,6 +175,16 @@ export interface PlayRequest {
    */
   halfTimeSeconds?: number;
   /**
+   * Seconds one robot may sit on a motionless ball before rule 5.6 takes it
+   * off them, or 0 for never.
+   *
+   * Sent by the hub from `rules.heldBallSeconds`, again so that two arenas at
+   * the same venue cannot disagree about what the game is. A team that lost
+   * the ball to this in one fixture and kept it in the next would have no way
+   * to tell which of the two was the real rule.
+   */
+  heldBallSeconds?: number;
+  /**
    * Goals the pre-game penalty clock awarded before a ball was kicked.
    *
    * Applied as score corrections at clock 0, so a match that kicks off 3-0
@@ -684,6 +694,7 @@ export class FixtureArena {
         refereed: request.refereed ?? false,
         mercyMargin: request.mercyMargin,
         halfTimeSeconds: request.halfTimeSeconds,
+        heldBallSeconds: request.heldBallSeconds,
         penalties: request.penalties,
       });
 

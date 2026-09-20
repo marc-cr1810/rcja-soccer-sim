@@ -622,14 +622,36 @@ whole time either way.
 ```json
 {
   "pregame": { "autoStartMins": 15, "penaltyPerMin": 1 },
-  "rules": { "mercyMargin": 10, "halfTimeSeconds": 300 }
+  "rules": { "mercyMargin": 10, "halfTimeSeconds": 300, "heldBallSeconds": 8 }
 }
 ```
 
-On `league`, `--auto-start 15|off`, `--penalty-per-min 1`, `--mercy 10|off` and
-`--half-time 300|off` do the same for one run without editing the file.
-(`bench` has a `--mercy` of its own, which works the other way round — see
-below.)
+On `league`, `--auto-start 15|off`, `--penalty-per-min 1`, `--mercy 10|off`,
+`--half-time 300|off` and `--held-ball 8|off` do the same for one run without
+editing the file. (`bench` has a `--mercy` of its own, which works the other
+way round — see below.)
+
+### How long a robot may sit on the ball
+
+`rules.heldBallSeconds` is the one 5.6 window that is a judgement rather than a
+reading of the rule book, which is why it is a setting at all.
+
+Rule 5.6 does not describe this ball. No opponent is contesting it, so 5.6.1.2
+— the scrum — does not apply; and a robot is touching it, so "no robot has any
+chance of locating the ball" is plainly false. What is happening is that one
+robot has won the ball and is doing nothing with it, and how long a referee
+lets that run is the referee's call.
+
+Eight seconds unless you say otherwise. `0` turns it off, which is a venue
+saying a team that wins the ball may keep it as long as they like — what every
+match did before the test existed, and measurably worse than it sounds: a robot
+was once left sitting on the ball for a whole match with nobody saying
+anything.
+
+It is displacement that is measured, not speed, so a robot dribbling the ball
+up the field keeps it for as long as it is actually taking it somewhere — and a
+robot spinning on the spot with the ball against it does not, however fast the
+ball is moving.
 
 ### Half-time
 

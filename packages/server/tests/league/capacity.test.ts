@@ -206,6 +206,30 @@ describe('league.json', () => {
     expect(loadSettings(where).settings.rules.mercyMargin).toBe(6);
   });
 
+  it('reads the held-ball window, keeps it when the file says nothing, and clamps a silly one', () => {
+    const where = dir();
+    // Absent has to mean the simulator's eight, not zero: a venue that never
+    // opened this file must not silently be running with the test switched
+    // off, which is exactly the state that let a robot sit on the ball for a
+    // whole match before it existed.
+    writeFileSync(join(where, 'league.json'), '{ "arenas": { "max": 6 } }');
+    const absent = loadSettings(where);
+    expect(absent.settings.rules.heldBallSeconds).toBe(8);
+    expect(absent.sources['rules.heldBallSeconds']).toBe('default');
+    expect(absent.complaints).toEqual([]);
+
+    // Zero is a venue saying it on purpose, not a missing value.
+    writeFileSync(join(where, 'league.json'), '{ "rules": { "heldBallSeconds": 0 } }');
+    const off = loadSettings(where);
+    expect(off.settings.rules.heldBallSeconds).toBe(0);
+    expect(off.sources['rules.heldBallSeconds']).toBe('file');
+
+    writeFileSync(join(where, 'league.json'), '{ "rules": { "heldBallSeconds": 600 } }');
+    const silly = loadSettings(where);
+    expect(silly.settings.rules.heldBallSeconds).toBe(60);
+    expect(silly.complaints.join(' ')).toContain('heldBallSeconds');
+  });
+
   it('reads the pre-game clock, and clamps a silly one', () => {
     const where = dir();
     writeFileSync(

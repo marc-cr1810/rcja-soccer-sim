@@ -211,6 +211,19 @@ export interface MatchConfig {
    * physics. Omit for the nominal coefficient (every match identical).
    */
   ballFriction?: number;
+  /**
+   * How long one robot may sit on a motionless ball, unopposed, before 5.6
+   * takes it off them. Defaults to HELD_BALL_SECONDS; 0 or a negative number
+   * turns the test off and restores unlimited possession.
+   *
+   * A setting rather than a constant because it is the one 5.6 window that is
+   * a judgement about how the game should play rather than a reading of the
+   * rule book. 5.6 does not describe this ball at all - no opponent is
+   * contesting it, so 5.6.1.2 does not apply, and a robot is touching it, so
+   * "no robot has any chance of locating the ball" is plainly false. What to
+   * do about it is the referee's, and referees differ.
+   */
+  heldBallSeconds?: number;
 }
 
 /** Rule 4.1.1: every league caps the robot at a 220 mm cylinder. */
@@ -237,6 +250,28 @@ const PROGRESS_WINDOW = 5;
 const PROGRESS_DISTANCE = 320;
 
 /**
+ * A displacement test on its own is a speed limit in disguise, and that is the
+ * false call this pair of constants exists to stop.
+ *
+ * 320 mm in 5 s is 64 mm/s of NET travel, so a ball edged steadily down the
+ * field slower than that was called for lack of progress while it was plainly
+ * going somewhere - which is most of what a contested ball being worked out of
+ * a corner looks like.
+ *
+ * Straightness tells the two apart: net displacement over the distance the
+ * ball actually rolled. A ball rattling between robots covers metres and ends
+ * up where it started, so its straightness is near zero. A ball being walked
+ * slowly down the field covers the same ground in one direction, so its
+ * straightness is near one, and it is progressing however slowly.
+ *
+ * Below PROGRESS_MIN_PATH the ball has barely rolled at all. There is no
+ * direction to measure and nothing that could be called progress, so the
+ * straightness let-off does not apply.
+ */
+const PROGRESS_STRAIGHTNESS = 0.6;
+const PROGRESS_MIN_PATH = 120;
+
+/**
  * Rule 5.6.1.1: no robot has any chance of locating the ball.
  *
  * The case that forced this was a ball that rolled into the goal and stopped
@@ -255,6 +290,47 @@ const UNREACHABLE_IN_GOAL_SECONDS = 3;
 const UNREACHABLE_SECONDS = 8;
 /** Edge-to-edge gap beyond which nobody is about to arrive. */
 const UNREACHABLE_DISTANCE = 400;
+
+/**
+ * The other half of 5.6.1.1, and the hole the distance test left: a stopped
+ * ball with robots standing around it that none of them is going after.
+ *
+ * Distance alone cannot see it. A robot parked 200 mm from a dead ball is of
+ * no more use to it than one at the far end of the field, but it kept the gap
+ * under UNREACHABLE_DISTANCE, so 5.6.1.1 stayed quiet - and with no opponent
+ * within PROGRESS_DISTANCE, 5.6.1.2 was not looking either. The ball could sit
+ * there for the rest of the half and no rule would ever speak.
+ *
+ * What settles it is whether the gap to the nearest robot is still closing.
+ * REACH_PROGRESS is deliberately far larger than any jitter: a robot actually
+ * heading for the ball crosses it in well under a second, and one that has
+ * lost the ball never crosses it at all.
+ *
+ * Inside POSSESSION_GAP the ball is at a robot's feet. That is possession, and
+ * a ball being fought over belongs to 5.6.1.2, not here.
+ */
+const POSSESSION_GAP = 30;
+const REACH_PROGRESS = 150;
+const NEGLECTED_SECONDS = 5;
+
+/**
+ * And the last way a ball can go nowhere: one robot sitting on it, unopposed,
+ * doing nothing with it.
+ *
+ * This was untouchable by every test above. No opponent is within
+ * PROGRESS_DISTANCE, so 5.6.1.2 is not watching. The ball is inside
+ * POSSESSION_GAP, so the neglected test reads possession and stands off. And
+ * possession is the right reading right up until it isn't: measured over a bot
+ * round-robin, the longest a ball ever went without getting anywhere was a
+ * spinner sitting on it for 240 seconds - the whole match - with the referee
+ * saying nothing, and 28% of every dead spell past eight seconds had this
+ * shape.
+ *
+ * So possession earns rope, not the match. Longer than NEGLECTED_SECONDS,
+ * because a robot that has the ball has earned a moment to line something up,
+ * and a robot lining something up is not what this is about.
+ */
+export const HELD_BALL_SECONDS = 8;
 
 /** Robot mass in grams, by league weight cap (rule 4.1.1). */
 function robotMass(league: League): number {
@@ -378,11 +454,21 @@ export class World {
   private stalledFor = 0;
   /** Seconds the ball has been at rest with nobody able to get to it (5.6.1.1). */
   private unreachableFor = 0;
+  /** Closest any robot has come to the ball since `unreachableFor` last reset. */
+  private reachMark = Infinity;
   /** Where the ball was PROGRESS_WINDOW ago, for the lack-of-progress test. */
   private progressMark: Point = { x: 0, z: 0 };
   private sinceProgressMark = 0;
+  /** Where the ball was last tick, to integrate how far it has actually rolled. */
+  private progressPrev: Point = { x: 0, z: 0 };
+  /** Distance the ball has rolled since `progressMark`, path length not displacement. */
+  private pathSinceMark = 0;
+  /** Which window the progress clock is running under; a change restarts it. */
+  private progressKind: 'contested' | 'held' | null = null;
   /** How many times lack of progress has been called since the last restart (5.6.2). */
   lackOfProgressCount = 0;
+  /** Whether the ball now in the goal has already been counted. See `detectGoal`. */
+  private goalGiven = false;
   /** Suppresses the 5.11.1 detector per team so it reports once, not per frame. */
   private multipleDefenceCooldown: Record<TeamId, number> = { violet: 0, lime: 0 };
   /** Rule 5.11.1: Sustained duration both defenders have been directly blocking the goal. */
@@ -745,10 +831,8 @@ export class World {
     this.ball.z = arrangement.ball.z;
     this.ball.vx = arrangement.ball.vx ?? 0;
     this.ball.vz = arrangement.ball.vz ?? 0;
-    this.stalledFor = 0;
+    this.resetProgressClocks();
     this.lackOfProgressCount = 0;
-    this.progressMark = { x: this.ball.x, z: this.ball.z };
-    this.sinceProgressMark = 0;
     this.sinceKickOff = 0;
     this.kickingOffTeam = kickingOff;
     this.kickOffPending = false;
@@ -956,7 +1040,7 @@ export class World {
     const goalBound = Math.abs(this.ball.z) <= HALF_GOAL_WIDTH - this.ball.radius * 0.5;
     const hit = collideWithPerimeter(this.ball, goalBound, this.ballBounce);
 
-    this.detectGoal(sweptHit?.hit === 'goal-back' ? 'goal-back' : hit);
+    this.detectGoal(sweptHit?.hit === 'goal-back' || hit === 'goal-back');
     this.detectUnreachable(dt);
     this.detectBallOutOfPlay();
     this.detectIllegalKickOff();
@@ -965,7 +1049,28 @@ export class World {
     this.detectRobotStates(dt);
   }
 
-  /** Rule 5.5.1: a goal is scored when the ball strikes the back wall of the goal. */
+  /**
+   * Rule 5.5.1: a goal is scored when the ball is completely over the goal
+   * line, between the posts.
+   *
+   * This used to hang the goal on the ball striking the BACK WALL, and that is
+   * a far stricter thing than it sounds. The goal is 74 mm deep and the open
+   * league's ball is 42 mm across, so a ball that has fully crossed the line
+   * has about 32 mm of travel left to reach the wall - and carpet takes that
+   * back off a ball at a walking pace. Measured over a bot round-robin, 433 of
+   * the 434 balls that died inside the goal had COMPLETELY crossed the line
+   * and simply run out of momentum in there. None of them was given.
+   *
+   * They did not even look like near misses from the side of the pitch: a
+   * robot walks the ball in, the ball is plainly in the goal, and three
+   * seconds later the referee announces that no robot can reach it past the
+   * crossbar and puts it back on a neutral point.
+   *
+   * The back wall stays in as a fast path, because a ball can cross the whole
+   * goal inside one tick and the swept test is what catches that. Anything
+   * that reaches the back wall has crossed the line on the way, so the two can
+   * never disagree.
+   */
   private get autoResolve(): boolean {
     return this.config.autoResolve !== false;
   }
@@ -974,8 +1079,30 @@ export class World {
     return this.config.autoDamaged ?? this.autoResolve;
   }
 
-  private detectGoal(hit: ReturnType<typeof collideWithPerimeter>): void {
-    if (hit !== 'goal-back') return;
+  private detectGoal(struckBackWall: boolean): void {
+    // Completely over the line: the trailing edge is past it, not just the
+    // centre. A ball resting ON the line is not a goal, and 5.6.1.1 is still
+    // what frees that one, since the crossbar keeps every robot off it.
+    const whollyOver =
+      Math.abs(this.ball.x) - this.ball.radius > HALF_LENGTH && withinGoalMouth(this.ball.z);
+
+    /*
+     * Crossing the line is a STATE, and the back wall was an EVENT. That is
+     * the one thing that has to be handled here rather than falling out of the
+     * change: a ball over the line goes on being over the line for as long as
+     * it sits there, so without a latch every tick is another goal.
+     *
+     * It only shows up where a goal does not restart the match - a practice
+     * field set to freeze, or anything else with `autoResolve` off. A
+     * self-running match kicks off again and hides it. Found at five goals for
+     * one shot.
+     */
+    if (!struckBackWall && !whollyOver) {
+      if (Math.abs(this.ball.x) <= HALF_LENGTH) this.goalGiven = false;
+      return;
+    }
+    if (this.goalGiven) return;
+    this.goalGiven = true;
     const scoringSide: GoalSide = this.ball.x > 0 ? 'yellow' : 'cyan';
     // Whichever team does NOT currently defend that goal scored in it. Not a
     // fixed violet/lime flip: which team defends which goal swaps at half-time
@@ -1054,6 +1181,79 @@ export class World {
   }
 
   /**
+   * Every 5.6 clock, back to zero, with the ball wherever it now is.
+   *
+   * These are all measuring the same thing - how long this ball has been going
+   * nowhere - so anything that makes the question fresh has to clear all of
+   * them together. Leaving one running is how the referee ends up calling
+   * twice for one incident, the second time within a tick of the first.
+   */
+  private resetProgressClocks(): void {
+    this.stalledFor = 0;
+    this.unreachableFor = 0;
+    this.reachMark = Infinity;
+    this.restartProgressWindow();
+    this.progressKind = null;
+  }
+
+  /**
+   * Start the displacement window again, here, now.
+   *
+   * `progressPrev` is reset with the rest and not left to the tick loop,
+   * because the path integral is a sum of one-tick steps and a window that
+   * begins with a stale `progressPrev` books the whole jump from wherever the
+   * ball used to be as distance travelled. One bogus step is enough: 682 mm of
+   * travel that never happened, on the opening tick, dragged straightness from
+   * 1.0 down to 0.27 and called a ball that was moving cleanly down the field.
+   *
+   * That only surfaced once the window could restart without also taking the
+   * displacement branch, which had been quietly swallowing the bad step.
+   */
+  private restartProgressWindow(): void {
+    this.progressMark = { x: this.ball.x, z: this.ball.z };
+    this.progressPrev = { x: this.ball.x, z: this.ball.z };
+    this.sinceProgressMark = 0;
+    this.pathSinceMark = 0;
+  }
+
+  /**
+   * The team of the robot with the ball at its feet, if exactly one team has.
+   *
+   * Null when nobody is on it, and null when both teams are - that is a pin,
+   * and the 5.6.1.2 stall branch above is the test for it.
+   */
+  private holdingRobot(): TeamId | null {
+    let holder: TeamId | null = null;
+    for (let i = 0; i < this.activeRobotsBuffer.length; i++) {
+      const r = this.activeRobotsBuffer[i]!;
+      const gap = distance(r, this.ball) - r.radius - this.ball.radius;
+      if (gap > POSSESSION_GAP) continue;
+      if (holder !== null && holder !== r.team) return null;
+      holder = r.team;
+    }
+    return holder;
+  }
+
+  /**
+   * Rule 5.8.3 is already running against a keeper letting the ball sit at its
+   * feet.
+   *
+   * Both rules describe that ball and they cannot both have it: 5.6 moves the
+   * ball, which puts it out of reach of the keeper 5.8.3 was about to punish.
+   * The referee watching a keeper ignore a ball in its own box calls the
+   * keeper, so 5.8.3 gets its full window and the 5.6 clocks wait. The timer
+   * only ticks while the ball is in that keeper's own box, so this is narrower
+   * than it looks.
+   */
+  private get goalieClockRunning(): boolean {
+    for (let i = 0; i < this.activeRobotsBuffer.length; i++) {
+      const r = this.activeRobotsBuffer[i]!;
+      if (r.isGoalie && (r.inactiveGoalieFor ?? 0) > 0) return true;
+    }
+    return false;
+  }
+
+  /**
    * Rule 5.6.1.1: the ball is somewhere no robot is going to get to.
    *
    * Deliberately separate from the scrum test in `detectStall`, which is
@@ -1063,6 +1263,7 @@ export class World {
   private detectUnreachable(dt: number): void {
     if (!this.running || this.countdownActive || this.kickOffPending || speed(this.ball) > 40) {
       this.unreachableFor = 0;
+      this.reachMark = Infinity;
       return;
     }
 
@@ -1078,19 +1279,41 @@ export class World {
       nearest = Math.min(nearest, distance(robot, this.ball) - robot.radius - this.ball.radius);
     }
 
-    if (!inGoal && nearest < UNREACHABLE_DISTANCE) {
-      this.unreachableFor = 0;
-      return;
+    if (!inGoal) {
+      // At a robot's feet: possession, and a ball being fought over is 5.6.1.2.
+      // Still closing: somebody is going after it, so it is not abandoned. The
+      // opening tick has reachMark at Infinity and only sets the mark.
+      //
+      // `nearest` is Infinity when every robot has been removed, and Infinity
+      // is not less than Infinity minus anything - without the finite test an
+      // empty field reads as somebody forever closing in on the ball.
+      const closing = Number.isFinite(nearest) && nearest <= this.reachMark - REACH_PROGRESS;
+      if (nearest <= POSSESSION_GAP || closing) {
+        this.unreachableFor = 0;
+        this.reachMark = nearest;
+        return;
+      }
     }
 
+    const neglected = !inGoal && nearest < UNREACHABLE_DISTANCE;
+    // The keeper gets called before the ball is moved out from under it.
+    if (neglected && this.goalieClockRunning) return;
+
     this.unreachableFor += dt;
-    const limit = inGoal ? UNREACHABLE_IN_GOAL_SECONDS : UNREACHABLE_SECONDS;
+    const limit = inGoal
+      ? UNREACHABLE_IN_GOAL_SECONDS
+      : neglected
+        ? NEGLECTED_SECONDS
+        : UNREACHABLE_SECONDS;
     if (this.unreachableFor < limit) return;
     this.unreachableFor = 0;
+    this.reachMark = Infinity;
 
     const reason = inGoal
       ? 'Ball is in the goal without striking the back wall, and no robot can reach it past the crossbar.'
-      : 'No robot has any chance of locating the ball.';
+      : neglected
+        ? 'Ball has been sitting untouched with no robot closing on it.'
+        : 'No robot has any chance of locating the ball.';
 
     if (this.autoResolve) {
       // 5.6.2: nearest neutral point, and the centre if it happens again.
@@ -1114,7 +1337,13 @@ export class World {
    * possession, it is actively in play and NOT in a lack-of-progress condition.
    */
   private detectStall(dt: number): void {
-    if (!this.running || this.countdownActive || this.kickOffPending) return;
+    // Nothing that happens while the ball is not in play is progress or the
+    // lack of it, and the path integral below would otherwise swallow every
+    // jump the referee makes between whistles.
+    if (!this.running || this.countdownActive || this.kickOffPending) {
+      this.resetProgressClocks();
+      return;
+    }
     const ballSpd = speed(this.ball);
 
     /*
@@ -1190,52 +1419,102 @@ export class World {
      * cannot be called for lack of progress under 5.6.1.2.
      * We reset the window so that a future contest starts with a full clock.
      */
-    if (!isOpposingContest) {
-      this.progressMark = { x: this.ball.x, z: this.ball.z };
-      this.sinceProgressMark = 0;
-      return;
-    }
+    /*
+     * Unopposed, but not necessarily fine.
+     *
+     * If a robot has the ball at its feet this is possession, and possession
+     * gets the same displacement test as a scrum on a longer window - not a
+     * free pass. Measured over a bot round-robin, a free pass was worth up to
+     * 240 seconds of a robot sitting on the ball with the referee silent.
+     *
+     * Displacement is what to measure and not speed, for the same reason as
+     * everywhere else in this function: a robot spinning on the spot with the
+     * ball against it is moving the ball quickly and taking it nowhere.
+     *
+     * If nobody has it either, the ball is loose and unwatched, and
+     * detectUnreachable is the test for that.
+     */
+    const heldLimit = this.config.heldBallSeconds ?? HELD_BALL_SECONDS;
+    const heldByOne = heldLimit > 0 && !isOpposingContest && this.holdingRobot() !== null;
+    const kind = isOpposingContest ? 'contested' : heldByOne ? 'held' : null;
 
-    if (distance(this.ball, this.progressMark) > PROGRESS_DISTANCE) {
-      this.progressMark = { x: this.ball.x, z: this.ball.z };
-      this.sinceProgressMark = 0;
-    } else {
-      this.sinceProgressMark += dt;
+    if (kind === null) {
+      this.restartProgressWindow();
+      this.progressKind = null;
+      return;
     }
 
     /*
-     * A ball sitting in a penalty box while that team's keeper ignores it is
-     * the keeper's offence, not a neutral one.
+     * The clock restarts when the situation under it changes, because the two
+     * situations are not judged on the same window and banked time does not
+     * convert between them.
      *
-     * Both rules describe this, and they cannot both happen: 5.6.1.1 moves the
-     * ball after five seconds, and 5.8.3 takes the keeper off after eight - so
-     * whichever fires first makes the other unreachable. The referee watching
-     * a keeper let a ball sit at its feet calls the keeper, so 5.8.3 is given
-     * its full window and the progress clock waits. If the keeper comes out,
-     * its timer clears and this resumes on the next tick.
+     * Without this, a striker who walked the ball up the field unopposed spent
+     * seconds against the eight-second held rope, and the moment a keeper came
+     * out to meet it the rope became five - so a contest less than a second
+     * old was called for a stall that had not happened during it. Seen in a
+     * real match as a call in front of the goal mouth with a goal coming, and
+     * reproduced at 0.83 seconds of contest. An opponent arriving is the
+     * clearest sign a ball is about to be fought over rather than stuck, which
+     * makes an instant call on their arrival exactly backwards.
      */
-    let hasInactiveGoalie = false;
-    for (let i = 0; i < this.activeRobotsBuffer.length; i++) {
-      const r = this.activeRobotsBuffer[i]!;
-      if (r.isGoalie && (r.inactiveGoalieFor ?? 0) > 0) {
-        hasInactiveGoalie = true;
-        break;
-      }
-    }
-    if (hasInactiveGoalie) {
-      return;
+    if (kind !== this.progressKind) {
+      this.progressKind = kind;
+      this.restartProgressWindow();
     }
 
-    if (this.sinceProgressMark >= PROGRESS_WINDOW) {
-      this.progressMark = { x: this.ball.x, z: this.ball.z };
-      this.sinceProgressMark = 0;
-      const reason = `Ball has not progressed in ${PROGRESS_WINDOW} seconds between opposing robots.`;
+    /*
+     * The step is measured here and not at the top of the function, after
+     * every branch that could have restarted the window has had its say.
+     *
+     * Measured up front it is a step from wherever the ball was under the
+     * PREVIOUS window, and on the tick a window restarts that is not a step
+     * the new window took. `restartProgressWindow` moves `progressPrev` to the
+     * ball, so this reads 0 on such a tick rather than the jump.
+     */
+    if (distance(this.ball, this.progressMark) > PROGRESS_DISTANCE) {
+      this.restartProgressWindow();
+    } else {
+      this.sinceProgressMark += dt;
+      this.pathSinceMark += distance(this.ball, this.progressPrev);
+    }
+    this.progressPrev = { x: this.ball.x, z: this.ball.z };
+
+    // A ball sitting in a penalty box while that team's keeper ignores it is
+    // the keeper's offence, not a neutral one, and 5.8.3 gets to call it first.
+    if (this.goalieClockRunning) return;
+
+    // Contested or held, the question is the same and only the rope differs.
+    const window = isOpposingContest ? PROGRESS_WINDOW : heldLimit;
+    if (this.sinceProgressMark >= window) {
+      /*
+       * How straight the window was decides whether this is a stall or just a
+       * slow ball. Straightness is meaningless below PROGRESS_MIN_PATH - a
+       * ball that never rolled has no direction - so that case falls through
+       * to the call, which is right: a ball that has not moved in five seconds
+       * between opposing robots is the plainest stall there is.
+       */
+      const straightness =
+        this.pathSinceMark > PROGRESS_MIN_PATH
+          ? distance(this.ball, this.progressMark) / this.pathSinceMark
+          : 0;
+      this.restartProgressWindow();
+      // Slow, but going somewhere. Let it have another window to get there.
+      if (straightness >= PROGRESS_STRAIGHTNESS) return;
+
+      // 5.6 does not describe a held ball - no opponent is contesting it, so
+      // 5.6.1.2 is not it, and a robot is touching it, so 5.6.1.1 is not
+      // either. It is the bare rule, and the message says what was seen.
+      const rule = isOpposingContest ? '5.6.1.2' : '5.6';
+      const reason = isOpposingContest
+        ? `Ball has not progressed in ${window} seconds between opposing robots.`
+        : `Ball has not progressed in ${window} seconds with one robot on it and nobody contesting.`;
       if (this.autoResolve) {
-        this.callLackOfProgress({ rule: '5.6.1.2', reason });
+        this.callLackOfProgress({ rule, reason });
       } else {
         this.emit({
           kind: 'lack-of-progress',
-          rule: '5.6.1.2',
+          rule,
           message: `${reason} Lack of Progress is available to the referee.`,
         });
       }
@@ -1626,15 +1905,17 @@ export class World {
   placeBall(p: Point): void {
     this.ball.x = p.x;
     this.ball.z = p.z;
+    // Wherever it has been put, it is not a goal that has already been given.
+    this.goalGiven = false;
     this.ball.vx = 0;
     this.ball.vz = 0;
     this.kickOffPending = false;
     this.reportedOutOfPlay = false;
     // Placing the ball is a discontinuous move, not progress. Without this the
     // progress test measures the referee's own intervention and concludes the
-    // ball is doing fine.
-    this.progressMark = { x: p.x, z: p.z };
-    this.sinceProgressMark = 0;
+    // ball is doing fine - and the clocks it does not clear carry the old
+    // incident into the new position and call it again straight away.
+    this.resetProgressClocks();
   }
 
   /** Rule 5.6.2: first call to the nearest neutral point, thereafter the centre. */

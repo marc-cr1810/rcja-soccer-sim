@@ -1102,6 +1102,7 @@ export const SettingsBodySchema = z
       .object({
         mercyMargin: z.number().nullable().optional(),
         halfTimeSeconds: z.number().optional(),
+        heldBallSeconds: z.number().optional(),
       })
       .strict()
       .optional(),

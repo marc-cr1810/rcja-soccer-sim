@@ -480,20 +480,124 @@ describe('lack of progress (5.6)', () => {
     expect(distance(w.ball, startedAt)).toBeGreaterThan(200);
   });
 
-  it('does NOT call lack of progress when a single robot is controlling or dribbling the ball', () => {
+  it('does NOT call lack of progress when a single robot is dribbling the ball', () => {
+    // Possession that is going somewhere. The robot keeps the ball at its feet
+    // the whole way, which is exactly what it is allowed to do with it.
     const w = world('open');
     w.running = true;
     const [c1, c2, y1, y2] = w.robots;
-    // Keep others far away
-    c2!.x = -800; y1!.x = 800; y2!.x = 850;
-    // c1 is holding/dribbling the ball near midfield
-    c1!.x = 0; c1!.z = 0;
+    c2!.x = -1800; y1!.x = 1800; y2!.x = 1850;
+
+    for (let t = 0; t < 12; t += 1 / 60) {
+      w.ball.x = -700 + t * 120;
+      w.ball.z = 0;
+      w.ball.vx = 120;
+      c1!.x = w.ball.x - 140; c1!.z = 0;
+      w.step(1 / 60);
+    }
+    expect(w.events.some((e) => e.kind === 'lack-of-progress')).toBe(false);
+  });
+
+  it('DOES call it when a robot just sits on the ball unopposed', () => {
+    /*
+     * The hole the "one robot on it is possession" reading left open, and it
+     * was not a small one: over a bot round-robin the longest any ball went
+     * without getting anywhere was 240 seconds - a whole match - of a robot
+     * sitting on it with no opponent near and the referee saying nothing.
+     * 28% of every dead spell past eight seconds had this shape.
+     *
+     * Possession is still possession. It just does not last forever.
+     */
+    const w = world('open');
+    w.running = true;
+    const [c1, c2, y1, y2] = w.robots;
+    c2!.x = -1800; y1!.x = 1800; y2!.x = 1850;
     w.placeBall({ x: 40, z: 0 });
 
+    let calledAt: number | null = null;
+    for (let t = 0; t < 12; t += 1 / 60) {
+      c1!.x = 0; c1!.z = 0;
+      w.ball.x = 40; w.ball.z = 0;
+      w.step(1 / 60);
+      if (calledAt === null && w.events.some((e) => e.kind === 'lack-of-progress')) calledAt = t;
+    }
+    expect(calledAt).not.toBeNull();
+    // Longer rope than a contested ball gets, but rope, not the match.
+    expect(calledAt!).toBeGreaterThan(5);
+    expect(calledAt!).toBeLessThan(10);
+  });
+
+  it('DOES call it on a robot spinning the ball on the spot', () => {
+    // Speed would say this ball is flying. Displacement says it is exactly
+    // where it was eight seconds ago, which is the only question 5.6 asks.
+    const w = world('open');
+    w.running = true;
+    const [c1, c2, y1, y2] = w.robots;
+    c2!.x = -1800; y1!.x = 1800; y2!.x = 1850;
+    c1!.x = 0; c1!.z = 0;
+
+    let peak = 0;
+    for (let t = 0; t < 12; t += 1 / 60) {
+      c1!.x = 0; c1!.z = 0;
+      w.ball.x = Math.cos(t * 6) * 120;
+      w.ball.z = Math.sin(t * 6) * 120;
+      w.ball.vx = -Math.sin(t * 6) * 720;
+      w.ball.vz = Math.cos(t * 6) * 720;
+      peak = Math.max(peak, Math.hypot(w.ball.vx, w.ball.vz));
+      w.step(1 / 60);
+      if (w.events.some((e) => e.kind === 'lack-of-progress')) break;
+    }
+    expect(peak).toBeGreaterThan(400);
+    expect(w.events.some((e) => e.kind === 'lack-of-progress')).toBe(true);
+  });
+
+  it('obeys the window a venue set, not only the simulator default', () => {
+    // The point of the setting is that the number a venue writes in
+    // league.json is the number the ball is actually judged by. Three seconds
+    // is nothing like the default, so a call at three can only have come from
+    // here.
+    const w = new World({
+      league: getLeague('open'),
+      halfLengthSeconds: 300,
+      inclined: false,
+      kickoffCountdown: 0,
+      heldBallSeconds: 3,
+    });
+    w.running = true;
+    const [c1, c2, y1, y2] = w.robots;
+    c2!.x = -1800; y1!.x = 1800; y2!.x = 1850;
+    w.placeBall({ x: 40, z: 0 });
+
+    let calledAt: number | null = null;
     for (let t = 0; t < 8; t += 1 / 60) {
       c1!.x = 0; c1!.z = 0;
-      w.ball.x = 40;
-      w.ball.z = 0;
+      w.ball.x = 40; w.ball.z = 0;
+      w.step(1 / 60);
+      if (calledAt === null && w.events.some((e) => e.kind === 'lack-of-progress')) calledAt = t;
+    }
+    expect(calledAt).not.toBeNull();
+    expect(calledAt!).toBeGreaterThan(2.5);
+    expect(calledAt!).toBeLessThan(4.5);
+  });
+
+  it('leaves a held ball alone forever when heldBallSeconds is turned off', () => {
+    // The knob, because how long possession may sit on a ball is a judgement
+    // about how the game should play, not a reading of the rule book.
+    const w = new World({
+      league: getLeague('open'),
+      halfLengthSeconds: 300,
+      inclined: false,
+      kickoffCountdown: 0,
+      heldBallSeconds: 0,
+    });
+    w.running = true;
+    const [c1, c2, y1, y2] = w.robots;
+    c2!.x = -1800; y1!.x = 1800; y2!.x = 1850;
+    w.placeBall({ x: 40, z: 0 });
+
+    for (let t = 0; t < 30; t += 1 / 60) {
+      c1!.x = 0; c1!.z = 0;
+      w.ball.x = 40; w.ball.z = 0;
       w.step(1 / 60);
     }
     expect(w.events.some((e) => e.kind === 'lack-of-progress')).toBe(false);
@@ -505,15 +609,17 @@ describe('lack of progress (5.6)', () => {
     const [c1, c2, y1, y2] = w.robots;
     // Keep opponents far away
     y1!.x = 800; y2!.x = 850;
-    // Two teammates near the ball
-    c1!.x = -50; c1!.z = 0;
-    c2!.x = 50; c2!.z = 0;
+    // Two teammates either side of the ball
+    c1!.x = -350; c1!.z = 0;
+    c2!.x = 350; c2!.z = 0;
     w.placeBall({ x: 0, z: 0 });
 
-    for (let t = 0; t < 8; t += 1 / 60) {
-      c1!.x = -50; c1!.z = 0;
-      c2!.x = 50; c2!.z = 0;
-      w.ball.x = Math.sin(t * 2) * 30;
+    // Passing it about properly: the ball crosses between them, so it leaves
+    // its own circle every time and the window never completes.
+    for (let t = 0; t < 12; t += 1 / 60) {
+      c1!.x = -350; c1!.z = 0;
+      c2!.x = 350; c2!.z = 0;
+      w.ball.x = Math.sin(t * 1.5) * 240;
       w.ball.z = 0;
       w.step(1 / 60);
     }
@@ -524,18 +630,24 @@ describe('lack of progress (5.6)', () => {
     const w = world('open');
     w.running = true;
     const [c1, c2, y1, y2] = w.robots;
-    c2!.x = -800; y2!.x = 850;
+    c2!.x = -1800; y2!.x = 1850;
     c1!.x = -60; c1!.z = 0;
     w.placeBall({ x: 0, z: 0 });
 
     for (let t = 0; t < 8; t += 1 / 60) {
-      c1!.x = -60; c1!.z = 0;
-      w.ball.x = 0; w.ball.z = 0;
-      // y1 contests only for the first 2 seconds, then retreats far away
+      // y1 contests only for the first 2 seconds, then retreats far away -
+      // and c1, now unopposed, takes the ball off up the field with it, which
+      // is what winning a contest is for.
       if (t < 2) {
         y1!.x = 60; y1!.z = 0;
+        c1!.x = -60; c1!.z = 0;
+        w.ball.x = 0; w.ball.z = 0;
       } else {
-        y1!.x = 800; y1!.z = 0;
+        y1!.x = 1800; y1!.z = 0;
+        w.ball.x = (t - 2) * 150;
+        w.ball.z = 0;
+        w.ball.vx = 150;
+        c1!.x = w.ball.x - 140; c1!.z = 0;
       }
       w.step(1 / 60);
     }
@@ -603,6 +715,102 @@ describe('lack of progress (5.6)', () => {
     expect(calledAt!).toBeLessThan(7);
   });
 
+
+  it('does NOT call it on a ball being worked slowly but steadily down the field', () => {
+    /*
+     * The false call this pair of constants exists to stop, and the one that
+     * spoiled matches that were perfectly fine to watch.
+     *
+     * The displacement test asks for 320 mm in 5 s, which is 64 mm/s of net
+     * travel, so it was quietly a speed limit: a contested ball being edged
+     * out of a corner at a walking pace is going somewhere unmistakably, and
+     * was called for lack of progress anyway. Straightness is what tells the
+     * two apart - this ball's path and its displacement are the same number.
+     */
+    const w = world('open');
+    w.running = true;
+    const [c1, c2, y1, y2] = w.robots;
+    c2!.x = -1800; y2!.x = 1850;
+
+    // 55 mm/s: well under the 64 mm/s the displacement test implied.
+    for (let t = 0; t < 12; t += 1 / 60) {
+      w.ball.x = -700 + t * 55;
+      w.ball.z = 0;
+      w.ball.vx = 55;
+      // Both teams in contest the whole way, so 5.6.1.2 is watching.
+      c1!.x = w.ball.x - 150; c1!.z = 0;
+      y1!.x = w.ball.x + 170; y1!.z = 0;
+      w.step(1 / 60);
+    }
+
+    expect(w.events.some((e) => e.kind === 'lack-of-progress')).toBe(false);
+    // And it really did travel - this is not a test that stood still.
+    expect(w.ball.x).toBeGreaterThan(-100);
+  });
+
+  it('still calls it on a ball that covers ground without covering distance', () => {
+    // The other side of the straightness test: same path length as the slow
+    // walk above, spent going back and forth instead of down the field.
+    const w = world('open');
+    w.running = true;
+    const [c1, c2, y1, y2] = w.robots;
+    c2!.x = -1800; y2!.x = 1850;
+    c1!.x = -80; c1!.z = 0;
+    y1!.x = 80; y1!.z = 0;
+
+    for (let t = 0; t < 8; t += 1 / 60) {
+      w.ball.x = Math.sin(t * 1.2) * 55;
+      w.ball.z = 0;
+      w.step(1 / 60);
+      if (w.events.some((e) => e.kind === 'lack-of-progress')) break;
+    }
+    expect(w.events.some((e) => e.kind === 'lack-of-progress')).toBe(true);
+  });
+
+  it('does NOT spend a held ball\'s banked seconds against the contested window', () => {
+    /*
+     * Reported from a real match: lack of progress called in front of the goal
+     * mouth with a goal coming, on a ball that was moving the whole time.
+     *
+     * A striker that has the ball unopposed is judged on the eight-second held
+     * window. A keeper coming out to meet it makes the ball contested, and
+     * contested is judged on five. With one clock serving both, every second
+     * the striker had already spent counted against a window it was never
+     * running under - so a contest that was 0.00 seconds old was called for a
+     * stall that could not have happened during it. Measured before the fix:
+     * the call landed on the exact tick the keeper arrived.
+     *
+     * An opponent arriving is the clearest sign a ball is about to be fought
+     * over rather than stuck. The clock restarts.
+     */
+    const w = world('open');
+    w.running = true;
+    const [c1, c2, y1, y2] = w.robots;
+    c2!.x = -800; c2!.z = 500; y2!.x = -800; y2!.z = -500;
+
+    let calledAt: number | null = null;
+    let contestedFrom: number | null = null;
+    for (let t = 0; t < 16; t += 1 / 120) {
+      // Creeping goalward, inside its own circle: held, and banking seconds.
+      const bx = HALF_LENGTH - 400 + t * 12;
+      w.ball.x = bx; w.ball.z = 0; w.ball.vx = 12; w.ball.vz = 0;
+      // Clear of the ball, so the contact solver is not what is under test.
+      c1!.x = bx - 152; c1!.z = 0;
+      // The keeper waits wide, then steps in front at five seconds.
+      if (t < 5) { y1!.x = HALF_LENGTH - 60; y1!.z = 640; }
+      else { y1!.x = bx + 175; y1!.z = 0; }
+      if (contestedFrom === null && Math.hypot(y1!.x - bx, y1!.z) < 320) contestedFrom = t;
+      w.step(1 / 120);
+      if (calledAt === null && w.events.some((e) => e.kind === 'lack-of-progress')) calledAt = t;
+    }
+
+    expect(contestedFrom).not.toBeNull();
+    // Whatever the referee decides, it cannot be decided on the keeper's
+    // arrival. The contested window is five seconds and it starts here.
+    if (calledAt !== null) {
+      expect(calledAt - contestedFrom!).toBeGreaterThan(4.9);
+    }
+  });
 
   it('escalates from a neutral point to the centre on the second call', () => {
     const w = world('open');
@@ -1046,20 +1254,84 @@ describe('lack of progress 5.6.1.1: nobody can get to the ball', () => {
    * the ball" - and it had not been implemented at all. Only 5.6.1.2, the
    * scrum, had.
    */
-  it('frees a ball parked inside the goal', () => {
+  it('frees a ball stranded ON the goal line, which no robot can reach', () => {
+    /*
+     * What is left of this rule now that 5.5.1 is a line and not a wall.
+     *
+     * A ball whose centre is past the line but whose trailing edge is not has
+     * not scored, and the crossbar means no robot can ever come and settle it.
+     * That is the ball this rule is for, and it is the only one left: the ball
+     * parked deeper in the goal, which this test used to use, is a goal now.
+     */
     const w = world('open');
     w.running = true;
-    w.placeBall({ x: GOAL_BACK_X - 30, z: 0 });
+    // Centre 10 mm past the line, so with a 21 mm radius it straddles it.
+    w.placeBall({ x: HALF_LENGTH + 10, z: 0 });
     w.ball.vx = 0;
     w.ball.vz = 0;
+    expect(Math.abs(w.ball.x) - w.ball.radius).toBeLessThan(HALF_LENGTH);
 
     for (let t = 0; t < 6; t += 1 / 100) w.step(1 / 100);
 
+    expect(w.score.violet + w.score.lime).toBe(0);
     const call = w.events.find((e) => e.rule === '5.6.1.1');
     expect(call).toBeDefined();
     expect(call!.message).toContain('crossbar');
     // And it is actually back on the field, not just complained about.
     expect(Math.abs(w.ball.x)).toBeLessThan(HALF_LENGTH);
+  });
+
+  it('counts a ball sitting over the line once, not once a tick', () => {
+    /*
+     * The one thing the line reading has to handle that the back wall did not.
+     *
+     * Striking a wall is an event and happens on one tick. Being over the line
+     * is a state, and a ball that stays there is over it on every tick that
+     * follows. A match that restarts itself hides this, because the kick-off
+     * takes the ball away; a match with `autoResolve` off does not, and scored
+     * five for one shot.
+     */
+    const w = new World({
+      league: getLeague('open'),
+      halfLengthSeconds: 300,
+      inclined: false,
+      kickoffCountdown: 0,
+      autoResolve: false,
+    });
+    w.running = true;
+    w.robots.forEach((r) => (r.removed = true));
+    w.placeBall({ x: GOAL_BACK_X - 30, z: 0 });
+
+    for (let t = 0; t < 4; t += 1 / 100) w.step(1 / 100);
+
+    expect(w.score.violet + w.score.lime).toBe(1);
+    expect(w.events.filter((e) => e.kind === 'goal').length).toBe(1);
+  });
+
+  it('gives the goal for a ball that crossed the line and stopped short of the wall', () => {
+    /*
+     * Reported from a real match: a robot walked the ball in, kicked it over
+     * the line, and the referee called lack of progress instead of a goal.
+     *
+     * The goal is 74 mm deep and the ball 42 mm across, so a ball that has
+     * completely crossed has about 32 mm left to reach the back wall, and
+     * carpet takes that off a ball at a walking pace. Hanging 5.5.1 on the
+     * wall meant 433 of the 434 balls that died inside the goal had fully
+     * crossed the line and none of them counted.
+     */
+    const w = world('open');
+    w.running = true;
+    w.placeBall({ x: GOAL_BACK_X - 30, z: 0 });
+    w.ball.vx = 0;
+    w.ball.vz = 0;
+    // Wholly over the line, and nowhere near the back wall.
+    expect(Math.abs(w.ball.x) - w.ball.radius).toBeGreaterThan(HALF_LENGTH);
+    expect(Math.abs(w.ball.x) + w.ball.radius).toBeLessThan(GOAL_BACK_X);
+
+    for (let t = 0; t < 2; t += 1 / 100) w.step(1 / 100);
+
+    expect(w.events.some((e) => e.kind === 'goal' && e.rule === '5.5.1')).toBe(true);
+    expect(w.score.violet + w.score.lime).toBe(1);
   });
 
   it('does not award a goal for a ball that stopped short of the back wall', () => {
@@ -1103,6 +1375,56 @@ describe('lack of progress 5.6.1.1: nobody can get to the ball', () => {
     c1!.x = -135;
     c1!.z = 0;
     for (let t = 0; t < 12; t += 1 / 100) w.step(1 / 100);
+    expect(w.events.some((e) => e.rule === '5.6.1.1')).toBe(false);
+  });
+
+  it('frees a ball the robots have stopped going after', () => {
+    /*
+     * The hole between the two halves of 5.6, and the reason a dead ball could
+     * sit through the rest of a half with the referee saying nothing.
+     *
+     * A robot 250 mm from a stopped ball keeps the gap under
+     * UNREACHABLE_DISTANCE, so 5.6.1.1 read it as reachable and stayed quiet.
+     * There is no opponent within PROGRESS_DISTANCE, so 5.6.1.2 was not
+     * looking either. Nothing moved and nothing ever would.
+     *
+     * Distance was the wrong question. Whether anyone is still closing on the
+     * ball is the right one.
+     */
+    const w = world('open');
+    w.running = true;
+    w.placeBall({ x: 0, z: 0 });
+    const [c1, c2, y1, y2] = w.robots;
+    c2!.x = -1800; y1!.x = 1800; y2!.x = 1850;
+
+    let calledAt: number | null = null;
+    for (let t = 0; t < 12; t += 1 / 100) {
+      // Parked, near the ball, going nowhere - and no opponent in sight.
+      c1!.x = -250; c1!.z = 0; c1!.vx = 0; c1!.vz = 0;
+      w.ball.x = 0; w.ball.z = 0; w.ball.vx = 0; w.ball.vz = 0;
+      w.step(1 / 100);
+      if (calledAt === null && w.events.some((e) => e.rule === '5.6.1.1')) calledAt = t;
+    }
+
+    expect(calledAt).not.toBeNull();
+    expect(calledAt!).toBeLessThan(7);
+  });
+
+  it('leaves a stopped ball alone while a robot is still closing on it', () => {
+    // The flip side: a ball nobody is touching yet is not a ball nobody wants.
+    // A robot on its way keeps making ground, and that is the whole test.
+    const w = world('open');
+    w.running = true;
+    w.placeBall({ x: 0, z: 0 });
+    const [c1, c2, y1, y2] = w.robots;
+    c2!.x = -1800; y1!.x = 1800; y2!.x = 1850;
+
+    for (let t = 0; t < 10; t += 1 / 100) {
+      // Crossing the field at a slow but honest 80 mm/s, never arriving.
+      c1!.x = -1000 + t * 80; c1!.z = 0;
+      w.ball.x = 0; w.ball.z = 0; w.ball.vx = 0; w.ball.vz = 0;
+      w.step(1 / 100);
+    }
     expect(w.events.some((e) => e.rule === '5.6.1.1')).toBe(false);
   });
 

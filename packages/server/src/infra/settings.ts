@@ -24,6 +24,9 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { isLeagueId, type LeagueId } from '@rcja/shared/leagues';
 import { DEFAULT_HALF_TIME_SECONDS, DEFAULT_MERCY_MARGIN } from '../match/match';
+// The simulator's own default, imported rather than restated. Two constants
+// that have to agree is the thing this file keeps refusing.
+import { HELD_BALL_SECONDS } from '../sim/world';
 
 /** Per-seat grants, from `src/lineup.ts` where they were constants. */
 export const DEFAULT_SEAT_CPU_PERCENT = 50;
@@ -148,6 +151,21 @@ export interface RuleSettings {
    * whatever a particular child process was started with.
    */
   halfTimeSeconds: number;
+  /**
+   * Seconds one robot may sit on a motionless ball, unopposed, before rule 5.6
+   * takes it off them. 0 turns the test off and restores unlimited possession.
+   *
+   * A venue setting rather than a constant because rule 5.6 does not actually
+   * describe this ball: no opponent is contesting it, so 5.6.1.2 is not it,
+   * and a robot is touching it, so "no robot has any chance of locating the
+   * ball" is plainly false. It is the referee's judgement about how the game
+   * should play, and referees differ — so it is a number a venue turns, not
+   * one this repository decides for them.
+   *
+   * Left alone it is the simulator's 8 seconds. Measured before it existed, a
+   * robot could sit on the ball for a whole match with nobody saying anything.
+   */
+  heldBallSeconds: number;
 }
 
 /**
@@ -245,7 +263,11 @@ export function defaultSettings(): LeagueSettings {
     },
     practice: { open: true, max: null, idleMins: 20, graceMins: 5, perTeam: 1, claimSecs: 90 },
     pregame: { autoStartMins: null, penaltyPerMin: 1 },
-    rules: { mercyMargin: DEFAULT_MERCY_MARGIN, halfTimeSeconds: DEFAULT_HALF_TIME_SECONDS },
+    rules: {
+      mercyMargin: DEFAULT_MERCY_MARGIN,
+      halfTimeSeconds: DEFAULT_HALF_TIME_SECONDS,
+      heldBallSeconds: HELD_BALL_SECONDS,
+    },
     demo: { on: false, bots: 'reference', teams: ['Violet', 'Lime'], home: 'Violet', away: 'Lime', halfSeconds: 300, league: null, gapSeconds: 10, randomSides: false },
     pushes: { keep: 10 },
   };
@@ -453,6 +475,20 @@ export function loadSettings(dataDir: string, overrides: Partial<Flags> = {}): L
   settings.rules.halfTimeSeconds = Math.round(halfTime.value);
   set('rules.halfTimeSeconds', halfTime.used);
 
+  // Held ball. Zero turns it off, which is a venue saying a team that wins the
+  // ball may keep it as long as it likes — what every match did before the
+  // test existed. The ceiling is low on purpose: past about a minute the
+  // setting is not a referee's judgement any more, it is off with extra steps.
+  const heldBall = readNumber(
+    rules.heldBallSeconds,
+    'rules.heldBallSeconds',
+    HELD_BALL_SECONDS,
+    { min: 0, max: 60 },
+    complaints,
+  );
+  settings.rules.heldBallSeconds = Math.round(heldBall.value);
+  set('rules.heldBallSeconds', heldBall.used);
+
   // Demo arena — a single, always-on, never-scored child that plays
   // back-to-back matches for the hall screen.
   if (typeof demo.on === 'boolean') {
@@ -618,6 +654,7 @@ export interface Flags {
   penaltyPerMin: number;
   mercyMargin: number | null;
   halfTimeSeconds: number;
+  heldBallSeconds: number;
   demoOn: boolean;
   demoBots: string;
   demoTeams: DemoTeamConfig[];
@@ -654,6 +691,7 @@ function applyFlags(
   take(flags.penaltyPerMin, 'pregame.penaltyPerMin', (v) => (settings.pregame.penaltyPerMin = v));
   take(flags.mercyMargin, 'rules.mercyMargin', (v) => (settings.rules.mercyMargin = v));
   take(flags.halfTimeSeconds, 'rules.halfTimeSeconds', (v) => (settings.rules.halfTimeSeconds = v));
+  take(flags.heldBallSeconds, 'rules.heldBallSeconds', (v) => (settings.rules.heldBallSeconds = v));
   take(flags.demoOn, 'demo.on', (v) => (settings.demo.on = v));
   take(flags.demoBots, 'demo.bots', (v) => (settings.demo.bots = v));
   take(flags.demoTeams, 'demo.teams', (v) => {

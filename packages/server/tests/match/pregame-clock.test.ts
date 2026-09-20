@@ -137,6 +137,8 @@ async function start(opts: VenueOptions = {}): Promise<Started> {
         // These fixtures never reach a second half, so the break between them
         // is nothing this file is about.
         halfTimeSeconds: 0,
+        // Nor does a pre-game clock care what happens to a held ball.
+        heldBallSeconds: 8,
       },
     },
     world: { realtime: false, submissionsDir, workspacesDir, pythonLibDir: PYTHON_LIB_DIR },

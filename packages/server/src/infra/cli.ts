@@ -2432,6 +2432,7 @@ async function league(flags: Map<string, string>): Promise<void> {
         // The venue's, not the arena's: a child left to its own default has
         // none at all, which is what a laptop wants and a venue does not.
         halfTimeSeconds: settings.rules.halfTimeSeconds,
+        heldBallSeconds: settings.rules.heldBallSeconds,
         // Only on the leg that went through pre-game. A second leg starts level
         // — the late team was late once, and charging them again for the same
         // twenty minutes would be charging them twice.
@@ -2633,6 +2634,9 @@ function budgetFlags(
   }
   if (flags.has('half-time')) {
     out.halfTimeSeconds = flags.get('half-time') === 'off' ? 0 : num(flags, 'half-time', 0);
+  }
+  if (flags.has('held-ball')) {
+    out.heldBallSeconds = flags.get('held-ball') === 'off' ? 0 : num(flags, 'held-ball', 0);
   }
   if (flags.has('demo-gap')) out.demoGap = num(flags, 'demo-gap', 0);
   if (flags.has('demo-random-sides')) out.demoRandomSides = flags.get('demo-random-sides') !== 'false';
