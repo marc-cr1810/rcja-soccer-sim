@@ -881,7 +881,8 @@ team with two pushes twice.
 
 [docs/planning/the-robot-is-a-board.md](docs/planning/the-robot-is-a-board.md)
 is the working plan — the nouns, six workflows written out, the deletion list
-and seven slices.
+and eight slices. [PHASE-13.md](PHASE-13.md) is the cut: what was decided
+before any of it was built, and each slice as it is taken.
 
 - **Four nouns and one verb.** A **project** is a folder of Python and a team
   has as many as it likes. **`lib/`** is a team-level folder that lands on every
