@@ -62,16 +62,34 @@ class GoalFrame:
         self.their_z = 0.0
         self._frozen = False
         self._seen_kickoff = False
+        #: The end switch as it was when this frame was last anchored. A human
+        #: flips it at half time, and that is the only announcement of the swap
+        #: a robot gets - see `update()`.
+        self._anchored_direction = None
 
     def update(self, s, heading: float, me_x: float, me_z: float) -> None:
         # The first frame of a kick-off is the moment to look, because `me` is
         # re-anchored there too and the ball is on the centre spot. Between
         # kick-offs, keep the last frame, so the geometry a keeper or striker
         # is aiming at does not tremble with a range measurement.
-        if not s.kickoff.pending:
+        # The end switch changed, so somebody carried this robot to the other
+        # end between halves (rule 1.4/5.4) and told it so. Look again.
+        #
+        # This is a *trigger*, not the answer: which goal is which is still
+        # decided below from the two camera sightings, because a switch says
+        # only that something changed and a robot that trusted it for the
+        # answer would have a handedness bug waiting for the day it is set
+        # wrong. Without it, a headless match - which swaps ends without ever
+        # stopping play, so the start button never falls - would keep the
+        # first half's frame for the whole of the second and attack its own
+        # goal. Measured: 3.7-0 in the first half, 0.3-7.3 in the second.
+        direction = getattr(s, "attack_direction", None)
+        swapped = direction is not None and direction != self._anchored_direction
+
+        if not s.kickoff.pending and not swapped:
             self._seen_kickoff = False
             return
-        if self._seen_kickoff:
+        if self._seen_kickoff and not swapped:
             return
 
         cv = getattr(s, "camera", None)
@@ -131,6 +149,7 @@ class GoalFrame:
         self.their_z = their_z
         self._seen_kickoff = True
         self._frozen = True
+        self._anchored_direction = direction
 
     def up_angle(self) -> float:
         """Field heading that points up the field, towards the other goal."""

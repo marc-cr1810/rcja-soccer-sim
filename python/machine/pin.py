@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from . import constants
+from . import _sched, constants
 from ._backend import Runtime
 
 
@@ -19,6 +19,9 @@ class Pin:
     PULL_NONE = constants.PULL_NONE
     PULL_UP = constants.PULL_UP
     PULL_DOWN = constants.PULL_DOWN
+
+    IRQ_RISING = _sched.IRQ_RISING
+    IRQ_FALLING = _sched.IRQ_FALLING
 
     def __init__(
         self,
@@ -79,14 +82,32 @@ class Pin:
     def irq(
         self,
         handler: Callable[[Pin], None] | None = None,
-        trigger: int = 0,
+        trigger: int = IRQ_RISING | IRQ_FALLING,
         *,
         priority: int = 1,
         wake: Any = None,
         hard: bool = False,
-    ) -> None:
-        """Configure an interrupt handler (simulated as stub)."""
-        pass
+    ) -> Callable[[Pin], None] | None:
+        """Call `handler(pin)` when this pin changes.
+
+        Real, and the one thing on this class that used to be a lie: it took a
+        handler, stored nothing and fired never, so a program that did its
+        counting in an interrupt simply counted nothing and said so nowhere.
+
+        **Edges arrive at the tick boundary, batched.** Nothing here can
+        preempt the main loop - see `_sched`'s docstring for why - so every
+        edge that happened during a frame is delivered together once that
+        frame lands. For a wheel encoder, which is what most of these are, the
+        count and the order are exact and only the timing inside the 20 ms is
+        not; a handler that counts gets the right answer, a handler that
+        timestamps does not.
+
+        `priority`, `wake` and `hard` are accepted and ignored: there is no
+        interrupt controller to prioritise against and no sleep to wake from.
+        """
+        _sched.register_irq(self._id, self, handler, trigger)
+        Runtime.get().watch_pin(self._id, _sched.wants_edge(self._id))
+        return handler
 
     def __repr__(self) -> str:
         mode_str = "OUT" if self._mode == constants.OUT else "IN"

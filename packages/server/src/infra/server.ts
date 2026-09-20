@@ -370,7 +370,7 @@ export class MatchServer {
    * Where a sandboxed, network-less submission connects for a whole match —
    * a Unix socket, with the request path baked into the query string since
    * there is no host/port half of the URL to carry it. Matches the `unix://`
-   * convention `python/rcja_soccer/_ws.py` already understands.
+   * convention `python/machine/_ws.py` already understands.
    */
   get agentSocketUrl(): string {
     if (!this.agentSocketPath) {

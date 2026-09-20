@@ -244,7 +244,7 @@ export interface SensorFrame {
  *
  * So being off the field is something the server says, about once a second,
  * for as long as it is true. There are no sensors in it: a robot in a
- * student's hands beside the pitch cannot see, and a tick function has nothing
+ * student's hands beside the pitch cannot see, and a control loop has nothing
  * to decide. It is the *stop* half of a start/stop button.
  *
  * Nothing needs a `PROTOCOL_VERSION` bump for this. Every robot already

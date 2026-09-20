@@ -264,9 +264,11 @@ standing in for a motor all along.
   tick; its bias random-walks like the compass's drift does, but a bias in a
   *rate* only costs you anything once you integrate it into a heading of your
   own, at which point it is worse than the compass ever gets.
-- **Camera** — 30 fps against a 50 Hz loop, with a `fresh` flag. Each goal
-  arrives twice: as one bearing and range, and as the raw **colour blobs** a
-  Pixy or an OpenMV would emit. A robot in front of the net is not goal-coloured,
+- **Camera** — a smart camera on a serial port, sending framed packets at 30 fps
+  against a 50 Hz loop. On the two ticks in five where it has nothing new, the
+  line is simply quiet, which is how a board finds out. Each goal arrives twice:
+  as one bearing and range, and as the raw **colour blobs** a Pixy or an OpenMV
+  would emit. A robot in front of the net is not goal-coloured,
   so it cuts the arc, and a goal with a keeper in the middle of it arrives as two
   blobs with a gap between them — where that opening is, and whether it is worth
   shooting at, is the program's to work out. Range comes off blob *height*, which

@@ -105,12 +105,23 @@ describe('deleting', () => {
 describe('the starter robot', () => {
   it('fills an empty folder with something that actually runs', async () => {
     const files = await store.seed('ACT Robotics', 1);
-    const names = files.map((f) => f.name);
-    expect(names).toContain('manifest.json');
-    expect(names).toContain('robot.py');
+    const names = files.map((f) => f.name).sort();
+    // The whole robot, not just the file they edit first: the pin numbers, the
+    // camera's protocol and the team radio are the team's own code and are in
+    // the folder from the first minute.
+    expect(names).toEqual(['board.py', 'camera.py', 'main.py', 'manifest.json', 'radio.py']);
 
     const manifest = JSON.parse(files.find((f) => f.name === 'manifest.json')!.content);
-    expect(manifest).toEqual({ team: 'ACT Robotics', robot: 1, entry: 'robot.py' });
+    expect(manifest).toEqual({ team: 'ACT Robotics', robot: 1, entry: 'main.py' });
+  });
+
+  it('seeds files that would run on a board, importing nothing a board lacks', async () => {
+    const files = await store.seed('ACT Robotics', 1);
+    for (const file of files) {
+      if (!file.name.endsWith('.py')) continue;
+      expect(file.content).not.toContain('import rcja_soccer');
+      expect(file.content).not.toContain('from rcja_soccer');
+    }
   });
 
   it('names the robot the folder is for, not always robot 1', async () => {
@@ -132,9 +143,15 @@ describe('handing a workspace to the submit endpoint', () => {
     await store.seed('ACT Robotics', 1);
     const push = await store.asPush('ACT Robotics', 1);
 
-    expect(Object.keys(push).sort()).toEqual(['manifest.json', 'robot.py']);
-    const decoded = Buffer.from(push['robot.py']!, 'base64').toString('utf8');
-    expect(decoded).toContain('Runtime.get()');
+    expect(Object.keys(push).sort()).toEqual([
+      'board.py',
+      'camera.py',
+      'main.py',
+      'manifest.json',
+      'radio.py',
+    ]);
+    const decoded = Buffer.from(push['main.py']!, 'base64').toString('utf8');
+    expect(decoded).toContain('Board()');
   });
 });
 
@@ -166,14 +183,14 @@ describe('snapshotting a workspace to run it', () => {
     const snapshot = await store.snapshot('ACT Robotics', 1, dest);
     expect(snapshot.ok).toBe(true);
     if (!snapshot.ok) return;
-    expect(snapshot.value.manifest.entry).toBe('robot.py');
+    expect(snapshot.value.manifest.entry).toBe('main.py');
 
-    const copied = await readFile(join(dest, 'robot.py'), 'utf8');
-    expect(copied).toContain('Runtime.get()');
+    const copied = await readFile(join(dest, 'main.py'), 'utf8');
+    expect(copied).toContain('Board()');
 
     // The editor carries on. The copy does not.
-    await store.write('ACT Robotics', 1, 'robot.py', 'print("changed")');
-    expect(await readFile(join(dest, 'robot.py'), 'utf8')).toBe(copied);
+    await store.write('ACT Robotics', 1, 'main.py', 'print("changed")');
+    expect(await readFile(join(dest, 'main.py'), 'utf8')).toBe(copied);
   });
 
   it('says what is wrong when the manifest does not parse', async () => {

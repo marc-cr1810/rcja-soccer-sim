@@ -1,14 +1,17 @@
-"""An authentic MicroPython soccer robot for RCJA Soccer Sim.
+"""One file, no library, no `board.py`. Everything inline.
 
-This program uses ONLY standard MicroPython hardware modules:
-    from machine import Pin, PWM, ADC
-    import time
+The smallest complete robot: `machine` and the standard library, with the
+wiring, the wheel mixing and the strategy all in the same file. It is here to
+show that nothing else is *required* - not `rcja_soccer`, not even the
+`board.py` that `main.py` uses to keep its pin numbers in one place.
 
-The EXACT SAME file runs on:
-1. Physical ESP32 / RP2040 microcontrollers.
-2. The RCJA Soccer Simulator (via the machine compatibility layer).
+That is also why it is not very good. It cannot tell you where it is, which
+goal it is attacking or whether a shot is open, because all of that is real
+work and it is the work the other files exist to share. Read this one to see
+the floor, then read `main.py` and `striker.py` to see what gets built on it.
 
-No simulator imports, no decorators, no argparse boilerplate.
+The exact same file runs on a physical ESP32 or RP2040 with the motors wired to
+these pins.
 """
 
 import math

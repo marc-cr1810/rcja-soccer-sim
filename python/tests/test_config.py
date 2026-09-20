@@ -16,8 +16,9 @@ returned a wrong number - and the earlier version of this test could not see it
 either, because it only compared ADC categories against each other. Ultrasonic
 `back` was Motor 1's direction pin and ultrasonic `right` was Motor 0's.
 
-So this enumerates *every* named pin, actuators included, and fails on any
-overlap at all.
+So this enumerates *every* named pin - actuators, the serial lines the camera
+and the radio sit on, the encoder channels and the switches a human sets - and
+fails on any overlap at all.
 """
 
 from __future__ import annotations
@@ -48,6 +49,16 @@ def named_pins(cfg: PinConfig) -> dict[str, list[int]]:
     categories["compass"] = [cfg.compass]
     categories["gyro"] = [cfg.gyro]
     categories["ultrasonics"] = list(cfg.ultrasonics.values())
+    categories["start"] = [cfg.start]
+    categories["team_switch"] = [cfg.team_switch]
+    categories["robot_switch"] = [cfg.robot_switch]
+    categories["side_switch"] = [cfg.side_switch]
+    for name, uart in (("camera_uart", cfg.camera_uart), ("radio_uart", cfg.radio_uart)):
+        categories[f"{name}.tx"] = [uart["tx"]]
+        categories[f"{name}.rx"] = [uart["rx"]]
+    for i, encoder in enumerate(cfg.encoders):
+        categories[f"encoder{i}.a"] = [encoder["a"]]
+        categories[f"encoder{i}.b"] = [encoder["b"]]
     return categories
 
 
@@ -68,7 +79,7 @@ class TestDefaultPinoutHasNoCollisions(unittest.TestCase):
     def test_the_guard_would_actually_catch_one(self) -> None:
         """A test this shape is worthless if it silently enumerates nothing."""
         cfg = PinConfig()
-        self.assertGreaterEqual(sum(len(p) for p in named_pins(cfg).values()), 30)
+        self.assertGreaterEqual(sum(len(p) for p in named_pins(cfg).values()), 51)
 
         collided = PinConfig({"ultrasonics": {"back": cfg.motors[1]["dir"]}})
         with self.assertRaises(AssertionError):

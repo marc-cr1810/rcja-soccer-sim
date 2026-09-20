@@ -54,7 +54,7 @@ from pathlib import Path
 # Ensure rcja_soccer and machine can be imported regardless of current working directory
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from machine import Runtime
+from board import Board
 from rcja_soccer import (
     Memory,
     clamp,
@@ -105,31 +105,66 @@ parser.add_argument("--token", default=None, help="server-issued at submit time"
 parser.add_argument("--debug", action="store_true", help="print telemetry")
 args = parser.parse_args()
 
-rt = Runtime.get()
+board = Board()
 
 
 def motors(powers, dribbler: float = 0.0, kicker: bool = False, say=None) -> dict:
     """Drive the motors, and optionally the dribbler and kicker.
 
-    The same shape `Robot.motors()` used to build - a plain command dict for
-    `rt.send_command(**...)`, so every branch below that used to `return
-    motors(...)` still can.
+    A plain command dict for `board.apply(**...)`, so every branch below can
+    `return motors(...)` and the loop at the bottom does the one call.
     """
-    command: dict = {"motors": list(powers)}
-    if dribbler:
-        command["dribbler"] = dribbler
-    if kicker:
-        command["kicker"] = True
-    if say is not None:
-        command["say"] = say
-    return command
+    # Every field, every tick, including the zeroes. `board.apply()` writes
+    # what it is given and leaves the rest alone - which is what hardware
+    # does - so leaving `dribbler` out does not mean "off", it means "keep
+    # whatever it was last doing". Omitting it when it was 0.0 left the
+    # roller gripping the ball through every shot: the striker asked for the
+    # kicker 505 times a match and scored nothing, because a ball held by
+    # the dribbler does not leave.
+    return {
+        "motors": list(powers),
+        "dribbler": dribbler,
+        "kicker": bool(kicker),
+        "say": say,
+    }
 
 #: Which goal this robot scores in is whatever end its team currently defends,
 #: which a kick-off places it on (rule 1.4/5.4 only swaps which end that is).
 #: The frame finds both goals in the camera and takes the nearer one as its
 #: own, so no ref-fed attack direction is involved — the direction of attack is
 #: the line between the goals, as seen.
-TEAM = args.team
+#:
+#: Our colour comes off the switch somebody set before the half, not off the
+#: command line: a real robot cannot see what colour it is painted, and the
+#: person who put it on the field can.
+TEAM = board.team
+NUMBER = board.robot
+
+#: How close to the centre spot a robot has to be, at a restart, to be the one
+#: taking the kick-off. The robot taking it is placed a chassis-width behind
+#: the ball; rule 5.4.6 keeps everybody else a goal-width off it. Nothing tells
+#: a robot whose kick-off it is - a referee tells a *person*, who then places
+#: the robots, and where you were placed is the message.
+KICKOFF_TAKER_RANGE = 400.0
+
+#: How far the ball has to be from the centre spot before the kick-off is over.
+#: Rule 5.4.7 asks for 50 mm; this is past it by enough that a position
+#: estimate still settling after the restart cannot call it early.
+KICKOFF_BALL_CLEAR = 200.0
+
+#: How long after the whistle the ball estimate is worth believing. A kick-off
+#: teleports every robot and the tracker is reset with them, so its first
+#: readings are of a ball it has not re-acquired. Calling the kick-off over on
+#: one of those throws the kick-off away: the striker skips its one job, pushes
+#: the ball off the spot instead of striking it, and the referee gives the
+#: restart to the other side (rule 5.4.7). Measured at 4.7 illegal kick-offs a
+#: match before this wait existed.
+KICKOFF_SETTLE = 0.35
+
+#: How long after a restart rule 5.4.7 still calls it a kick-off. The same
+#: three seconds `board.py` uses for the start button, kept here because a
+#: restart this robot noticed for itself has to be timed by the same clock.
+KICKOFF_WINDOW = 3.0
 frame = GoalFrame(TEAM)
 
 #: Inside the posts by enough that the ball fits and a keeper on the line has
@@ -166,13 +201,6 @@ def think(s, me):
     if not s.playing:
         return motors(coast())
 
-    # The ball is on the spot but play is not live until the whistle ends the
-    # countdown. This is easy to miss post-goal, where the clock is still
-    # running: `playing` is true while `kickoff.countdown` ticks down, and a
-    # robot that makes for the ball early is encroaching before the restart.
-    if s.kickoff.countdown > 0:
-        return motors(coast())
-
     # A tick-callback framework used to empty `me` at every kick-off, which
     # doubled as the signal that the previous passage of play was over. A
     # plain loop keeps its own `me` for good, so the rising edge of
@@ -186,6 +214,10 @@ def think(s, me):
         ball.reset()
         yaw.reset()
         effort.reset()
+        # Whose kick-off this is gets decided below, once there is a position
+        # to decide it from.
+        me.kickoff_ours = None
+        me.kickoff_done = False
 
     yaw.update(s)
     effort.update(s)
@@ -202,13 +234,30 @@ def think(s, me):
         ball.reset()
         yaw.reset()
         effort.reset()
+        # And a restart is one of the things it announces. Nobody pauses a
+        # game to tell a robot a kick-off is happening: somebody picks it up,
+        # puts it on a mark and play carries on. The start button catches a
+        # restart the referee actually stopped play for; being suddenly
+        # somewhere else catches the rest, which is most of them.
+        me.restart_at = s.clock
+        me.kickoff_ours = None
+        me.kickoff_done = False
     frame.update(s, heading, me_x, me_z)
     ball.update(s, heading, me_x, me_z)
     holding = s.ball_gate.held
 
+    # A kick-off is under way if either the button said so or this robot has
+    # just been moved. `s.kickoff.pending` is only ever a ceiling off the
+    # button; nothing sends an all-clear and nothing announces the restart in
+    # the first place.
+    restarted_at = me.get("restart_at")
+    restarting = s.kickoff.pending or (
+        restarted_at is not None and (s.clock - restarted_at) < KICKOFF_WINDOW
+    )
+
     if s.kickoff.pending and os.environ.get("RJC_DEBUG_KO"):
         print(
-            f"[KO] t={s.clock:6.2f} ours={s.kickoff.ours} me=({me_x:7.1f},{me_z:6.1f}) "
+            f"[KO] t={s.clock:6.2f} ours={me.get('kickoff_ours')} me=({me_x:7.1f},{me_z:6.1f}) "
             f"h={math.degrees(heading):6.1f} ball.seen={ball.seen} holding={holding} "
             f"ball=({ball.x if ball.seen else float('nan'):7.1f},"
             f"{ball.z if ball.seen else float('nan'):6.1f}) gate={s.ball_gate.held}",
@@ -228,12 +277,35 @@ def think(s, me):
     # driving while it waits has carried the ball off the spot and given the
     # kick-off away before the solenoid is ready. Standing still is legal for
     # the three seconds rule 5.4.7 allows, and the charge arrives first.
-    if s.kickoff.pending:
-        if not s.kickoff.ours:
+    # **The kick-off is over when the ball leaves the spot, not when a timer
+    # says so.** Nothing announces it. `kickoff.pending` is a three-second
+    # ceiling off the button, and a robot that waits the whole of it out at
+    # every restart has stopped playing football for most of the match - with
+    # forty restarts in a match that is two of its three minutes. So watch the
+    # ball: once it is clear of the spot the kick-off has happened, whoever
+    # took it.
+    if restarting and not me.get("kickoff_done", False):
+        since = s.kickoff.since
+        settled = since is not None and since > KICKOFF_SETTLE
+        if settled and ball.seen and math.hypot(ball.x, ball.z) > KICKOFF_BALL_CLEAR:
+            me.kickoff_done = True
+
+    if restarting and not me.get("kickoff_done", False):
+        if me.get("kickoff_ours") is None:
+            # Nobody says whose kick-off it is. A referee says it to a person,
+            # the person places the robots, and being placed behind the ball is
+            # how this robot finds out. Decided once per restart and kept, so a
+            # wobble in the position estimate cannot change its mind halfway
+            # through the kick-off.
+            me.kickoff_ours = math.hypot(me_x, me_z) < KICKOFF_TAKER_RANGE
+        if not me.kickoff_ours:
             # Rule 5.4.5 has us in our own box and 5.4.6 keeps us off the ball.
             return motors(drive(speed=0.0), dribbler=0.0)
         square = spin_towards(wrap_angle(frame.up_angle() - heading), yaw)
         if holding:
+            # Struck it, or about to. Either way this robot's kick-off is done
+            # and the next tick should be football.
+            me.kickoff_done = True
             say(me, "KICK_OFF_WAIT")
             return motors(drive(speed=0.0, spin=square), dribbler=1.0, kicker=True)
         # The approach must not chase the ball estimate. A kick-off starts you
@@ -781,7 +853,7 @@ def say(me, state: str, distance: float | None = None) -> None:
     if ticks % 25 == 0:
         extra = f"ball {distance:6.0f}" if distance is not None else " " * 11
         print(
-            f"[{args.team}-{args.number} striker] {state:<14} {extra}"
+            f"[{TEAM}-{NUMBER} striker] {state:<14} {extra}"
             f"  at ({locator.x:7.0f},{locator.z:6.0f})"
             f"  ball ({ball.x:7.0f},{ball.z:6.0f}) age {ball.age:.2f}",
             file=sys.stderr,
@@ -791,13 +863,15 @@ def say(me, state: str, distance: float | None = None) -> None:
 if __name__ == "__main__":
     memory = Memory()
     while True:
-        s = rt.sensors()
-        # A robot stood down under rule 5.7 gets no sensors worth reading -
-        # `off_field` says so, the same as `Robot._play()` used to skip
-        # calling `think()` on a "disabled" message rather than deciding
-        # anything from a frame that stopped updating.
-        if not rt.off_field:
+        s = board.read()
+        # A robot stood down under rule 5.7 is in somebody's hands beside the
+        # pitch, and the readings stop being about anything. There is no flag
+        # for that on a board; what there is, is a start button that is no
+        # longer held down.
+        if s.playing:
             command = think(s, memory)
             if command is not None:
-                rt.send_command(**command)
+                board.apply(**command)
+        else:
+            board.coast()
         time.sleep_ms(20)

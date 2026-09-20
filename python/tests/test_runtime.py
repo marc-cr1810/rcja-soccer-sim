@@ -1,6 +1,6 @@
 """Unit tests for machine.Runtime's full-frame reads, direct commands, and
-reconnect-with-timeout behavior - the seam that lets `machine` be the one
-connection a program needs, without a second `rcja_soccer.Robot` transport."""
+reconnect-with-timeout behaviour - the simulator's own back door, which is
+firmware's business and not a robot program's."""
 
 from __future__ import annotations
 
@@ -12,8 +12,9 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from machine._backend import Runtime
+from rcja_soccer.reading import Reading
 from machine.config import PinConfig, set_config
-from rcja_soccer.transport import TransportError, clear_join, use_transport
+from machine._transport import TransportError, clear_join, use_transport
 
 
 def _welcome() -> dict:
@@ -87,13 +88,14 @@ class TestRuntimeFullFrame(unittest.TestCase):
         rt.ensure_connected()
         return rt, connections
 
-    def test_sensors_exposes_the_full_frame_not_just_the_pin_subset(self) -> None:
+    def test_the_raw_frame_carries_what_no_pin_can(self) -> None:
         rt, _ = self._connected_runtime()
-        s = rt.sensors()
-        # Fields no Pin/ADC/I2C accessor exposes: camera, radio messages,
-        # wheel encoders, attack direction. If these are missing, a program
-        # using rcja_soccer.sense/frame on top of `machine` has nothing to
-        # read.
+        s = Reading(rt.raw_frame())
+        # What `rcja_soccer.simulator.frame()` is for. Two of these a robot
+        # genuinely cannot know - whose kick-off it is, and how long until the
+        # whistle - and the rest it knows only by doing the work: the camera
+        # through a UART parser, the radio through another, the encoders by
+        # counting edges. Debugging is the honest use of this.
         self.assertEqual(s.attack_direction, 1)
         self.assertEqual(len(s.encoders), 4)
         self.assertEqual(s.messages[0].body.ball, [100, 200])

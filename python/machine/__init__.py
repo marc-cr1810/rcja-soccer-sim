@@ -5,10 +5,17 @@ on a simulated field. A program written against this runs unmodified on a
 board, which is the whole point of the package: `Pin`, `PWM`, `ADC`, `I2C`,
 `Timer`, `time_pulse_us` and the rest mean here what they mean there.
 
+Everything a robot can see has a device. The ball is a ring of photodiodes or
+an I2C seeker, the walls are HC-SR04 echoes, the camera is a smart camera on
+UART 0, the team radio is a transparent link on UART 1, and the wheels click
+out quadrature counts you catch with `Pin.irq`. The two pins a human touches -
+the start button and the switches set between halves - are pins too, because
+on a real field that is exactly what they are.
+
 Where the simulator cannot honestly provide something it says so rather than
-inventing it - see `uart.py` and `spi.py`, which present their real APIs with
-nothing attached, and the note in `_sched.py` about why a `Timer` callback
-fires between ticks instead of preempting the main loop.
+inventing it: `spi.py` has nothing attached, and `_sched.py` explains why a
+`Timer` callback and a pin interrupt both arrive at a frame boundary rather
+than preempting the main loop.
 """
 
 from __future__ import annotations
@@ -17,12 +24,11 @@ import sys
 from typing import Any
 
 from . import _sched, _timebase, constants
-from ._backend import Runtime
+from ._backend import Runtime as _Runtime
 from .adc import ADC
 from .i2c import I2C, SoftI2C
 from .pin import Pin
 from .pwm import PWM
-from .reading import Reading
 from .rtc import RTC
 from .signal import Signal
 from .spi import SPI, SoftSPI
@@ -64,18 +70,18 @@ def freq(hz: int | None = None) -> int:
 
 def idle() -> None:
     """Yield processor execution."""
-    Runtime.get().sync_tick(1.0)
+    _Runtime.get().sync_tick(1.0)
 
 
 def lightsleep(ms: int | None = None) -> None:
     """Sleep the processor. Wakes with everything still where it was."""
-    Runtime.get().sync_tick(float(ms) if ms else 1.0)
+    _Runtime.get().sync_tick(float(ms) if ms else 1.0)
 
 
 def deepsleep(ms: int | None = None) -> None:
     """Deep sleep. A board wakes from this by resetting, so this one exits."""
     if ms:
-        Runtime.get().sync_tick(float(ms))
+        _Runtime.get().sync_tick(float(ms))
     sys.exit(0)
 
 
@@ -98,15 +104,15 @@ def time_pulse_us(pin: Pin | int, pulse_level: int = 1, timeout_us: int = 1_000_
     """Time a pulse on a pin, in microseconds - how an HC-SR04 is really read.
 
     Returns -2 when nothing echoes inside `timeout_us`, as the real function
-    does. See `Runtime.pulse_us()` for the distance-to-microseconds model.
+    does. See `_backend.Runtime.pulse_us()` for the distance-to-microseconds model.
     """
     pin_id = pin.id if isinstance(pin, Pin) else int(pin)
-    return Runtime.get().pulse_us(pin_id, timeout_us)
+    return _Runtime.get().pulse_us(pin_id, timeout_us)
 
 
 def unique_id() -> bytes:
     """Return 6-byte unique identifier (MAC-like)."""
-    rt = Runtime.get()
+    rt = _Runtime.get()
     return f"RCJA{rt.number:02d}".encode("ascii")
 
 
@@ -119,8 +125,6 @@ __all__ = [
     "UART",
     "WDT",
     "Pin",
-    "Reading",
-    "Runtime",
     "Signal",
     "SoftI2C",
     "SoftSPI",

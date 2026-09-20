@@ -2,7 +2,7 @@
 
 This is about the **submission** — the folder you push to a venue server and
 the shape it has to be in. For the sensor/actuator API itself — what `s.ball`
-means, why bearings are quantised, what `rt.send_command(...)` takes — see
+means, why bearings are quantised, what `board.apply(...)` takes — see
 [python/README.md](../python/README.md), and
 [docs/micropython.md](micropython.md) for the board and its pinout. This page
 is about packaging that program so a server can validate it, sandbox it, and
@@ -20,14 +20,20 @@ The folder needs:
 ```
 myrobot/
   manifest.json
-  robot.py       # or whatever manifest.json names as the entry point
-  helpers.py     # optional — anything the entry point imports locally
+  main.py        # or whatever manifest.json names as the entry point
+  board.py       # the pin numbers, and one read() over all of them
+  camera.py      # the camera's packet format
+  radio.py       # rule 4.2.5
 ```
+
+That is what a real robot project looks like: your files, importing `machine`
+and nothing else. A new team gets all four, and every one of them is theirs to
+change — `board.py` first, when the wiring is not this wiring.
 
 `manifest.json`:
 
 ```json
-{ "team": "ACT", "robot": 1, "entry": "robot.py" }
+{ "team": "ACT", "robot": 1, "entry": "main.py" }
 ```
 
 | field | rule |
@@ -51,9 +57,9 @@ When a server spawns it for a match it passes five arguments:
 --team violet --number 1 --name "ACT Robotics" --url <address> --token <token>
 ```
 
-**You do not have to do anything with them.** `machine.Runtime` reads them off
-`sys.argv` itself when it connects, so a plain MicroPython program is a
-complete, valid submission:
+**You do not have to do anything with them.** The runtime underneath `machine`
+reads them off `sys.argv` itself when it connects, so a plain MicroPython
+program is a complete, valid submission:
 
 ```python
 from machine import Pin, PWM
@@ -91,14 +97,17 @@ at push time with a clear reason rather than on match day. Running your own
 script by hand with no `--token` is unaffected.
 
 `examples/striker.py` and `examples/goalie.py` are the canonical version of
-this convention — copy from there.
+this convention — copy from there. `examples/raw_hardware.py` is the other
+end of the range: one file, `machine` and the standard library, nothing else at
+all.
 
 ## Being taken off, and coming back
 
 Rule 5.7 takes a damaged robot off the field for thirty seconds. While you are
 off, **your program keeps running but stops being asked anything**: no sensor
-frames arrive, `rt.off_field` goes true, and the server tells you why about
-once a second. You will see it on your own terminal:
+frames arrive, the start button goes up — because somebody has picked the robot
+up — and the server tells you why about once a second. You will see it on your
+own terminal:
 
 ```
 [Violet/1] off the field under rule 5.7.1 (damaged); back in 30s
@@ -112,6 +121,12 @@ When you are put back, rule 5.7.4 replaces you at a corner of your own penalty
 box, so whatever you were chasing has moved. The first frame after you return
 has **`s.returned`** set, and it is set on that one frame only.
 
+**It does not tell you a removal is what happened.** `returned` is true after
+*any* restart, because to the robot they are the same event: somebody put it
+down and pressed start. A kick-off looks identical. That is not a gap in the
+simulator — it is what a robot on a real field knows, which is that it is
+suddenly somewhere else.
+
 **Nothing is cleared for you**, and that is deliberate. Both habits are real
 and both are legal: some teams switch the robot off and on again, so the
 software starts from scratch; others leave it running with a start/stop button,
@@ -121,7 +136,7 @@ the first, ask for it:
 
 ```python
 while True:
-    s = rt.sensors()
+    s = board.read()
     if s.returned:
         # Off and on again: forget everything, we have been moved.
         locator.reset()
@@ -140,7 +155,7 @@ against a local server the same way you always have:
 
 ```bash
 bun run serve -- --agents            # in one terminal
-cd python && PYTHONPATH=. python3 myrobot/robot.py --team violet   # in another
+cd python && PYTHONPATH=. python3 myrobot/main.py --team violet   # in another
 ```
 
 The server shows a field as soon as it starts, and each robot appears on it as

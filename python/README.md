@@ -7,31 +7,44 @@ the next set of readings, fifty times a second.
 ```python
 import time
 
-from machine import Runtime
-from rcja_soccer import coast, drive
+from board import Board
 
-rt = Runtime.get()
+board = Board()
 
 while True:
-    s = rt.sensors()
-    if s.ball is None:          # an opponent is blocking the infrared
-        rt.send_command(motors=coast())
+    s = board.read()
+    if not s.playing:
+        board.coast()
+    elif s.ball is None:          # an opponent is blocking the infrared
+        board.coast()
     else:
-        rt.send_command(motors=drive(bearing=s.ball.bearing, speed=0.8), dribbler=1.0)
+        board.apply(motors=drive(bearing=s.ball.bearing, speed=0.8), dribbler=1.0)
 
     time.sleep_ms(20)
 ```
 
-That is a MicroPython program, not something shaped like one. `machine` is the
-hardware API a real ESP32 or RP2040 gives you, and it is what owns the
-connection here — so the same file runs on a board with the motors actually
-wired to those pins. You can skip `rcja_soccer` entirely and drive `Pin`, `PWM`
-and `ADC` directly if you would rather; see
-[docs/micropython.md](../docs/micropython.md) for the board, the pinout and
-what `Timer` and the rest do here.
+That is a MicroPython program, not something shaped like one. `board.py` is a
+file in your own folder, and every line of it is `machine` — the hardware API a
+real ESP32 or RP2040 gives you. Nothing is hidden and nothing is privileged:
+the ball is eight photodiodes you take a vector sum of, the camera is a serial
+port you parse packets from, the wheels are quadrature counts you catch in an
+interrupt. See [docs/micropython.md](../docs/micropython.md) for the board, the
+pinout and the camera's protocol.
 
-`rcja_soccer` is an ordinary library on top: functions that take readings and
-return numbers, with no network code of its own. No dependencies, on purpose.
+Your folder starts with four files, and they are all yours to change:
+
+| | |
+|---|---|
+| `main.py` | your robot. The only one you need on day one. |
+| `board.py` | the wiring: pin numbers in, one `read()` out. |
+| `camera.py` | the camera's packet format, about ninety lines of parsing. |
+| `radio.py` | rule 4.2.5, about fifteen. |
+
+`rcja_soccer` is an optional library on top: functions that take readings and
+return numbers, with no network code of its own. **Nothing requires it** —
+`examples/raw_hardware.py` is a complete legal robot that imports only
+`machine`. What it is for is the arithmetic that is tedious to get right, and
+`drive()` above is the smallest piece of it. No dependencies, on purpose:
 `pip install` pulls in nothing at all, because the schools this league exists
 to reach are the ones where pip is behind a proxy, offline, or not something a
 student is allowed to run.
@@ -104,10 +117,22 @@ ball position and no map: a real robot does not have those, so neither do you.
 | `s.camera.ball` | `.bearing` and `.range`, or `None`. The only real range you get. |
 | `s.camera.fresh` | Whether the camera actually updated this tick. |
 | `s.ball_gate.held` | Whether the dribbler has the ball. |
-| `s.messages` | What your team mate said (rule 4.2.5). |
-| `s.kickoff.pending` / `.ours` | A kick-off is live and 5.4.7 applies. |
-| `s.kickoff.countdown` | Seconds left before the whistle makes the kick-off live; hold still while it's above 0. |
-| `s.playing` | False before the whistle and at a stoppage. |
+| `s.messages` | What your team mate said (rule 4.2.5), with `.age`. |
+| `s.kickoff.pending` | A restart happened less than three seconds ago. |
+| `s.playing` | Whether the start button is down. |
+| `s.returned` | True on the first tick after any restart. |
+| `s.team` / `s.robot` / `s.attack_direction` | The switches somebody set before the half. |
+| `s.clock` | `time.ticks_ms()` in seconds. Never stops. |
+
+**Three of these say less than you might expect, and that is not an oversight.**
+`kickoff.pending` is a ceiling off the start button, not a referee's state:
+nothing tells a robot whose kick-off it is, nothing sends an all-clear when it
+is over, and being picked up for a 5.7.1 removal looks exactly the same as a
+kick-off, because physically it is — somebody put the robot down and pressed
+start. Working out whose it is (you were placed behind the ball) and when it is
+over (the ball left the spot) is the robot's job, and both example robots show
+one way. `rcja_soccer.simulator.frame()` will hand you the server's own answers
+while you are debugging, and is named so you do not ship it.
 
 Your own state is whatever you keep in local variables outside the loop —
 there is no framework holding it for you, and nothing is reset on your behalf.
@@ -220,34 +245,42 @@ allows; carrying is not.
 ## What your robot can do
 
 ```python
-rt.send_command(motors=powers, dribbler=0.0, kicker=False, say=None)
+board.apply(motors=powers, dribbler=0.0, kicker=False, say=None)
 ```
 
 `powers` is four numbers, −1 to 1, one per wheel — `coast()` is four zeros.
 `drive(bearing, speed, spin)` works them out for you and is ordinary code in
 `rcja_soccer/drive.py` — read it, and replace it when you want to beat someone.
 
-Nothing is sent when you call this. It stages the command, and your next
-`time.sleep_ms()` is what puts it on the wire and waits for the next frame. A
-loop that never sleeps never sends anything at all.
+**What you leave out is left alone.** `apply()` writes the outputs you name and
+does not touch the rest, because that is what hardware does: a PWM you do not
+write keeps the duty you last gave it. So `apply(motors=...)` with no
+`dribbler` does not stop the roller — it leaves it running, which is an easy
+way to hold onto the ball through a shot you meant to take. Set every output
+every tick unless you mean otherwise.
 
-You can drive the motors through `machine` pins instead, which is what a
-program written for a real board does:
+Under it are the individual writes, and they are all `board.py` is doing:
 
 ```python
-fl = PWM(Pin(12), freq=1000, duty_u16=0)
-fl_dir = Pin(13, Pin.OUT)
+board.motors(powers)       # PWM duty and a direction pin, per wheel
+board.dribbler(1.0)        # PWM duty
+board.kick()               # a rising edge on the kicker pin
+board.coast()              # motors and dribbler to zero
+board.radio.send({"ball": [x, z]})
 ```
 
-Both work, on one connection. If you use both in the same tick,
-`send_command()` wins and the pin writes are dropped.
+Nothing is sent when you call any of them. They set pins, and your next
+`time.sleep_ms()` is what puts the frame on the wire and waits for the next set
+of readings. A loop that never sleeps never sends anything at all.
 
-`say` reaches your team mate under rule 4.2.5. It expires after 0.4 seconds, so
-it is for "I have the ball", not for a plan.
+The kicker needs time to charge and will not tell you when it is ready.
+`say` reaches your team mate under rule 4.2.5 and the link forgets it after
+0.4 seconds, so it is for "I have the ball", not for a plan.
 
 ## What comes in the box
 
-Four modules, none of which know anything your robot does not.
+Four modules, none of which know anything your robot does not, and none of
+which you have to use.
 
 | | |
 |---|---|
@@ -278,12 +311,12 @@ thirty seconds. If you would rather limp than stop, catch it yourself:
 
 ```python
 while True:
-    s = rt.sensors()
+    s = board.read()
     try:
         think(s)
     except Exception as error:
         print(error, file=sys.stderr)
-        rt.send_command(motors=coast())
+        board.coast()
     time.sleep_ms(20)
 ```
 

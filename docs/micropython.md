@@ -25,43 +25,84 @@ No simulator imports, no decorators, no boilerplate. `machine` is what owns the
 connection, the same way a real board has one already, and `time.sleep_ms()` is
 what advances it.
 
-## The one runtime
+## Every sensor is a device
 
-There used to be two: `rcja_soccer.Robot` with a tick decorator, and `machine`
-with a real loop. They each opened their own connection for the same robot, so
-a program touching both was rejected every tick and silently stopped sending.
-That is gone. **`machine` is the only thing that connects, and the loop is
-yours.**
+There is no privileged reading. Everything the robot can know comes off a pin,
+a bus or a serial port, and if the hardware could not tell you something, this
+cannot tell you either.
 
-`rcja_soccer` is still here and is worth using — but it is now a plain library
-of functions that take readings and return numbers. It has no network code of
-its own. The two meet at two methods on the runtime:
+| What | How you read it |
+| :--- | :--- |
+| The ball | Eight photodiodes on ADCs, or an IR seeker on I²C. Bearing is a vector sum you do yourself. |
+| Heading, turn rate | An ADC each, or a BNO055 / MPU-6050 over I²C with their real register maps. |
+| The walls | Four HC-SR04s. `time_pulse_us()` for the echo, or an ADC for a pre-scaled distance. |
+| The white line | Eight reflectance sensors. White line, green carpet and *black* markings are three different readings. |
+| The goals and the ball, seen | A smart camera on **UART 0**, sending framed packets. |
+| Your team mate | A transparent radio on **UART 1**. Whatever you write comes out of their UART. |
+| The wheels | Quadrature encoders. Count the edges with `Pin.irq()`. |
+| Whether to play | A start button on a pin. Somebody presses it at the whistle. |
+| Which end, which colour, which robot | Switches somebody set before the half. |
 
-```python
-import time
-from machine import Runtime
-from rcja_soccer import coast, drive
+`python/examples/board.py` is one way to wire all of that into a single
+`read()`, and it is 300 lines of ordinary `machine` calls with no imports a
+board lacks. Copy it, change the pin numbers, and it is yours.
 
-rt = Runtime.get()
+### The camera speaks a protocol
 
-while True:
-    s = rt.sensors()                    # the whole frame, as attributes
-    if s.ball is None:
-        rt.send_command(motors=coast())
-    else:
-        rt.send_command(motors=drive(bearing=s.ball.bearing, speed=0.8))
-    time.sleep_ms(20)
+A 360° view is not a lens on your microcontroller. It is a smart camera — an
+OpenMV, a Pi, a spare ESP32 — looking into a mirror, running vision code of its
+own and sending you the answer. So the camera here is bytes on a serial port:
+
+```
+aa 55 | len:u8 | payload | crc8            crc over the payload, poly 0x07
+
+payload, little-endian:
+  flags:u8        bit0 set if there were more blobs than would fit
+  n_blobs:u8
+  present:u8      bit0 cyan goal, bit1 yellow goal, bit2 ball
+  cyan   bearing:i16 (milliradians)  range:u16 (mm)
+  yellow bearing:i16                 range:u16
+  ball   bearing:i16                 range:u16
+  n_blobs x { colour:u8 (0 cyan, 1 yellow)
+              start:i16  end:i16  height:u16 }   all milliradians
 ```
 
-`rt.sensors()` gives you everything the server sent — camera, team radio,
-encoders, attack direction — not just the pin-shaped subset `ADC` and `Pin`
-expose. `rt.send_command()` sets the whole actuator frame at once, for a
-program built on `drive()` rather than on named motor pins. Use either style,
-or both; there is only one connection underneath.
+`python/examples/camera.py` parses it in about ninety lines, and reading it is
+the fastest way to understand what a camera actually hands a robot.
 
-One rule if you mix them: `send_command()` replaces the pin-derived frame for
-that tick. Call it and then write a `Pin`, and the `Pin` write is the one that
-gets dropped.
+**A packet arrives only when the camera has a new picture.** It runs at 30 fps
+against a 50 Hz loop, so on roughly two ticks in five `uart.any()` is zero.
+That silence *is* the "is this frame new" flag, and a robot that treats every
+tick's sighting as new information builds a controller that oscillates.
+
+### Three things a board cannot know
+
+Not "does not expose" — cannot. A robot on a real field is not told these, and
+neither is this one:
+
+- **Whose kick-off it is.** A referee tells a *person*, who places the robots.
+  Being placed a chassis-width behind the ball is the whole of the message.
+- **Whether you were picked up or the half restarted.** Both are somebody
+  putting the robot down and pressing start.
+- **That the kick-off is over.** Nothing sends an all-clear. The ball leaving
+  the spot is the signal, and `examples/striker.py` shows one way to read it.
+
+`rcja_soccer.simulator.frame()` hands you the match server's own frame, these
+fields included. It is named so that nobody mistakes it for hardware: it is for
+working out why your locator disagrees with the field, not for building a
+season on.
+
+## The optional library
+
+`rcja_soccer` is a plain library of functions that take numbers and return
+numbers. It has no network code and nothing privileged, and **nothing requires
+it** — `examples/raw_hardware.py` is a complete legal robot that imports only
+`machine`.
+
+What it is for is the arithmetic that is tedious to get right: wheel mixing
+(`drive`), the rulebook's geometry (`field`), working out where you are from a
+sonar you should not trust (`sense.Locator`), and which way you are attacking
+(`frame.GoalFrame`). Read it, copy it, replace it.
 
 ## Time is how the simulation advances
 
@@ -99,9 +140,10 @@ That host-time component is deliberate: counting whole frames alone would
 leave the loop above spinning forever, because nothing in it sleeps. The
 consequence is that `ticks_ms()` is not identical between two runs of the same
 headless match — it can differ by up to one frame's worth. If you need a clock
-that is exactly reproducible, use `rt.sensors().clock`, which is match time in
-seconds. If you need one that never stops, use `ticks_ms()`: match time pauses
-at every stoppage and half-time, and `ticks_ms()` does not.
+that is exactly reproducible, use `rcja_soccer.simulator.frame().clock`, which
+is match time in seconds — and is the simulator's own, not something a board
+has. `ticks_ms()` is the clock a board has, and it never stops; match time
+pauses at every stoppage and half-time.
 
 ## The virtual board
 
@@ -122,6 +164,15 @@ at every stoppage and half-time, and `ticks_ms()` does not.
 | Gyro | 22 | ADC | rate, −10…+10 rad/s onto 0–65535 |
 | Ultrasonics | front 2, back 10, left 9, right 11 | ADC or `time_pulse_us` | distance |
 | IMU / IR seeker | — | I²C `0x68`, `0x28`, `0x1C`, `0x29` | heading, rate, ball direction |
+| Camera | tx 20, rx 24 | UART 0, 115200 | framed packets, see above |
+| Team radio | tx 29, rx 30 | UART 1, 9600 | whatever you write |
+| Start button | 31 | digital in | 1 while somebody is holding it down |
+| Team / robot / end switches | 40, 41, 42 | digital in | violet or lime, 1 or 2, which way you attack |
+| Wheel encoders (4) | 43–50 | digital in, A/B | 256 counts a revolution, all edges |
+
+That is 51 named pins, more than a bare ESP32 has, and saying so is better than
+pretending: a real robot at this sensor count reaches for a bigger part or a
+multiplexer, and `robot_config.py` below is where a team says which.
 
 Every number above is distinct, and a test enforces that. It has to be: one
 physical pin cannot be both a motor direction output and a sensor input, and a
@@ -170,7 +221,12 @@ Alongside it: `micropython` (`const`, the `native`/`viper` decorators,
 `uzlib`, `uasyncio`. Each one *is* its standard-library module, not a copy, so
 `ustruct is struct`.
 
-### Three places it is honestly different
+**And nothing else.** Every name `machine` exports is one real MicroPython has.
+There used to be a `machine.Runtime` here, which no board could possibly have,
+and it was what the docs told students to build a robot on; the connection it
+owned is still there, one layer down, where firmware belongs.
+
+### Four places it is honestly different
 
 **`Timer` fires between frames, not as an interrupt.** Your callback runs after
 one frame arrives and before the next goes out, so it sees this tick's readings
@@ -180,11 +236,18 @@ cost is resolution: the clock only moves in 20 ms steps, so `period=5` fires
 once per tick rather than four times. A callback that raises prints its
 traceback and the match carries on, as it would on a board.
 
-**`UART` and `SPI` have nothing attached.** The simulator models a robot on a
-field, not the serial device you plugged into yours. Both present their real
-API: writes are accepted and discarded, reads come back empty. That is
-deliberate — a bus inventing plausible bytes would read exactly like a working
-sensor and mean nothing.
+**`Pin.irq()` delivers a whole frame's edges at once.** Same reason, and it
+lands harder, because a wheel turns through dozens of encoder counts in one
+20 ms frame. Every edge is delivered, in order, and an edge carries the state
+the pins were in when it happened — so a quadrature decoder that reads B on an
+edge of A gets the right count *and* the right direction. What is not real is
+*when*: they all arrive at the frame boundary. Count them and you are exactly
+right; timestamp them and you are not.
+
+**`SPI` has nothing attached.** The camera is on UART 0 and the radio on
+UART 1, but SPI has no device on the other end and says so: writes are accepted
+and discarded, reads come back `0xff`. That is deliberate — a bus inventing
+plausible bytes would read exactly like a working sensor and mean nothing.
 
 **There is no memory map.** `mem8`/`mem16`/`mem32` and `bitstream` are absent
 rather than faked, for the same reason.

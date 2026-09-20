@@ -39,8 +39,7 @@ const canSpawn = spawnSync('python3', ['--version']).status === 0 && sandboxAvai
 /** A robot that joins and then does nothing, which is all these tests need. */
 const COAST_ROBOT = `
 import argparse, time
-from machine import Runtime
-from rcja_soccer import coast
+from machine import ADC, PWM, Pin
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--team", default="violet")
@@ -50,10 +49,11 @@ parser.add_argument("--url", default="ws://localhost:8080/agent")
 parser.add_argument("--token", default=None)
 args = parser.parse_args()
 
-rt = Runtime.get()
+wheel = PWM(Pin(12), freq=1000, duty_u16=0)
+ball = ADC(Pin(4))
 while True:
-    rt.sensors()
-    rt.send_command(motors=coast())
+    ball.read_u16()
+    wheel.duty_u16(0)
     time.sleep_ms(20)
 `;
 

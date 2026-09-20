@@ -95,16 +95,22 @@ describe('getting in', () => {
     expect(status).toBe(200);
     expect(payload.team).toBe('ACT Robotics');
     expect(payload.robot).toBe(1);
-    expect(payload.files.map((f: any) => f.name).sort()).toEqual(['manifest.json', 'robot.py']);
+    expect(payload.files.map((f: any) => f.name).sort()).toEqual([
+      'board.py',
+      'camera.py',
+      'main.py',
+      'manifest.json',
+      'radio.py',
+    ]);
   });
 
   it('opens robot 2 separately from robot 1', async () => {
     const { port } = await start();
-    await call(port, 'save', 'act-secret', { robot: 1, name: 'robot.py', content: 'first' });
+    await call(port, 'save', 'act-secret', { robot: 1, name: 'main.py', content: 'first' });
     const second = await call(port, 'open', 'act-secret', { robot: 2 });
 
     expect(second.payload.robot).toBe(2);
-    const entry = second.payload.files.find((f: any) => f.name === 'robot.py');
+    const entry = second.payload.files.find((f: any) => f.name === 'main.py');
     expect(entry.content).not.toBe('first');
   });
 });
@@ -112,12 +118,12 @@ describe('getting in', () => {
 describe('whose workspace it is', () => {
   it('comes from the token, never from the body', async () => {
     const { port } = await start();
-    await call(port, 'save', 'act-secret', { name: 'robot.py', content: 'mine' });
+    await call(port, 'save', 'act-secret', { name: 'main.py', content: 'mine' });
 
     // NSW asks for ACT's folder by every name it can think of. It gets its own.
     const asNsw = await call(port, 'open', 'nsw-secret', { team: 'ACT Robotics' });
     expect(asNsw.payload.team).toBe('NSW');
-    const robot = asNsw.payload.files.find((f: any) => f.name === 'robot.py');
+    const robot = asNsw.payload.files.find((f: any) => f.name === 'main.py');
     expect(robot.content).not.toBe('mine');
   });
 });
@@ -181,7 +187,7 @@ describe.skipIf(!sandboxAvailable())('submitting a workspace', () => {
     // The same tree `python/submit.py` writes into, with the same join token
     // beside it — the entry route must not change what a submission is.
     const dir = join(submissionsDir, 'act-robotics', '1');
-    expect(await readFile(join(dir, 'robot.py'), 'utf8')).toContain('Runtime.get()');
+    expect(await readFile(join(dir, 'main.py'), 'utf8')).toContain('Board()');
     const token = await readFile(join(dir, 'token'), 'utf8');
     expect(token.length).toBeGreaterThan(20);
   }, 60_000);
@@ -189,7 +195,7 @@ describe.skipIf(!sandboxAvailable())('submitting a workspace', () => {
   it("reports the validator's reason rather than a stack trace", async () => {
     const { port } = await start();
     await call(port, 'open', 'act-secret');
-    await call(port, 'save', 'act-secret', { name: 'robot.py', content: 'def broken(:\n' });
+    await call(port, 'save', 'act-secret', { name: 'main.py', content: 'def broken(:\n' });
 
     const submitted = await call(port, 'submit', 'act-secret');
     expect(submitted.status).toBe(400);
@@ -202,7 +208,7 @@ describe.skipIf(!sandboxAvailable())('submitting a workspace', () => {
     await call(port, 'open', 'act-secret');
     await call(port, 'save', 'act-secret', {
       name: 'manifest.json',
-      content: JSON.stringify({ team: 'NSW', robot: 1, entry: 'robot.py' }),
+      content: JSON.stringify({ team: 'NSW', robot: 1, entry: 'main.py' }),
     });
 
     const submitted = await call(port, 'submit', 'act-secret');

@@ -80,3 +80,50 @@ I2C_ADDR_MPU6050 = 0x68
 I2C_ADDR_BNO055 = 0x28
 I2C_ADDR_IR_SEEKER = 0x1C
 I2C_ADDR_VL53L0X = 0x29
+
+
+# --- The peripherals a soccer robot has that a bare GPIO cannot carry --------
+#
+# Everything above this line is a sensor wired to a pin. Everything below is a
+# device with a protocol: a camera that has already done its vision and sends
+# you the answer, a radio that carries bytes to your team mate, encoders that
+# click, and the switches a human sets before a half.
+#
+# Note the board is now up to 51 named GPIO, more than a bare ESP32 has. That
+# is honest rather than sloppy: a real robot at this sensor count reaches for a
+# bigger part or a multiplexer, and `robot_config.py` is how a team says which.
+
+#: The smart camera. A 360 degree view means an OpenMV or a Pi looking into a
+#: mirror, running the team's own vision code and sending the result down a
+#: serial line - not a Pixy, whose 60 degree lens could not see this field.
+DEFAULT_CAMERA_UART = {"id": 0, "tx": 20, "rx": 24, "baudrate": 115200}
+
+#: The team radio (rule 4.2.5). A transparent serial link - an HC-12, an XBee,
+#: a pair of nRF24s behind a bridge - so whatever you write comes out of your
+#: team mate's UART and nothing translates it on the way.
+DEFAULT_RADIO_UART = {"id": 1, "tx": 29, "rx": 30, "baudrate": 9600}
+
+#: The start button. A human presses it at the whistle and lets go at the
+#: stoppage, which is the only way a real robot ever learns that play has
+#: begun.
+DEFAULT_START_PIN = 31
+
+#: The switches a human sets between halves, because a robot cannot see its own
+#: colour and the ends swap at half time (rules 1.4/5.4).
+DEFAULT_TEAM_PIN = 40   # low = violet, high = lime
+DEFAULT_ROBOT_PIN = 41  # low = robot 1, high = robot 2
+DEFAULT_SIDE_PIN = 42   # low = attacking -x (cyan), high = attacking +x (yellow)
+
+#: Quadrature encoders, one A/B pair per wheel, in the same order as
+#: DEFAULT_MOTOR_PINS.
+DEFAULT_ENCODER_PINS = [
+    {"a": 43, "b": 44},
+    {"a": 45, "b": 46},
+    {"a": 47, "b": 48},
+    {"a": 49, "b": 50},
+]
+
+#: Counts per wheel revolution, counting every edge on both channels. A 64
+#: pulse-per-revolution encoder read in 4x, which is an ordinary N20 with the
+#: gearbox this class of robot uses.
+DEFAULT_ENCODER_CPR = 256

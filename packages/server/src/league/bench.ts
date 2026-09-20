@@ -866,7 +866,7 @@ export async function runBench(
    * through a shell, and with no `--spawn` this address is printed for a
    * person to paste into their own robot. Both need somewhere anything can
    * dial. Handing out `unix://...?path=` instead worked only for programs
-   * built on `python/rcja_soccer/_ws.py`, which understands that convention -
+   * built on `python/machine/_ws.py`, which understands that convention -
    * every other language, including the one-line Node agents this file's own
    * tests use, cannot open it at all, and a person cannot type it.
    */
@@ -1279,7 +1279,7 @@ export function diagnose(r: BenchResult): Finding[] {
         message: `missed ${robot.missed} of ${cycles} control cycles (${pct(robot.missed, cycles)}%), worst unbroken run ${robot.worstRun}.`,
         advice:
           'The previous command stands on a missed cycle, so this is a robot acting on ' +
-          'stale decisions. Check the tick function is not doing something expensive.',
+          'stale decisions. Check the loop is not doing something expensive.',
       });
     }
   }

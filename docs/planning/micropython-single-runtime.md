@@ -1,5 +1,16 @@
 # Retire the dual-runtime "Hybrid Mode"; make `machine` the one connection and `rcja_soccer` a pure library
 
+> **Done, and since superseded in one respect.** The plan below turned on a
+> load-bearing fact: `Runtime` already held the whole server frame, so
+> "no camera/radio/encoder simulation needs building". That was true and it is
+> what made the slice cheap — but it left `machine.Runtime` as the documented
+> way to write a robot, and `Runtime` is not a name any MicroPython board has.
+> Every sensor now has a device instead: the camera on a UART, the radio on
+> another, encoders as quadrature counts through a working `Pin.irq()`, and the
+> start button and end switches a human operates. `machine` exports only real
+> MicroPython names and the back door moved to `rcja_soccer.simulator`. See
+> [docs/micropython.md](../micropython.md).
+
 ## Context
 
 `rcja_soccer.Robot` (event-driven: `@robot.tick` + `robot.run()`) and `machine`

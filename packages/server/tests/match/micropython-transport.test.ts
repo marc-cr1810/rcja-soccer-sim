@@ -10,8 +10,7 @@ const PYTHON_DIR = resolve(import.meta.dirname, '../../../../python');
 
 const MICROPYTHON_HARNESS = `
 import json, sys
-import rcja_soccer
-from rcja_soccer.transport import TransportError
+from machine._transport import TransportError, use_transport
 from machine import Pin, PWM, ADC
 import time
 
@@ -68,7 +67,7 @@ def connect(url):
     opened.append(url)
     return channel
 
-rcja_soccer.use_transport(connect)
+use_transport(connect)
 
 # MicroPython Hardware Init
 pwm0 = PWM(Pin(12), freq=1000, duty_u16=32768)  # 50% duty

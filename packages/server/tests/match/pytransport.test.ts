@@ -30,9 +30,9 @@ const PYTHON_DIR = resolve(import.meta.dirname, '../../../../python');
  */
 const HARNESS = `
 import json, sys
-import rcja_soccer
-from rcja_soccer.transport import TransportError
+from machine._transport import TransportError, use_join, use_transport
 from rcja_soccer.memory import Memory
+from rcja_soccer.reading import Reading
 from machine._backend import Runtime
 
 opened = []
@@ -73,8 +73,8 @@ def connect(url):
         opened.append(url)
     return channel
 
-rcja_soccer.use_transport(connect)
-rcja_soccer.use_join(token="secret")
+use_transport(connect)
+use_join(token="secret")
 
 rt = Runtime()
 rt.team = "violet"
@@ -89,14 +89,14 @@ try:
     rt.ensure_connected()
 
     # Frame 0.0
-    s = rt.sensors()
+    s = Reading(rt.raw_frame())
     me.n = me.get("n", 0) + 1
     rt.send_command(motors=[0.1, 0.2, 0.3, 0.4], say={"n": me.n})
     rt.sync_tick(20)
 
     # Frame 1.0 (raises, coast)
     try:
-        s = rt.sensors()
+        s = Reading(rt.raw_frame())
         if s.clock == 1.0:
             raise RuntimeError("a bug in somebody's robot")
     except RuntimeError:
@@ -104,7 +104,7 @@ try:
     rt.sync_tick(20)
 
     # Frame 2.0 (kickoff pending, clears memory)
-    s = rt.sensors()
+    s = Reading(rt.raw_frame())
     if s.kickoff.pending:
         me.clear()
     me.n = me.get("n", 0) + 1
@@ -112,11 +112,11 @@ try:
     rt.sync_tick(20)
 
     # Frame 3.0
-    s = rt.sensors()
+    s = Reading(rt.raw_frame())
     rt.sync_tick(20)
 
     # Frame 4.0 - next tick will exhaust script and raise TransportError
-    s = rt.sensors()
+    s = Reading(rt.raw_frame())
     rt.sync_tick(20)
 except TransportError as error:
     raised = str(error)

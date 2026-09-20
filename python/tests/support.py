@@ -20,24 +20,36 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from machine import _sched, _timebase
 from machine._backend import Runtime
 from machine.config import PinConfig, set_config
-from rcja_soccer.transport import TransportError, clear_join, use_transport
+from machine._transport import TransportError, clear_join, use_transport
 
 
-def sensor_frame(clock: float = 0.0) -> dict[str, Any]:
-    return {
-        "type": "sensors",
-        "frame": {
-            "clock": clock,
-            "team": "violet",
-            "playing": True,
-            "kickoff": {"pending": False},
-            "ball": {"strength": 0.5, "bearing": 0.0},
-            "compass": {"heading": 0.0},
-            "gyro": {"rate": 0.0},
-            "lines": [],
-            "range": {"front": 500.0, "back": None, "left": 1200.0, "right": None},
+def sensor_frame(clock: float = 0.0, **overrides: Any) -> dict[str, Any]:
+    """One frame, shaped like the server's. `overrides` replace top-level keys."""
+    frame: dict[str, Any] = {
+        "clock": clock,
+        "team": "violet",
+        "robot": 1,
+        "attackDirection": 1,
+        "playing": True,
+        "returned": False,
+        "kickoff": {"pending": False, "ours": False, "countdown": 0.0},
+        "ball": {"strength": 0.5, "bearing": 0.0},
+        "compass": {"heading": 0.0},
+        "gyro": {"rate": 0.0},
+        "lines": [],
+        "range": {"front": 500.0, "back": None, "left": 1200.0, "right": None},
+        "encoders": [0.0, 0.0, 0.0, 0.0],
+        "camera": {
+            "goals": {"cyan": None, "yellow": None},
+            "goalBlobs": {"cyan": [], "yellow": []},
+            "ball": None,
+            "fresh": False,
         },
+        "ballGate": {"held": False},
+        "messages": [],
     }
+    frame.update(overrides)
+    return {"type": "sensors", "frame": frame}
 
 
 class ScriptedChannel:
@@ -48,10 +60,13 @@ class ScriptedChannel:
     instead, so this one never runs out.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, frames: list[dict[str, Any]] | None = None) -> None:
         self.sent: list[dict[str, Any]] = []
         self.frames = 0
         self.welcomed = False
+        #: Specific frames to serve, in order. The last one repeats once the
+        #: list runs out, so a test can describe the interesting part and stop.
+        self.script = frames
 
     def send(self, payload: Any) -> None:
         if isinstance(payload, (bytes, bytearray)):
@@ -64,19 +79,22 @@ class ScriptedChannel:
             self.welcomed = True
             return json.dumps({"type": "welcome", "robot": "violet-1", "motors": 4})
         self.frames += 1
+        if self.script:
+            index = min(self.frames - 1, len(self.script) - 1)
+            return json.dumps({"type": "sensors", "frame": self.script[index]})
         return json.dumps(sensor_frame(0.02 * self.frames))
 
     def close(self) -> None:
         pass
 
 
-def connected_singleton() -> tuple[Runtime, ScriptedChannel]:
+def connected_singleton(frames: list[dict[str, Any]] | None = None) -> tuple[Runtime, ScriptedChannel]:
     """Install a fresh, connected `Runtime` as the singleton and return it."""
     set_config(PinConfig())
     clear_join()
     _sched.reset()
 
-    channel = ScriptedChannel()
+    channel = ScriptedChannel(frames)
     use_transport(lambda url: channel)
 
     Runtime._instance = None

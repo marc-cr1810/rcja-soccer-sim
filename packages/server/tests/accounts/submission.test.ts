@@ -40,13 +40,13 @@ describe.skipIf(!ready)('validateSubmission', () => {
         ARGPARSE_PREAMBLE +
         `
 import time
-from machine import Runtime
-from rcja_soccer import coast
+from machine import ADC, PWM, Pin
 
-rt = Runtime.get()
+wheel = PWM(Pin(12), freq=1000, duty_u16=0)
+ball = ADC(Pin(4))
 while True:
-    rt.sensors()
-    rt.send_command(motors=coast())
+    ball.read_u16()
+    wheel.duty_u16(0)
     time.sleep_ms(20)
 `,
     });
@@ -81,23 +81,22 @@ while True:
   it('allows importing a local sibling module', async () => {
     const dir = await folder({
       'manifest.json': manifest('robot.py'),
-      'helpers.py': 'def steady():\n    return [0, 0, 0, 0]\n',
+      'helpers.py': 'def steady():\n    return 0\n',
       'robot.py':
         ARGPARSE_PREAMBLE +
         `
 import time
 from helpers import steady
-from machine import Runtime
+from machine import PWM, Pin
 
-rt = Runtime.get()
+wheel = PWM(Pin(12), freq=1000, duty_u16=0)
 while True:
-    rt.sensors()
-    rt.send_command(motors=steady())
+    wheel.duty_u16(steady())
     time.sleep_ms(20)
 `,
     });
     const result = await validateSubmission(dir, { pythonLibDir: PYTHON_LIB_DIR });
-    expect(result.ok).toBe(true);
+    expect(result).toMatchObject({ ok: true });
   }, 15000);
 
   it('rejects a program that never connects', async () => {
@@ -126,10 +125,9 @@ while True:
         ARGPARSE_PREAMBLE +
         `
 import threading
-from machine import Runtime
+from machine import ADC, Pin
 
-rt = Runtime.get()
-rt.sensors()
+ADC(Pin(4)).read_u16()
 threading.Event().wait()
 `,
     });
@@ -155,8 +153,8 @@ parser.add_argument("--name", default=None)
 parser.add_argument("--url", default="ws://localhost:8080/agent")
 args = parser.parse_args()
 
-from machine import Runtime
-rt = Runtime.get()
+from machine import ADC, Pin
+ADC(Pin(4)).read_u16()
 `,
     });
     const result = await validateSubmission(dir, {

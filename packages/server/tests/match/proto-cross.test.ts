@@ -7,6 +7,62 @@ import {
 import type { SensorFrame } from '../../src/match/protocol';
 
 describe('Cross-language Protobuf compatibility (TS <-> Python)', () => {
+  test('a negative attackDirection survives the wire', () => {
+    /*
+     * The one that was wrong for as long as nothing read it. proto3 writes a
+     * negative int32 as a *64-bit* two's complement varint, and the Python
+     * reader sign-extended from 32 - so `-1` arrived as 18446744069414584319.
+     * Every robot in the league had a garbage attack direction in whichever
+     * half it attacked -x, and nothing noticed, because `GoalFrame` works the
+     * direction out from the camera and never reads the field.
+     *
+     * The first thing that did read it was a board's end switch, which a human
+     * flips at half time. It saw a large positive number, concluded the ends
+     * had not swapped, and attacked its own goal for the whole second half.
+     */
+    const minimal: SensorFrame = {
+      clock: 0,
+      robot: 2,
+      team: 'lime',
+      attackDirection: -1,
+      playing: true,
+      returned: false,
+      kickoff: { pending: false, ours: false, countdown: 0 },
+      ball: null,
+      compass: { heading: 0 },
+      gyro: { rate: 0 },
+      lines: [],
+      range: { front: null, back: null, left: null, right: null },
+      encoders: [],
+      camera: {
+        goals: { cyan: null, yellow: null },
+        goalBlobs: { cyan: [], yellow: [] },
+        ball: null,
+        fresh: false,
+      },
+      ballGate: { held: false },
+      messages: [],
+    };
+    const b64 = Buffer.from(encodeServerMessage({ type: 'sensors', frame: minimal })).toString(
+      'base64',
+    );
+    const script = `
+import base64
+from machine._proto import decode_server_message
+
+frame = decode_server_message(base64.b64decode('${b64}'))["frame"]
+assert frame["attackDirection"] == -1, frame["attackDirection"]
+assert frame["robot"] == 2
+print("OK")
+`;
+    const run = spawnSync('python3', ['-c', script], {
+      cwd: `${import.meta.dirname}/../../../../python`,
+      encoding: 'utf8',
+    });
+    expect(run.stderr).toBe('');
+    expect(run.stdout.trim()).toBe('OK');
+  });
+
   test('TypeScript encodes SensorFrame -> Python decodes correctly', () => {
     const frame: SensorFrame = {
       clock: 42.125,
@@ -45,7 +101,7 @@ describe('Cross-language Protobuf compatibility (TS <-> Python)', () => {
 import base64
 import json
 import sys
-from rcja_soccer._proto import decode_server_message
+from machine._proto import decode_server_message
 
 raw = base64.b64decode('${b64}')
 msg = decode_server_message(raw)
@@ -89,7 +145,7 @@ print("OK")
   test('Python encodes ActuatorFrame -> TypeScript decodes correctly', () => {
     const pyScript = `
 import base64
-from rcja_soccer._proto import encode_client_message
+from machine._proto import encode_client_message
 
 cmd = {
     "motors": [0.25, -0.5, 0.75, -1.0],

@@ -5,23 +5,29 @@ from __future__ import annotations
 import json
 import math
 import os
+import struct
 import sys
 import time
 from typing import Any, Callable
 
 from . import _sched, _timebase, constants
+from ._proto import decode_server_message, encode_client_message
+from ._transport import (
+    TransportError,
+    current_transport,
+    join_token,
+    join_url,
+)
 from .config import get_config
-from .reading import Reading
 
 PROTOCOL_VERSION = 5
 DEFAULT_URL = "ws://localhost:8080/agent"
 #: How long to keep retrying a lost connection, in seconds, before giving up
 #: and letting the error propagate. The clock restarts on every successful
 #: connection, so a practice session survives any number of server restarts;
-#: what it will not do is retry a port that is never coming back forever - the
-#: same budget `rcja_soccer.Robot.run()` used to give, and for the same
-#: reason: a harness that spawns robots detached cannot clean up a process
-#: that outlives it.
+#: what it will not do is retry a port that is never coming back forever: a
+#: harness that spawns robots detached cannot clean up a process that outlives
+#: it.
 DEFAULT_RECONNECT_FOR = 120.0
 
 
@@ -31,6 +37,47 @@ def _clamp(val: float, low: float, high: float) -> float:
 
 def _wrap_angle(rad: float) -> float:
     return (rad + math.pi) % (2 * math.pi) - math.pi
+
+
+#: One quadrature cycle. Stepping by one changes exactly one of the two lines,
+#: which is what makes a standard decoder able to tell direction.
+_QUAD_A = (0, 1, 1, 0)
+_QUAD_B = (0, 0, 1, 1)
+
+#: Sync bytes the camera puts in front of every packet, so a program that
+#: started listening halfway through one can find the start of the next.
+CAMERA_SYNC = b"\xaa\x55"
+
+#: Blobs in one packet. `len` is a byte and a blob is seven, so this is a
+#: ceiling the format needs, not a judgement about how many a goal can break
+#: into. The `truncated` flag says when it bit.
+CAMERA_MAX_BLOBS = 16
+
+
+def _crc8(data: bytes) -> int:
+    """CRC-8, polynomial 0x07, initial value 0 - the ordinary one.
+
+    A serial line drops and mangles bytes, so a packet that arrives is not the
+    same thing as a packet that is right. Checking it is three lines here and
+    three lines in the robot, and leaving it out is the kind of saving that
+    reads as a mystery in a match.
+    """
+    crc = 0
+    for byte in data:
+        crc ^= byte
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x07) & 0xFF if crc & 0x80 else (crc << 1) & 0xFF
+    return crc
+
+
+def _mrad(radians: float) -> int:
+    """An angle as milliradians, clamped to a signed 16-bit field."""
+    return int(_clamp(round(radians * 1000.0), -32768, 32767))
+
+
+def _mm(millimetres: float) -> int:
+    """A distance as whole millimetres, clamped to an unsigned 16-bit field."""
+    return int(_clamp(round(millimetres), 0, 65535))
 
 
 class Runtime:
@@ -75,9 +122,31 @@ class Runtime:
         #: a smaller one. See `_timebase._elapsed_ms()`.
         self.ticks_floor_ms: float = 0.0
         self.off_field = False
-        self.last_kickoff = False
-        self._cached_reading: Reading | None = None
-        self._cached_reading_frame: dict[str, Any] | None = None
+
+        #: One RX queue and one TX line-buffer per UART id. The camera fills
+        #: its RX queue; the radio fills the other and reads writes back out of
+        #: its TX buffer.
+        self._uart_rx: dict[int, bytearray] = {}
+        self._uart_tx: dict[int, bytearray] = {}
+        #: UART ids a program has actually constructed. A packet nobody opened
+        #: a port for is not worth building, and most programs open neither.
+        self._uart_open: set[int] = set()
+        #: When each team mate last said something, as `clock - age`. A
+        #: message that is redelivered every tick for its whole 0.4s life
+        #: reaches the radio once.
+        self._radio_sent_at: dict[int, float] = {}
+
+        #: Per wheel: accumulated rotation last frame, the fraction of a count
+        #: left over from converting it, and where in the 4-state quadrature
+        #: cycle the A/B lines currently sit.
+        self._enc_prev: list[float | None] = [None] * 4
+        self._enc_carry: list[float] = [0.0] * 4
+        self._enc_phase: list[int] = [0] * 4
+        #: Level each interrupt-watching pin had at the last frame, so a
+        #: change can be spotted. Only pins somebody registered a handler on
+        #: are in here.
+        self._irq_levels: dict[int, int] = {}
+
 
         # Actuator State Buffers
         self.pin_values: dict[int, int] = {}       # Pin ID -> 0 or 1
@@ -108,14 +177,12 @@ class Runtime:
 
         Retries with a one-second backoff for as long as `reconnect_for`
         seconds since the last successful connection, then lets the error
-        propagate. This is the same retry `rcja_soccer.Robot.run()` used to
-        do around its own socket - ported here because `machine` is now the
-        only thing that owns a connection at all, so nothing else provides it.
+        A board's radio comes up on its own and stays up; this is the closest
+        equivalent, and it lives here because `machine` is the only thing that
+        owns a connection at all, so nothing else can provide it.
         """
         if self.connected:
             return
-
-        from rcja_soccer.transport import TransportError, current_transport, join_token, join_url
 
         opener = current_transport()
         while True:
@@ -208,7 +275,6 @@ class Runtime:
         while True:
             raw = self.socket.recv()
             if isinstance(raw, (bytes, bytearray, memoryview)):
-                from rcja_soccer._proto import decode_server_message
                 msg = decode_server_message(raw)
             else:
                 msg = json.loads(raw)
@@ -226,12 +292,269 @@ class Runtime:
         self.frames += 1
         self.last_frame_at = _timebase._real_monotonic()
         self.off_field = False
-        self._cached_reading = None
-        self._cached_reading_frame = None
 
-        # Reset kickoff flag on kick-off transition
-        pending = frame.get("kickoff", {}).get("pending", False)
-        self.last_kickoff = pending
+        # The devices that are not pins: fill their buffers from this frame
+        # before anything can read them, and work out which pins moved.
+        self._feed_camera(frame)
+        self._feed_radio(frame)
+        self._step_encoders(frame)
+        self._poll_irq_pins()
+
+    # -------------------------------------------------------------------------
+    # The devices that are not pins: camera, radio, encoders, interrupts
+    # -------------------------------------------------------------------------
+
+    def _feed_camera(self, frame: dict[str, Any]) -> None:
+        """Push one packet per camera frame into the camera UART.
+
+        Nothing arrives on a stale tick. The camera runs at 30fps against a
+        50Hz loop, so roughly two ticks in five have no new picture, and on a
+        board the way you find that out is that the serial line is quiet. That
+        makes `uart.any() == 0` the `fresh` flag, learned from the wire instead
+        of read off a field somebody filled in for you.
+        """
+        camera = frame.get("camera") or {}
+        if not camera.get("fresh", False):
+            return
+        cfg = get_config()
+        uart_id = cfg.camera_uart.get("id", 0)
+        if uart_id not in self._uart_open:
+            return
+
+        goals = camera.get("goals") or {}
+        cyan, yellow, ball = goals.get("cyan"), goals.get("yellow"), camera.get("ball")
+        present = (0x01 if cyan else 0) | (0x02 if yellow else 0) | (0x04 if ball else 0)
+
+        blobs: list[tuple[int, dict[str, Any]]] = []
+        for colour, key in ((0, "cyan"), (1, "yellow")):
+            for blob in (camera.get("goalBlobs") or {}).get(key, []) or []:
+                blobs.append((colour, blob))
+        truncated = len(blobs) > CAMERA_MAX_BLOBS
+        blobs = blobs[:CAMERA_MAX_BLOBS]
+
+        payload = bytearray()
+        payload += struct.pack(
+            "<BBBhHhHhH",
+            0x01 if truncated else 0x00,
+            len(blobs),
+            present,
+            _mrad(cyan["bearing"]) if cyan else 0,
+            _mm(cyan["range"]) if cyan else 0,
+            _mrad(yellow["bearing"]) if yellow else 0,
+            _mm(yellow["range"]) if yellow else 0,
+            _mrad(ball["bearing"]) if ball else 0,
+            _mm(ball["range"]) if ball else 0,
+        )
+        for colour, blob in blobs:
+            payload += struct.pack(
+                "<BhhH",
+                colour,
+                _mrad(blob.get("start", 0.0)),
+                _mrad(blob.get("end", 0.0)),
+                _mm(blob.get("height", 0.0) * 1000.0),
+            )
+
+        packet = CAMERA_SYNC + bytes([len(payload)]) + bytes(payload) + bytes([_crc8(bytes(payload))])
+        self._uart_rx.setdefault(uart_id, bytearray()).extend(packet)
+
+    def _feed_radio(self, frame: dict[str, Any]) -> None:
+        """Hand the team radio whatever arrived, once each.
+
+        `messages` is redelivered in every frame for the whole 0.4s a message
+        lives, so copying it straight across would put the same sentence on the
+        wire twenty times over.
+
+        What identifies a message is *when it was sent*, which the frame gives
+        as `clock - age`. Deduplicating on `age` alone looks equivalent and is
+        not: at a stoppage the match clock stops, so every frame reports the
+        same message as `age == 0.0` and an age-based rule calls each one new.
+        Measured live - a single `write()` arrived ninety times.
+        """
+        cfg = get_config()
+        uart_id = cfg.radio_uart.get("id", 1)
+        if uart_id not in self._uart_open:
+            self._radio_sent_at.clear()
+            return
+
+        clock = float(frame.get("clock", 0.0))
+        seen: dict[int, float] = {}
+        lines = bytearray()
+        for message in frame.get("messages", []) or []:
+            sender = message.get("from")
+            if sender is None:
+                continue
+            sent_at = clock - float(message.get("age", 0.0))
+            seen[sender] = sent_at
+            previous = self._radio_sent_at.get(sender)
+            if previous is not None and abs(sent_at - previous) < 1e-6:
+                continue
+            lines += json.dumps({"from": sender, "body": message.get("body")}).encode()
+            lines += b"\n"
+        self._radio_sent_at = seen
+        if lines:
+            self._uart_rx.setdefault(uart_id, bytearray()).extend(lines)
+
+    def _step_encoders(self, frame: dict[str, Any]) -> None:
+        """Turn accumulated wheel rotation into the counts an encoder clicks out."""
+        encoders = frame.get("encoders") or []
+        if not encoders:
+            return
+        cfg = get_config()
+        cpr = cfg.encoder_cpr
+        if cpr <= 0:
+            return
+        count = min(len(encoders), self.motor_count, len(cfg.encoders), len(self._enc_prev))
+        for idx in range(count):
+            rad = float(encoders[idx])
+            previous = self._enc_prev[idx]
+            self._enc_prev[idx] = rad
+            if previous is None:
+                continue
+
+            # The carry is what stops a slow wheel from being rounded away
+            # every frame and reading as stopped.
+            steps_float = (rad - previous) / (2.0 * math.pi) * cpr + self._enc_carry[idx]
+            steps = int(steps_float)
+            self._enc_carry[idx] = steps_float - steps
+            if steps == 0:
+                continue
+
+            pins = cfg.encoders[idx]
+            pin_a, pin_b = pins.get("a"), pins.get("b")
+            watching = _sched.wants_edge(pin_a) or _sched.wants_edge(pin_b)
+            phase = self._enc_phase[idx]
+            if not watching:
+                # Keep the lines where they would have ended up, so reading one
+                # with `Pin.value()` still answers, but skip several hundred
+                # callbacks a second nobody asked for.
+                self._enc_phase[idx] = (phase + steps) % 4
+                continue
+
+            direction = 1 if steps > 0 else -1
+            for _ in range(abs(steps)):
+                nxt = (phase + direction) % 4
+                # The phase travels with the edge, so a handler that reads the
+                # other line sees where it was at *this* count rather than
+                # where the wheel finished the tick. Without that a decoder
+                # reads one direction for both.
+                state = (self._enc_phase, idx, nxt)
+                if _QUAD_A[nxt] != _QUAD_A[phase]:
+                    _sched.queue_edge(pin_a, _QUAD_A[nxt], state)
+                else:
+                    _sched.queue_edge(pin_b, _QUAD_B[nxt], state)
+                phase = nxt
+            self._enc_phase[idx] = phase
+
+    def watch_pin(self, pin_id: int, watching: bool) -> None:
+        """Start or stop tracking a pin's level for `Pin.irq()`.
+
+        The level is taken *here*, at the moment the handler is attached, so
+        that attaching one to a pin that is already high is not reported as a
+        rising edge. A board captures the level when it arms the interrupt;
+        seeding it at the next frame instead would turn the state of the world
+        into an event.
+        """
+        if not watching:
+            self._irq_levels.pop(pin_id, None)
+            return
+        self._irq_levels[pin_id] = self.get_pin_value(pin_id)
+
+    def _poll_irq_pins(self) -> None:
+        """Queue an edge for every watched pin whose level changed this frame.
+
+        The generic half of the interrupt story: a start button, a ball gate, a
+        line sensor. Encoders do not come through here - they moved by more
+        than one edge and `_step_encoders` already knows exactly how many.
+        """
+        watched = _sched.irq_pins()
+        if not watched:
+            self._irq_levels.clear()
+            return
+
+        cfg = get_config()
+        encoder_pins = set()
+        for pins in cfg.encoders:
+            encoder_pins.add(pins.get("a"))
+            encoder_pins.add(pins.get("b"))
+
+        for pin_id in watched:
+            if pin_id in encoder_pins:
+                continue
+            level = self.get_pin_value(pin_id)
+            if self._irq_levels.get(pin_id, level) != level:
+                self._irq_levels[pin_id] = level
+                _sched.queue_edge(pin_id, level)
+        # A pin nobody watches any more should not keep a stale level around to
+        # fire a phantom edge if it is re-registered later.
+        for pin_id in list(self._irq_levels):
+            if pin_id not in watched:
+                del self._irq_levels[pin_id]
+
+    # -------------------------------------------------------------------------
+    # UART
+    # -------------------------------------------------------------------------
+
+    def uart_open(self, uart_id: int) -> None:
+        """A program constructed this UART, so start filling it."""
+        self._uart_open.add(uart_id)
+        self.ensure_connected()
+
+    def uart_any(self, uart_id: int) -> int:
+        self.ensure_connected()
+        return len(self._uart_rx.get(uart_id, b""))
+
+    def uart_read(self, uart_id: int, nbytes: int | None = None) -> bytes | None:
+        self.ensure_connected()
+        buffer = self._uart_rx.get(uart_id)
+        if not buffer:
+            return None
+        take = len(buffer) if nbytes is None else min(nbytes, len(buffer))
+        data = bytes(buffer[:take])
+        del buffer[:take]
+        return data
+
+    def uart_readline(self, uart_id: int) -> bytes | None:
+        self.ensure_connected()
+        buffer = self._uart_rx.get(uart_id)
+        if not buffer:
+            return None
+        end = buffer.find(b"\n")
+        if end < 0:
+            return None
+        data = bytes(buffer[: end + 1])
+        del buffer[: end + 1]
+        return data
+
+    def uart_write(self, uart_id: int, data: bytes) -> int:
+        """Accept bytes on a UART, and act on them if anything is listening.
+
+        The radio is the one device on the other end of a write: complete
+        lines are JSON, and each becomes this tick's `say`. Anything else goes
+        where a write with nothing plugged into it goes.
+        """
+        self.ensure_connected()
+        cfg = get_config()
+        if uart_id != cfg.radio_uart.get("id", 1):
+            return len(data)
+
+        buffer = self._uart_tx.setdefault(uart_id, bytearray())
+        buffer.extend(data)
+        while True:
+            end = buffer.find(b"\n")
+            if end < 0:
+                break
+            line = bytes(buffer[:end])
+            del buffer[: end + 1]
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                self.say_data = json.loads(line.decode())
+            except (ValueError, UnicodeDecodeError):
+                # A radio carries whatever you put on it. A team mate that
+                # cannot parse this is the team's problem, not a crash here.
+                pass
+        return len(data)
 
     # -------------------------------------------------------------------------
     # Actuator & Pin State Management
@@ -264,6 +587,36 @@ class Runtime:
         # Ball gate / held sensor
         if pin_id == cfg.ball_gate:
             return 1 if self.last_frame.get("ballGate", {}).get("held", False) else 0
+
+        # The start button. A human holds it down while play is live, and the
+        # gate on `countdown` is the whole reason this is not just `playing`:
+        # the server keeps `playing` true *through* the pre-whistle countdown
+        # at a restart, and a human does not press start until the whistle. Map
+        # the raw flag and every robot on the field encroaches at every
+        # kick-off.
+        if pin_id == cfg.start:
+            if self.off_field or not self.last_frame.get("playing", False):
+                return 0
+            if self.last_frame.get("kickoff", {}).get("countdown", 0.0) > 0.0:
+                return 0
+            return 1
+
+        # The switches somebody sets before a half, because a robot cannot see
+        # its own colour and the ends swap at half time.
+        if pin_id == cfg.team_switch:
+            return 1 if self.last_frame.get("team") == "lime" else 0
+        if pin_id == cfg.robot_switch:
+            return 1 if self.last_frame.get("robot", 1) == 2 else 0
+        if pin_id == cfg.side_switch:
+            return 1 if self.last_frame.get("attackDirection", 1) > 0 else 0
+
+        # Quadrature encoder lines, wherever the cycle has got to.
+        for idx, pins in enumerate(cfg.encoders[: self.motor_count]):
+            phase = self._enc_phase[idx]
+            if pin_id == pins.get("a"):
+                return _QUAD_A[phase]
+            if pin_id == pins.get("b"):
+                return _QUAD_B[phase]
 
         return 0
 
@@ -512,14 +865,11 @@ class Runtime:
         if self._sleep_accum_ms < 0.0:
             self._sleep_accum_ms = 0.0
 
-        from rcja_soccer.transport import TransportError
-
         for _ in range(ticks):
             while True:
                 try:
                     cmd = self.build_actuator_frame()
                     if self.format == "protobuf":
-                        from rcja_soccer._proto import encode_client_message
                         self.socket.send(encode_client_message(cmd))
                     else:
                         self.socket.send(json.dumps({"type": "command", "frame": cmd}))
@@ -528,7 +878,6 @@ class Runtime:
                     while True:
                         raw = self.socket.recv()
                         if isinstance(raw, (bytes, bytearray, memoryview)):
-                            from rcja_soccer._proto import decode_server_message
                             msg = decode_server_message(raw)
                         else:
                             msg = json.loads(raw)
@@ -555,26 +904,20 @@ class Runtime:
                     self.ensure_connected()
 
     # -------------------------------------------------------------------------
-    # Full-frame reads and direct commands, for a program built on
-    # `rcja_soccer` rather than on named hardware pins.
+    # Full-frame reads and direct commands: the simulator's own back door,
+    # reached through `rcja_soccer.simulator`, never through a pin.
     # -------------------------------------------------------------------------
 
-    def sensors(self) -> Reading:
-        """The full sensor frame for this tick, as attributes.
+    def raw_frame(self) -> dict[str, Any]:
+        """The whole frame the server last sent, as it arrived.
 
-        Everything the server sent - camera goal blobs, team radio messages,
-        wheel encoders, attack direction and all - not just the
-        hardware-shaped subset the Pin/PWM/ADC/I2C classes expose. The same
-        shape `rcja_soccer.Robot`'s tick function used to hand a program as
-        `s`, before there were two connections to reconcile.
+        No board has this. It is reached through `rcja_soccer.simulator`, which
+        says so in its name, and it exists because a simulator that could only
+        be seen through its own pin emulation would be a simulator you could
+        not debug.
         """
         self.ensure_connected()
-        if self._cached_reading is not None and self._cached_reading_frame is self.last_frame:
-            return self._cached_reading
-        reading = Reading(self.last_frame)
-        self._cached_reading = reading
-        self._cached_reading_frame = self.last_frame
-        return reading
+        return self.last_frame
 
     def send_command(
         self,
@@ -585,9 +928,8 @@ class Runtime:
     ) -> None:
         """Set this tick's actuator command directly, bypassing Pin/PWM writes.
 
-        For a program built on `rcja_soccer.drive()` rather than on named
-        motor pins - the same shape `robot.motors()` used to return. Staged
-        here and consumed by the next `build_actuator_frame()` (on the next
+        The actuator half of the same back door. Staged here and consumed by
+        the next `build_actuator_frame()` (on the next
         `time.sleep_ms()`), the same as a Pin or PWM write is - so calling
         this and then setting an individual Pin in the same tick has the Pin
         write silently overridden, matching the general rule elsewhere in

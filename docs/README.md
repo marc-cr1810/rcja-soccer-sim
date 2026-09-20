@@ -18,9 +18,10 @@ Eight things, in the order a team actually needs them:
    attempt, and the helpers (`drive`, `field`, `sense`) that come with the
    library.
 6. **[MicroPython](micropython.md)** — the robot is a MicroPython program, and
-   the same file runs on a real ESP32. The virtual board and its pinout, what
-   `time.sleep_ms()` actually does to the simulation, and the three places the
-   simulator is honestly different from hardware.
+   the same file runs on a real ESP32. The virtual board and its pinout, the
+   camera's serial protocol, what `time.sleep_ms()` actually does to the
+   simulation, the three things a board genuinely cannot know, and the four
+   places the simulator is honestly different from hardware.
 7. **[Running a tournament](running-a-tournament.md)** — for whoever is
    running the event rather than entering it: a draw, a division played
    through with a referee, and a table that survives the laptop being closed.

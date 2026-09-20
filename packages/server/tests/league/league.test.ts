@@ -110,11 +110,10 @@ async function aTeam(started: Started, name = 'ACT Robotics'): Promise<{ cookie:
 
 /** One robot's folder, as `python/submit.py` sends it. */
 function push(team: string): Record<string, string> {
-  const manifest = JSON.stringify({ team, robot: 1, entry: 'robot.py' });
+  const manifest = JSON.stringify({ team, robot: 1, entry: 'main.py' });
   const robot = [
     'import argparse, time',
-    'from machine import Runtime',
-    'from rcja_soccer import coast',
+    'from machine import ADC, PWM, Pin',
     '',
     'parser = argparse.ArgumentParser()',
     'parser.add_argument("--team", default="violet")',
@@ -124,15 +123,16 @@ function push(team: string): Record<string, string> {
     'parser.add_argument("--token", default=None)',
     'args = parser.parse_args()',
     '',
-    'rt = Runtime.get()',
+    'wheel = PWM(Pin(12), freq=1000, duty_u16=0)',
+    'ball = ADC(Pin(4))',
     'while True:',
-    '    rt.sensors()',
-    '    rt.send_command(motors=coast())',
+    '    ball.read_u16()',
+    '    wheel.duty_u16(0)',
     '    time.sleep_ms(20)',
   ].join('\n');
   return {
     'manifest.json': Buffer.from(manifest).toString('base64'),
-    'robot.py': Buffer.from(robot).toString('base64'),
+    'main.py': Buffer.from(robot).toString('base64'),
   };
 }
 
@@ -370,7 +370,7 @@ describe.skipIf(!sandboxAvailable())('a push that is validated', () => {
     expect(answer.status, JSON.stringify(answer.payload)).toBe(200);
 
     const dir = join(started.submissionsDir, 'act-robotics', '1');
-    expect(await readFile(join(dir, 'robot.py'), 'utf8')).toContain('Runtime.get()');
+    expect(await readFile(join(dir, 'main.py'), 'utf8')).toContain('duty_u16');
     expect((await readFile(join(dir, 'token'), 'utf8')).length).toBeGreaterThan(20);
   }, 60_000);
 
@@ -396,7 +396,13 @@ describe('a workspace', () => {
     const opened = await call(started.port, '/workspace-api/open', { method: 'POST', cookie });
     expect(opened.status, JSON.stringify(opened.payload)).toBe(200);
     expect(opened.payload.team).toBe('ACT Robotics');
-    expect(opened.payload.files.map((f: any) => f.name).sort()).toEqual(['manifest.json', 'robot.py']);
+    expect(opened.payload.files.map((f: any) => f.name).sort()).toEqual([
+      'board.py',
+      'camera.py',
+      'main.py',
+      'manifest.json',
+      'radio.py',
+    ]);
   });
 
   it('is still whoever the credential says, never whoever the body says', async () => {
@@ -405,7 +411,7 @@ describe('a workspace', () => {
     await call(started.port, '/workspace-api/save', {
       method: 'POST',
       cookie: act.cookie,
-      body: JSON.stringify({ name: 'robot.py', content: 'mine' }),
+      body: JSON.stringify({ name: 'main.py', content: 'mine' }),
     });
 
     const invite = started.server.accounts.createInvite({ role: 'team', team: 'NSW Lightning' });
@@ -421,7 +427,7 @@ describe('a workspace', () => {
       body: JSON.stringify({ team: 'ACT Robotics' }),
     });
     expect(asNsw.payload.team).toBe('NSW Lightning');
-    const robot = asNsw.payload.files.find((f: any) => f.name === 'robot.py');
+    const robot = asNsw.payload.files.find((f: any) => f.name === 'main.py');
     expect(robot.content).not.toBe('mine');
   });
 

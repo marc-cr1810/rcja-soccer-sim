@@ -22,7 +22,7 @@ import runpy
 import sys
 from pathlib import Path
 
-import rcja_soccer
+from machine._transport import use_join
 
 
 def main() -> None:
@@ -54,12 +54,12 @@ def main() -> None:
 
     # Installed rather than passed: the point is that the program is not edited,
     # and a program that names its own token or url still wins. See
-    # rcja_soccer.transport.use_join.
-    rcja_soccer.use_join(token=args.token, url=args.url)
+    # machine._transport.use_join.
+    use_join(token=args.token, url=args.url)
 
     # The program sees itself as the thing that was run — its own name in argv[0],
-    # its own arguments after it, and `__name__ == "__main__"` so the `robot.run()`
-    # at the bottom of every starter file actually happens.
+    # its own arguments after it, and `__name__ == "__main__"` so a file whose
+    # loop is guarded by that check actually runs.
     sys.argv = [str(program), *args.args]
     try:
         runpy.run_path(str(program), run_name="__main__")

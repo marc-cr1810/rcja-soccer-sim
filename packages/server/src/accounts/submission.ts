@@ -293,7 +293,8 @@ async function checkSyntheticTick(
     return fail(
       withStderr(
         `${manifest.entry} connected but never answered a sensor frame within ` +
-        `${(tickTimeoutMs / 1000).toFixed(0)}s. Check the tick function returns quickly.`,
+        `${(tickTimeoutMs / 1000).toFixed(0)}s. A loop that never reaches ` +
+        `time.sleep_ms() never sends anything.`,
       ),
     );
   }

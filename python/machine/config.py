@@ -26,6 +26,14 @@ class PinConfig:
         self.gyro = data.get("gyro", constants.DEFAULT_GYRO_PIN)
         self.ultrasonics = data.get("ultrasonics", constants.DEFAULT_ULTRASONIC_PINS)
         self.ball_gate = data.get("ball_gate", constants.DEFAULT_BALL_GATE_PIN)
+        self.camera_uart = data.get("camera_uart", constants.DEFAULT_CAMERA_UART)
+        self.radio_uart = data.get("radio_uart", constants.DEFAULT_RADIO_UART)
+        self.start = data.get("start", constants.DEFAULT_START_PIN)
+        self.team_switch = data.get("team_switch", constants.DEFAULT_TEAM_PIN)
+        self.robot_switch = data.get("robot_switch", constants.DEFAULT_ROBOT_PIN)
+        self.side_switch = data.get("side_switch", constants.DEFAULT_SIDE_PIN)
+        self.encoders = data.get("encoders", constants.DEFAULT_ENCODER_PINS)
+        self.encoder_cpr = data.get("encoder_cpr", constants.DEFAULT_ENCODER_CPR)
 
 
 _config: PinConfig | None = None

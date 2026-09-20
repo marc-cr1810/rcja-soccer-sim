@@ -103,9 +103,18 @@ class ProtoReader:
         return result
 
     def int32(self) -> int:
+        """A proto3 `int32`, which is sign-extended to *64* bits on the wire.
+
+        Sign-extending from 32 here instead is wrong for every negative value
+        and was: `attackDirection: -1` arrived as 18446744069414584319, and it
+        went unnoticed for as long as nothing in Python read the field. The
+        first thing that did - an end switch a human flips at half time - got a
+        large positive number, never saw the end change, and attacked its own
+        goal for the whole second half.
+        """
         val = self.varint()
-        if val >= (1 << 31):
-            val -= 1 << 32
+        if val >= (1 << 63):
+            val -= 1 << 64
         return val
 
     def bool(self) -> bool:

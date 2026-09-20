@@ -101,8 +101,7 @@ function folder(team: string, mark: string): Record<string, string> {
   const manifest = JSON.stringify({ team, robot: 1, entry: 'robot.py' });
   const robot = [
     'import argparse, time',
-    'from machine import Runtime',
-    'from rcja_soccer import coast',
+    'from machine import ADC, PWM, Pin',
     '',
     'parser = argparse.ArgumentParser()',
     'parser.add_argument("--team", default="violet")',
@@ -114,10 +113,11 @@ function folder(team: string, mark: string): Record<string, string> {
     '',
     `MARK = "${mark}"`,
     '',
-    'rt = Runtime.get()',
+    'wheel = PWM(Pin(12), freq=1000, duty_u16=0)',
+    'ball = ADC(Pin(4))',
     'while True:',
-    '    rt.sensors()',
-    '    rt.send_command(motors=coast())',
+    '    ball.read_u16()',
+    '    wheel.duty_u16(0)',
     '    time.sleep_ms(20)',
   ].join('\n');
   return {

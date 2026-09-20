@@ -29,8 +29,9 @@
  * arrive without this file changing at all.
  */
 
-import { mkdir, readdir, rm, stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { mkdir, readFile, readdir, rm, stat } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 
 import { fail, ok, parseManifest, slugifyTeam, type Manifest, type Result } from '../infra/manifest';
 
@@ -57,6 +58,16 @@ export const MAX_FILES = 32;
 export interface WorkspaceOptions {
   /** Where team folders live. Defaults to ./workspaces alongside ./submissions. */
   dir: string;
+  /**
+   * Where the starter files are read from. Defaults to `python/examples`.
+   *
+   * They are read off disk rather than embedded here because they are real
+   * files that real robots run — `python/examples/board.py` is the same
+   * `board.py` a team gets, and a copy pasted into a TypeScript string would
+   * be a second one to keep in step. It would drift, and it would drift
+   * silently.
+   */
+  starterDir?: string;
 }
 
 export interface WorkspaceFile {
@@ -66,9 +77,11 @@ export interface WorkspaceFile {
 
 export class WorkspaceStore {
   private readonly dir: string;
+  private readonly starterDir: string;
 
   constructor(opts: WorkspaceOptions) {
     this.dir = opts.dir;
+    this.starterDir = opts.starterDir ?? defaultStarterDir();
   }
 
   /** Where one robot's folder lives. */
@@ -149,14 +162,34 @@ export class WorkspaceStore {
    * and seeing what happens, not working out what a manifest is from a blank
    * page. Only ever fills a folder that is empty, so it cannot overwrite
    * anybody's work.
+   *
+   * **All of the files, not just the one they will edit first.** `board.py`,
+   * `camera.py` and `radio.py` are the robot's own — the pin numbers, the
+   * camera's serial protocol, the team radio — and they are in the folder from
+   * the first minute so that nothing about the robot is somewhere a student
+   * cannot reach. That is also what a real robot project looks like: a folder
+   * of your files, importing `machine` and nothing else.
    */
   async seed(team: string, robot: RobotNumber): Promise<WorkspaceFile[]> {
     const existing = await this.read(team, robot);
     if (existing.length > 0) return existing;
 
     await this.write(team, robot, 'manifest.json', starterManifest(team, robot));
-    await this.write(team, robot, 'robot.py', STARTER_ROBOT);
+    for (const name of STARTER_FILES) {
+      await this.write(team, robot, name, await this.starterFile(name));
+    }
     return this.read(team, robot);
+  }
+
+  /** One starter file, read from disk. Throws rather than seed half a robot. */
+  private async starterFile(name: string): Promise<string> {
+    try {
+      return await readFile(join(this.starterDir, name), 'utf8');
+    } catch (error) {
+      throw new Error(
+        `cannot read the starter file ${name} from ${this.starterDir}: ${String(error)}`,
+      );
+    }
   }
 
   /**
@@ -232,37 +265,24 @@ function checkName(name: string): Result<null> {
 }
 
 function starterManifest(team: string, robot: RobotNumber): string {
-  return `${JSON.stringify({ team, robot, entry: 'robot.py' }, null, 2)}\n`;
+  return `${JSON.stringify({ team, robot, entry: 'main.py' }, null, 2)}\n`;
 }
 
 /**
- * The robot a team starts with.
+ * The files a new team's folder starts with, in the order they matter.
  *
- * Drives at the ball and nothing else. It is deliberately not good — beating
- * it should be the first afternoon's work — but it is complete, legal and
- * runnable, so the first thing a student does is change a number and watch
- * what that did.
+ * `main.py` is the only one they need to read on day one. The other three are
+ * the robot: what is wired where, how to talk to the camera, how to talk to
+ * the other robot. Every one of them imports `machine` and the standard
+ * library and nothing else, which is what makes the folder something that
+ * would run on a board.
  */
-const STARTER_ROBOT = `"""Our robot."""
+const STARTER_FILES = ['main.py', 'board.py', 'camera.py', 'radio.py'] as const;
 
-import time
+/** `python/examples`, found the same way the server finds `python/` itself. */
+function defaultStarterDir(): string {
+  const local = resolve('python', 'examples');
+  if (existsSync(local)) return local;
+  return resolve(import.meta.dirname, '../../../../python/examples');
+}
 
-from machine import Runtime
-from rcja_soccer import coast, drive
-
-rt = Runtime.get()
-
-while True:
-    # s is what the sensors report - this loop runs fifty times a second.
-    s = rt.sensors()
-
-    if s.ball is None:
-        # The infrared ring cannot see the ball. Sit still rather than guess.
-        rt.send_command(motors=coast())
-    else:
-        # Drive straight at it, and run the dribbler so it sticks.
-        rt.send_command(motors=drive(bearing=s.ball.bearing, speed=0.8), dribbler=1.0)
-
-    # Flushes the motor command above and waits for the next tick's sensors.
-    time.sleep_ms(20)
-`;

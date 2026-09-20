@@ -70,6 +70,13 @@ robot, deliberately, but a complete and legal one, so your first act is
 changing something and seeing what it did rather than working out what a
 manifest is from a blank page.
 
+It arrives as four files, not one: `main.py` is the robot and the only one you
+need to read today, and `board.py`, `camera.py` and `radio.py` are the pin
+numbers, the camera's serial protocol and the team radio. They are in the
+folder from the first minute because they are yours — that is what a real robot
+project is, a folder of your own files importing `machine` — and because
+nothing about the robot should live somewhere a student cannot open.
+
 **Robot 1 and Robot 2 are separate**, with their own files and their own push,
 because the two robots on a side are routinely written by two different people.
 Switch between them at the top.

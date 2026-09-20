@@ -1,5 +1,5 @@
 import unittest
-from rcja_soccer._proto import (
+from machine._proto import (
     encode_actuator_frame,
     encode_client_message,
     decode_sensor_frame,
@@ -23,7 +23,7 @@ class TestProto(unittest.TestCase):
         self.assertGreater(len(client_msg), len(encoded))
 
     def test_decode_disabled_message(self) -> None:
-        from rcja_soccer._proto import ProtoWriter
+        from machine._proto import ProtoWriter
 
         writer = ProtoWriter()
         writer.string(1, "5.7.1")
@@ -37,7 +37,7 @@ class TestProto(unittest.TestCase):
         self.assertAlmostEqual(decoded["returnsIn"], 30.0, places=2)
 
     def test_decode_server_message_sensors(self) -> None:
-        from rcja_soccer._proto import ProtoWriter
+        from machine._proto import ProtoWriter
 
         sub = ProtoWriter()
         sub.double(1, 15.5)

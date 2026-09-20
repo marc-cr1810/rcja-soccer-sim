@@ -19,7 +19,7 @@ import socket
 import struct
 from urllib.parse import parse_qs, urlparse
 
-from .transport import TransportError
+from ._transport import TransportError
 
 _OP_CONTINUATION = 0x0
 _OP_TEXT = 0x1

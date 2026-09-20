@@ -17,9 +17,11 @@
 No dependencies of its own, on purpose: the schools this league exists to
 reach are the ones where pip is behind a proxy, offline, or not something a
 student is allowed to run, and a dependency is a reason a team cannot enter.
-``machine`` is what actually owns the connection - a real MicroPython board
-has one already - so a program needs both, but this half of it stays as
-plain, ordinary code you could paste anywhere.
+Nothing here is required. ``machine`` is a complete robot API on its own and
+a program that imports none of this is a perfectly good submission; what this
+adds is the arithmetic that is tedious to get right - wheel mixing, knowing
+where you are, which way you are attacking - as ordinary code you could paste
+anywhere.
 
 Three modules, in the order a team meets them:
 
@@ -32,7 +34,6 @@ anything. Read it, copy it, and replace the parts you want to beat somebody
 with.
 """
 
-from ._ws import WebSocketError
 from .drive import WHEEL_AXES, clamp, coast, drive, wrap_angle
 from .frame import GoalFrame
 from .memory import Memory
@@ -60,18 +61,14 @@ from .sense import (
     teammate_says,
     teleported,
 )
-from .transport import Channel, TransportError, use_join, use_transport
 
 __all__ = [
     "BallTracker",
-    "Channel",
     "GoalFrame",
     "GyroRate",
     "Locator",
     "Memory",
-    "TransportError",
     "WHEEL_AXES",
-    "WebSocketError",
     "YawRate",
     "approach_point",
     "goal_blobs",
@@ -94,8 +91,6 @@ __all__ = [
     "teammate_position",
     "teammate_says",
     "teleported",
-    "use_join",
-    "use_transport",
     "wrap_angle",
 ]
 
