@@ -492,7 +492,51 @@ describe('lack of progress (5.6)', () => {
 
     for (let t = 0; t < 8; t += 1 / 60) {
       c1!.x = 0; c1!.z = 0;
-      w.placeBall({ x: 40, z: 0 });
+      w.ball.x = 40;
+      w.ball.z = 0;
+      w.step(1 / 60);
+    }
+    expect(w.events.some((e) => e.kind === 'lack-of-progress')).toBe(false);
+  });
+
+  it('does NOT call lack of progress when teammates pass or hold the ball together', () => {
+    const w = world('open');
+    w.running = true;
+    const [c1, c2, y1, y2] = w.robots;
+    // Keep opponents far away
+    y1!.x = 800; y2!.x = 850;
+    // Two teammates near the ball
+    c1!.x = -50; c1!.z = 0;
+    c2!.x = 50; c2!.z = 0;
+    w.placeBall({ x: 0, z: 0 });
+
+    for (let t = 0; t < 8; t += 1 / 60) {
+      c1!.x = -50; c1!.z = 0;
+      c2!.x = 50; c2!.z = 0;
+      w.ball.x = Math.sin(t * 2) * 30;
+      w.ball.z = 0;
+      w.step(1 / 60);
+    }
+    expect(w.events.some((e) => e.kind === 'lack-of-progress')).toBe(false);
+  });
+
+  it('does NOT call lack of progress when an opposing contest is broken before the window expires', () => {
+    const w = world('open');
+    w.running = true;
+    const [c1, c2, y1, y2] = w.robots;
+    c2!.x = -800; y2!.x = 850;
+    c1!.x = -60; c1!.z = 0;
+    w.placeBall({ x: 0, z: 0 });
+
+    for (let t = 0; t < 8; t += 1 / 60) {
+      c1!.x = -60; c1!.z = 0;
+      w.ball.x = 0; w.ball.z = 0;
+      // y1 contests only for the first 2 seconds, then retreats far away
+      if (t < 2) {
+        y1!.x = 60; y1!.z = 0;
+      } else {
+        y1!.x = 800; y1!.z = 0;
+      }
       w.step(1 / 60);
     }
     expect(w.events.some((e) => e.kind === 'lack-of-progress')).toBe(false);

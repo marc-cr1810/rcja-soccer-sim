@@ -1498,6 +1498,7 @@ export class LeagueServer {
       const arena = await this.arenas.create({
         kind: 'demo',
         demo: {
+          teams: demo.teams,
           home: demo.home,
           away: demo.away,
           bots: demo.bots,
@@ -1510,7 +1511,11 @@ export class LeagueServer {
         },
       });
       this.demoArena = { arenaId: arena.id, state: null };
-      this.log(`demo arena ${arena.id} playing ${demo.home} v ${demo.away} forever`);
+      const teamDesc =
+        demo.teams && demo.teams.length > 0
+          ? (demo.teams.length === 1 ? `${demo.home} vs itself` : `${demo.teams.length} teams`)
+          : `${demo.home} v ${demo.away}`;
+      this.log(`demo arena ${arena.id} playing ${teamDesc} forever`);
       this.demoPoll = setInterval(() => void this.pollDemo(), POLL_MS);
       this.demoPoll.unref?.();
       return `/a/${arena.id}/`;

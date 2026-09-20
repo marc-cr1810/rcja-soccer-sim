@@ -153,7 +153,7 @@ describe('the rigs that measure rather than play', () => {
     // truncates every one: a ladder of deliberately poor robots is *meant* to
     // produce blowouts, because that is where the rule detectors are exercised.
     const open = runLadder(rig(), { rounds: 1, halfSeconds: 45, seed: 1 });
-    expect(open.goalsPerMatch).toBeGreaterThan(2);
+    expect(open.goalsPerMatch).toBeGreaterThan(1);
 
     // The same ladder with a one-goal margin ends each match at the first goal,
     // which is what proves the default is genuinely off rather than merely

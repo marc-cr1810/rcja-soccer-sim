@@ -52,6 +52,7 @@ import { join, resolve } from 'node:path';
 
 import { sampleTree, usageBetween, type TreeSample, type Usage } from '../infra/usage';
 import type { LeagueId } from '@rcja/shared/leagues';
+import type { DemoTeamConfig } from '../infra/settings';
 
 const COMPILED = import.meta.dirname.startsWith('/$bunfs');
 const SELF = process.execPath;
@@ -389,6 +390,7 @@ export class ArenaSupervisor {
      * about sides or half-lengths — it passes the venue's on.
      */
     demo?: {
+      teams?: DemoTeamConfig[];
       home: string;
       away: string;
       /** `reference`, `examples`, or a bot-roster name. */
@@ -431,6 +433,9 @@ export class ArenaSupervisor {
     if (kind === 'demo') {
       const demo = options.demo;
       if (!demo) throw new Error('a demo arena needs demo settings');
+      if (demo.teams) {
+        args.push('--demo-teams', JSON.stringify(demo.teams));
+      }
       args.push('--demo-home', demo.home);
       args.push('--demo-away', demo.away);
       args.push('--demo-bots', demo.bots);

@@ -556,6 +556,16 @@ async function demoArena(flags: Map<string, string>): Promise<void> {
   const awayBots = flags.get('demo-away-bots');
   const randomSides = flags.has('demo-random-sides') ? flags.get('demo-random-sides') !== 'false' : false;
 
+  const rawTeams = flags.get('demo-teams');
+  let teamList: import('./settings').DemoTeamConfig[] | undefined;
+  if (rawTeams) {
+    try {
+      teamList = JSON.parse(rawTeams);
+    } catch {
+      teamList = rawTeams.split(',').map((s) => s.trim()).filter(Boolean);
+    }
+  }
+
   const teams = {
     violet: flags.get('demo-home') ?? 'Violet',
     lime: flags.get('demo-away') ?? 'Lime',
@@ -576,7 +586,8 @@ async function demoArena(flags: Map<string, string>): Promise<void> {
   });
 
   demo = new DemoArena(server, {
-    teams,
+    teams: teamList ?? teams,
+    teamList,
     bots,
     homeBots,
     awayBots,
@@ -592,7 +603,15 @@ async function demoArena(flags: Map<string, string>): Promise<void> {
   });
 
   const port = await server.listen();
-  console.log(`\n  demo arena playing ${teams.violet} v ${teams.lime} forever`);
+  if (teamList && teamList.length > 0) {
+    const listDesc =
+      teamList.length === 1
+        ? `${typeof teamList[0] === 'string' ? teamList[0] : (teamList[0].name ?? 'Violet')} vs itself`
+        : `${teamList.length} teams`;
+    console.log(`\n  demo arena playing ${listDesc} forever`);
+  } else {
+    console.log(`\n  demo arena playing ${teams.violet} v ${teams.lime} forever`);
+  }
   console.log(`  watch at   http://localhost:${port}`);
   console.log(`  ctrl-c to stop\n`);
   demo.start(port);
@@ -2581,6 +2600,14 @@ function budgetFlags(
   if (flags.has('pushes-kept')) out.pushesKept = num(flags, 'pushes-kept', 0);
   if (flags.has('demo')) out.demoOn = flags.get('demo') !== 'false';
   if (flags.has('demo-bots')) out.demoBots = flags.get('demo-bots')!;
+  if (flags.has('demo-teams')) {
+    const raw = flags.get('demo-teams')!;
+    try {
+      out.demoTeams = JSON.parse(raw);
+    } catch {
+      out.demoTeams = raw.split(',').map((s) => s.trim()).filter(Boolean);
+    }
+  }
   if (flags.has('demo-home')) out.demoHome = flags.get('demo-home')!;
   if (flags.has('demo-away')) out.demoAway = flags.get('demo-away')!;
   if (flags.has('demo-home-bots')) out.demoHomeBots = flags.get('demo-home-bots')!;

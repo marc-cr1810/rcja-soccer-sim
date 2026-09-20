@@ -296,4 +296,113 @@ describe('a demo arena, supervised', () => {
     expect(seenOrientations.has('Green vs Purple')).toBe(true);
     demo.stop();
   }, 70_000);
+
+  it('plays against itself when exactly one team is in the list', async () => {
+    let demoRef: InstanceType<typeof DemoArena> | null = null;
+    const server = new MatchServer({
+      port: 0,
+      realtime: true,
+      control: (req, url) => demoRef?.handle(req, url) ?? null,
+    });
+    servers.push(server);
+    const port = await server.listen();
+
+    const demo = new DemoArena(server, {
+      teams: ['Solo Team'],
+      bots: 'reference',
+      halfSeconds: 1,
+      gapSeconds: 0,
+    });
+    demoRef = demo;
+    demo.start(port);
+
+    await waitFor(async () => {
+      const answer = await fetch(`http://127.0.0.1:${port}/arena-api/state`);
+      if (answer.status !== 200) return false;
+      const data = (await answer.json()) as { state: { playing: boolean; teams?: { violet: string; lime: string } } };
+      return data.state.playing && data.state.teams?.violet === 'Solo Team' && data.state.teams?.lime === 'Solo Team';
+    }, 15_000, 'state with Solo Team vs itself');
+
+    const answer = await fetch(`http://127.0.0.1:${port}/arena-api/state`);
+    const payload = (await answer.json()) as {
+      ok: boolean;
+      state: { playing: boolean; teams: { violet: string; lime: string } };
+    };
+    expect(payload.ok).toBe(true);
+    expect(payload.state.teams.violet).toBe('Solo Team');
+    expect(payload.state.teams.lime).toBe('Solo Team');
+    demo.stop();
+  }, 60_000);
+
+  it('randomly selects two distinct teams when > 1 teams are in the list', async () => {
+    let demoRef: InstanceType<typeof DemoArena> | null = null;
+    const server = new MatchServer({
+      port: 0,
+      realtime: true,
+      control: (req, url) => demoRef?.handle(req, url) ?? null,
+    });
+    servers.push(server);
+    const port = await server.listen();
+
+    const seenMatchups = new Set<string>();
+    const demo = new DemoArena(server, {
+      teams: ['Team Alpha', 'Team Beta', 'Team Gamma'],
+      bots: 'reference',
+      halfSeconds: 1,
+      gapSeconds: 0,
+      log: () => {
+        const t = demo.state().teams;
+        if (t) {
+          expect(t.violet).not.toBe(t.lime);
+          seenMatchups.add(`${t.violet} vs ${t.lime}`);
+        }
+      },
+    });
+    demoRef = demo;
+    demo.start(port);
+
+    // Wait until at least 2 distinct pairings are seen across matches
+    await waitFor(() => seenMatchups.size >= 2, 55_000, 'at least two distinct matchups seen');
+    for (const matchup of seenMatchups) {
+      const [v, l] = matchup.split(' vs ');
+      expect(v).not.toBe(l);
+    }
+    demo.stop();
+  }, 70_000);
+
+  it('supervised demo arena supports demo.teams with single team vs itself', async () => {
+    const arenas = new ArenaSupervisor({ log: () => {} });
+    supervisors.push(arenas);
+
+    const arena = await arenas.create({
+      kind: 'demo',
+      demo: {
+        teams: ['Single Team'],
+        home: 'Violet',
+        away: 'Lime',
+        bots: 'reference',
+        halfSeconds: 1,
+        league: null,
+        gapSeconds: 0,
+      },
+    });
+    const port = arenas.portOf(arena.id);
+    expect(port).not.toBeNull();
+
+    await waitFor(async () => {
+      const answer = await fetch(`http://127.0.0.1:${port}/arena-api/state`);
+      if (answer.status !== 200) return false;
+      const data = (await answer.json()) as { state: { playing: boolean; teams?: { violet: string; lime: string } } };
+      return data.state.playing && data.state.teams?.violet === 'Single Team' && data.state.teams?.lime === 'Single Team';
+    }, 15_000, 'supervised demo state with Single Team vs itself');
+
+    const answer = await fetch(`http://127.0.0.1:${port}/arena-api/state`);
+    const payload = (await answer.json()) as {
+      ok: boolean;
+      state: { playing: boolean; teams: { violet: string; lime: string } };
+    };
+    expect(payload.ok).toBe(true);
+    expect(payload.state.teams.violet).toBe('Single Team');
+    expect(payload.state.teams.lime).toBe('Single Team');
+  }, 60_000);
 });

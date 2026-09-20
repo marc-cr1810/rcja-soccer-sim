@@ -63,7 +63,8 @@ self.onmessage = async (event: MessageEvent) => {
     } else if (kind === 'demo') {
       if (!demo) throw new Error('Demo settings required for demo arena');
       demoArena = new DemoArena(server, {
-        teams: { violet: demo.home, lime: demo.away },
+        teams: demo.teams ?? { violet: demo.home, lime: demo.away },
+        teamList: demo.teams,
         bots: demo.bots,
         homeBots: demo.homeBots,
         awayBots: demo.awayBots,

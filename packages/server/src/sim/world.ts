@@ -1135,32 +1135,43 @@ export class World {
      * leaves the circle on its own, which moves the mark, which resets the
      * window. The test regulates itself.
      */
-    let hasViolet = false;
-    let hasLime = false;
-    const thresh = this.ball.radius + 25;
+    let hasVioletPin = false;
+    let hasLimePin = false;
+    let hasVioletContest = false;
+    let hasLimeContest = false;
+
+    const pinThresh = this.ball.radius + 25;
+    const contestThresh = PROGRESS_DISTANCE;
+
     for (let i = 0; i < this.activeRobotsBuffer.length; i++) {
       const r = this.activeRobotsBuffer[i]!;
-      if (distance(r, this.ball) < r.radius + thresh) {
-        if (r.team === 'violet') hasViolet = true;
-        if (r.team === 'lime') hasLime = true;
-        if (hasViolet && hasLime) break;
+      const d = distance(r, this.ball);
+      if (d < r.radius + pinThresh) {
+        if (r.team === 'violet') hasVioletPin = true;
+        if (r.team === 'lime') hasLimePin = true;
       }
+      if (d < contestThresh) {
+        if (r.team === 'violet') hasVioletContest = true;
+        if (r.team === 'lime') hasLimeContest = true;
+      }
+      if (hasVioletPin && hasLimePin && hasVioletContest && hasLimeContest) break;
     }
-    const isOpposingContest = hasViolet && hasLime;
+    const isPushedPinched = hasVioletPin && hasLimePin;
+    const isOpposingContest = hasVioletContest && hasLimeContest;
 
     // Rule 5.6.1.2: Ball stuck between MULTIPLE opposing robots in a scrum.
-    if (isOpposingContest && ballSpd < 40) {
+    if (isPushedPinched && ballSpd < 40) {
       this.stalledFor += dt;
       if (this.stalledFor > STALL_SECONDS) {
         this.stalledFor = 0;
+        const reason = 'Ball has been stuck between opposing robots.';
         if (this.autoResolve) {
-          this.callLackOfProgress();
+          this.callLackOfProgress({ rule: '5.6.1.2', reason });
         } else {
           this.emit({
             kind: 'lack-of-progress',
             rule: '5.6.1.2',
-            message:
-              'Ball has been stuck between opposing robots. Lack of Progress is available to the referee.',
+            message: `${reason} Lack of Progress is available to the referee.`,
           });
         }
         return;
@@ -1170,16 +1181,21 @@ export class World {
     }
 
     /*
-     * Rule 5.6.1.1, asked continuously rather than on a timetable: has the
-     * ball left a PROGRESS_DISTANCE circle in the last PROGRESS_WINDOW
-     * seconds?
+     * Rule 5.6.1.2 (moving scrum): has the ball left a PROGRESS_DISTANCE
+     * circle in the last PROGRESS_WINDOW seconds while opposing robots
+     * are contesting it?
      *
-     * Progress resets the clock the moment it happens, instead of at the end
-     * of whatever fixed window the ball happened to be in. A window that only
-     * looks at its own two endpoints cannot tell a ball that crossed the field
-     * from one that went out and came back, and it reads the wrong answer for
-     * a ball that was somewhere else when the window opened.
+     * If there is no opposing contest, the ball is actively in play
+     * (e.g. dribbled, held, or passed by a single robot or team) and
+     * cannot be called for lack of progress under 5.6.1.2.
+     * We reset the window so that a future contest starts with a full clock.
      */
+    if (!isOpposingContest) {
+      this.progressMark = { x: this.ball.x, z: this.ball.z };
+      this.sinceProgressMark = 0;
+      return;
+    }
+
     if (distance(this.ball, this.progressMark) > PROGRESS_DISTANCE) {
       this.progressMark = { x: this.ball.x, z: this.ball.z };
       this.sinceProgressMark = 0;
@@ -1213,13 +1229,14 @@ export class World {
     if (this.sinceProgressMark >= PROGRESS_WINDOW) {
       this.progressMark = { x: this.ball.x, z: this.ball.z };
       this.sinceProgressMark = 0;
+      const reason = `Ball has not progressed in ${PROGRESS_WINDOW} seconds between opposing robots.`;
       if (this.autoResolve) {
-        this.callLackOfProgress();
+        this.callLackOfProgress({ rule: '5.6.1.2', reason });
       } else {
         this.emit({
           kind: 'lack-of-progress',
-          rule: '5.6.1.1',
-          message: `Ball has not progressed in ${PROGRESS_WINDOW} seconds. Lack of Progress is available to the referee.`,
+          rule: '5.6.1.2',
+          message: `${reason} Lack of Progress is available to the referee.`,
         });
       }
       return;

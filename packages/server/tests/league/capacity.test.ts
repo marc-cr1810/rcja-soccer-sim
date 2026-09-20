@@ -261,4 +261,39 @@ describe('league.json', () => {
     expect(settings.demo.homeBots).toBe('reference');
     expect(settings.demo.awayBots).toBe('rehearsal');
   });
+
+  it('loads demo.teams array and syncs home/away defaults', () => {
+    const where = dir();
+    writeFileSync(
+      join(where, 'league.json'),
+      JSON.stringify({
+        demo: {
+          on: true,
+          teams: [
+            { name: 'Red Dragons', bots: 'champion' },
+            'Blue Ocean',
+            { name: 'Green Forest' },
+          ],
+        },
+      }),
+    );
+    const { settings, complaints } = loadSettings(where);
+    expect(complaints).toEqual([]);
+    expect(settings.demo.teams).toEqual([
+      { name: 'Red Dragons', bots: 'champion' },
+      'Blue Ocean',
+      { name: 'Green Forest' },
+    ]);
+    expect(settings.demo.home).toBe('Red Dragons');
+    expect(settings.demo.homeBots).toBe('champion');
+    expect(settings.demo.away).toBe('Blue Ocean');
+  });
+
+  it('allows demo.teams flag override', () => {
+    const where = dir();
+    const { settings } = loadSettings(where, { demoTeams: ['Team Alpha', 'Team Beta'] });
+    expect(settings.demo.teams).toEqual(['Team Alpha', 'Team Beta']);
+    expect(settings.demo.home).toBe('Team Alpha');
+    expect(settings.demo.away).toBe('Team Beta');
+  });
 });

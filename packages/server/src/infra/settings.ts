@@ -160,6 +160,13 @@ export interface RuleSettings {
  * one of the deliberately poor bots, or the four python example robots that
  * join as remote seats.
  */
+export interface DemoTeamSpec {
+  name?: string;
+  bots?: string;
+}
+
+export type DemoTeamConfig = string | DemoTeamSpec;
+
 export interface DemoSettings {
   /** Whether to keep a demo arena always playing, alongside the schedule. */
   on: boolean;
@@ -169,6 +176,8 @@ export interface DemoSettings {
    * (reference vs that bot).
    */
   bots: string;
+  /** The list of teams that can be randomly picked for demo matches. */
+  teams: DemoTeamConfig[];
   /** The violet side's name on the card and in the team names. */
   home: string;
   /** The lime side. */
@@ -237,7 +246,7 @@ export function defaultSettings(): LeagueSettings {
     practice: { open: true, max: null, idleMins: 20, graceMins: 5, perTeam: 1, claimSecs: 90 },
     pregame: { autoStartMins: null, penaltyPerMin: 1 },
     rules: { mercyMargin: DEFAULT_MERCY_MARGIN, halfTimeSeconds: DEFAULT_HALF_TIME_SECONDS },
-    demo: { on: false, bots: 'reference', home: 'Violet', away: 'Lime', halfSeconds: 300, league: null, gapSeconds: 10, randomSides: false },
+    demo: { on: false, bots: 'reference', teams: ['Violet', 'Lime'], home: 'Violet', away: 'Lime', halfSeconds: 300, league: null, gapSeconds: 10, randomSides: false },
     pushes: { keep: 10 },
   };
 }
@@ -468,11 +477,13 @@ export function loadSettings(dataDir: string, overrides: Partial<Flags> = {}): L
   }
 
   // Support home as an object ({ name?: string, bots?: string }) or string.
+  let homeConfigured = false;
   if (typeof demo.home === 'object' && demo.home !== null && !Array.isArray(demo.home)) {
     const h = demo.home as Record<string, unknown>;
     if (typeof h.name === 'string' && h.name !== '') {
       settings.demo.home = h.name;
       set('demo.home', true);
+      homeConfigured = true;
     } else {
       set('demo.home', false);
     }
@@ -483,17 +494,20 @@ export function loadSettings(dataDir: string, overrides: Partial<Flags> = {}): L
   } else if (typeof demo.home === 'string' && demo.home !== '') {
     settings.demo.home = demo.home;
     set('demo.home', true);
+    homeConfigured = true;
   } else {
     if (demo.home !== undefined) complaints.push('demo.home must be a string or object; using "Violet"');
     set('demo.home', false);
   }
 
   // Support away as an object ({ name?: string, bots?: string }) or string.
+  let awayConfigured = false;
   if (typeof demo.away === 'object' && demo.away !== null && !Array.isArray(demo.away)) {
     const a = demo.away as Record<string, unknown>;
     if (typeof a.name === 'string' && a.name !== '') {
       settings.demo.away = a.name;
       set('demo.away', true);
+      awayConfigured = true;
     } else {
       set('demo.away', false);
     }
@@ -504,6 +518,7 @@ export function loadSettings(dataDir: string, overrides: Partial<Flags> = {}): L
   } else if (typeof demo.away === 'string' && demo.away !== '') {
     settings.demo.away = demo.away;
     set('demo.away', true);
+    awayConfigured = true;
   } else {
     if (demo.away !== undefined) complaints.push('demo.away must be a string or object; using "Lime"');
     set('demo.away', false);
@@ -516,6 +531,42 @@ export function loadSettings(dataDir: string, overrides: Partial<Flags> = {}): L
   if (typeof demo.awayBots === 'string' && demo.awayBots !== '') {
     settings.demo.awayBots = demo.awayBots;
     set('demo.awayBots', true);
+  }
+
+  // Support teams as an array of strings or { name?: string, bots?: string } objects.
+  if (Array.isArray(demo.teams)) {
+    const parsedTeams: DemoTeamConfig[] = [];
+    for (const t of demo.teams) {
+      if (typeof t === 'string' && t.trim() !== '') {
+        parsedTeams.push(t.trim());
+      } else if (typeof t === 'object' && t !== null && !Array.isArray(t)) {
+        const obj = t as Record<string, unknown>;
+        const name = typeof obj.name === 'string' && obj.name.trim() !== '' ? obj.name.trim() : undefined;
+        const bots = typeof obj.bots === 'string' && obj.bots.trim() !== '' ? obj.bots.trim() : undefined;
+        if (name !== undefined || bots !== undefined) {
+          parsedTeams.push({ ...(name !== undefined ? { name } : {}), ...(bots !== undefined ? { bots } : {}) });
+        }
+      }
+    }
+    if (parsedTeams.length > 0) {
+      settings.demo.teams = parsedTeams;
+      set('demo.teams', true);
+      const first = parsedTeams[0];
+      const second = parsedTeams.length > 1 ? parsedTeams[1] : first;
+      settings.demo.home = typeof first === 'string' ? first : (first.name ?? 'Violet');
+      if (typeof first === 'object' && first.bots) settings.demo.homeBots = first.bots;
+      settings.demo.away = typeof second === 'string' ? second : (second.name ?? 'Lime');
+      if (typeof second === 'object' && second.bots) settings.demo.awayBots = second.bots;
+    } else {
+      complaints.push('demo.teams must contain at least one valid team; using default');
+      set('demo.teams', false);
+    }
+  } else if (homeConfigured || awayConfigured) {
+    const homeTeam: DemoTeamSpec = { name: settings.demo.home, ...(settings.demo.homeBots ? { bots: settings.demo.homeBots } : {}) };
+    const awayTeam: DemoTeamSpec = { name: settings.demo.away, ...(settings.demo.awayBots ? { bots: settings.demo.awayBots } : {}) };
+    settings.demo.teams = [homeTeam, awayTeam];
+  } else {
+    set('demo.teams', false);
   }
 
   const demoHalf = readNumber(demo.halfSeconds, 'demo.halfSeconds', 300, { min: 30, max: 1800 }, complaints);
@@ -569,6 +620,7 @@ export interface Flags {
   halfTimeSeconds: number;
   demoOn: boolean;
   demoBots: string;
+  demoTeams: DemoTeamConfig[];
   demoHome: string;
   demoAway: string;
   demoHomeBots: string;
@@ -604,6 +656,17 @@ function applyFlags(
   take(flags.halfTimeSeconds, 'rules.halfTimeSeconds', (v) => (settings.rules.halfTimeSeconds = v));
   take(flags.demoOn, 'demo.on', (v) => (settings.demo.on = v));
   take(flags.demoBots, 'demo.bots', (v) => (settings.demo.bots = v));
+  take(flags.demoTeams, 'demo.teams', (v) => {
+    settings.demo.teams = v;
+    if (v.length > 0) {
+      const first = v[0];
+      const second = v.length > 1 ? v[1] : first;
+      settings.demo.home = typeof first === 'string' ? first : (first.name ?? 'Violet');
+      if (typeof first === 'object' && first.bots) settings.demo.homeBots = first.bots;
+      settings.demo.away = typeof second === 'string' ? second : (second.name ?? 'Lime');
+      if (typeof second === 'object' && second.bots) settings.demo.awayBots = second.bots;
+    }
+  });
   take(flags.demoHome, 'demo.home', (v) => (settings.demo.home = v));
   take(flags.demoAway, 'demo.away', (v) => (settings.demo.away = v));
   take(flags.demoHomeBots, 'demo.homeBots', (v) => (settings.demo.homeBots = v));

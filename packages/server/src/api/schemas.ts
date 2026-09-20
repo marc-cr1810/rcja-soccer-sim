@@ -1110,6 +1110,17 @@ export const SettingsBodySchema = z
       .object({
         on: z.boolean().optional(),
         bots: z.string().optional(),
+        teams: z
+          .array(
+            z.union([
+              z.string(),
+              z.object({
+                name: z.string().optional(),
+                bots: z.string().optional(),
+              }),
+            ]),
+          )
+          .optional(),
         home: z.string().optional(),
         away: z.string().optional(),
         homeBots: z.string().optional(),

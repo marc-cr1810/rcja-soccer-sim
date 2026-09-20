@@ -52,9 +52,14 @@ import type { MatchServer } from '../infra/server';
 import type { Transport } from '../match/agent';
 import { waitForSeats } from './bench';
 import type { Subprocess } from 'bun';
+import { existsSync } from 'node:fs';
 import { cp, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { slugifyTeam } from '../infra/manifest';
+import type { DemoTeamConfig, DemoTeamSpec } from '../infra/settings';
+
+export type { DemoTeamConfig, DemoTeamSpec };
 
 export interface FixtureArenaOptions {
   pythonLibDir: string | null;
@@ -785,7 +790,8 @@ function statusOf(seat: ArenaSeat, transport: Transport | undefined): SeatStatus
  * spawn is tried again on the next gap. A miss is a fallback, never a pause.
  */
 export interface DemoOptions {
-  teams: { violet: string; lime: string };
+  teams?: { violet: string; lime: string } | DemoTeamConfig[];
+  teamList?: DemoTeamConfig[];
   /** `reference`, `examples`, or a bot-roster name. Default `reference`. */
   bots?: string;
   homeBots?: string;
@@ -816,13 +822,34 @@ export class DemoArena {
   private lineup: SpawnedLineup | null = null;
   private currentTeams: { violet: string; lime: string } | null = null;
   private readonly log: (line: string) => void;
+  private readonly teamPool: DemoTeamConfig[] | null = null;
 
   constructor(
     private readonly server: MatchServer,
     private readonly opts: DemoOptions,
   ) {
     this.log = opts.log ?? (() => {});
-    this.currentTeams = { ...opts.teams };
+    if (opts.teamList && opts.teamList.length > 0) {
+      this.teamPool = opts.teamList;
+    } else if (Array.isArray(opts.teams) && opts.teams.length > 0) {
+      this.teamPool = opts.teams;
+    } else {
+      this.teamPool = null;
+    }
+
+    if (this.teamPool) {
+      const submissionsDir = opts.submissionsDir ?? server.submissionsDirectory;
+      const t0 = this.normalizeTeam(this.teamPool[0], submissionsDir);
+      const t1 = this.teamPool.length > 1 ? this.normalizeTeam(this.teamPool[1], submissionsDir) : t0;
+      this.currentTeams = {
+        violet: t0.name ?? 'Violet',
+        lime: t1.name ?? (this.teamPool.length > 1 ? 'Lime' : (t0.name ?? 'Violet')),
+      };
+    } else if (opts.teams && !Array.isArray(opts.teams)) {
+      this.currentTeams = { ...opts.teams };
+    } else {
+      this.currentTeams = { violet: 'Violet', lime: 'Lime' };
+    }
   }
 
   /** The control surface, mounted on `MatchServer` like `FixtureArena`'s. */
@@ -875,6 +902,32 @@ export class DemoArena {
     this.lineup = null;
   }
 
+  private normalizeTeam(
+    t: DemoTeamConfig,
+    submissionsDir?: string,
+  ): { name?: string; bots: string } {
+    const defaultBots = this.opts.bots ?? 'reference';
+    if (typeof t === 'object' && t !== null) {
+      return {
+        name: t.name,
+        bots: t.bots ?? defaultBots,
+      };
+    }
+    const str = String(t).trim();
+    if (str === 'reference' || str === 'example' || str === 'examples' || botRoster().some((b) => b.name === str)) {
+      return { name: str, bots: str };
+    }
+    if (submissionsDir) {
+      try {
+        const slug = slugifyTeam(str);
+        if (existsSync(join(submissionsDir, slug))) {
+          return { name: str, bots: str };
+        }
+      } catch {}
+    }
+    return { name: str, bots: defaultBots };
+  }
+
   private resolveSideBot(side: 'violet' | 'lime', swapped = false): string {
     const effectiveSide = swapped ? (side === 'violet' ? 'lime' : 'violet') : side;
     if (effectiveSide === 'violet' && this.opts.homeBots) return this.opts.homeBots;
@@ -904,17 +957,25 @@ export class DemoArena {
     resolvedLineup: Partial<Record<string, LineupEntry>>,
     violetBot: string,
     limeBot: string,
-    swapped = false,
+    configuredVioletName?: string,
+    configuredLimeName?: string,
   ): { violet: string; lime: string } {
-    const configuredHome = swapped ? this.opts.teams.lime : this.opts.teams.violet;
-    const configuredAway = swapped ? this.opts.teams.violet : this.opts.teams.lime;
-    const defaultHome = configuredHome === 'Violet' || !configuredHome;
-    const defaultAway = configuredAway === 'Lime' || !configuredAway;
+    const isDefaultName = (name?: string) =>
+      !name ||
+      name === 'Violet' ||
+      name === 'Lime' ||
+      name === 'reference' ||
+      name === 'example' ||
+      name === 'examples' ||
+      botRoster().some((b) => b.name === name);
+
+    const defaultHome = isDefaultName(configuredVioletName);
+    const defaultAway = isDefaultName(configuredLimeName);
 
     const nameForSide = (
       side: 'violet' | 'lime',
       isDefault: boolean,
-      configuredName: string,
+      configuredName: string | undefined,
       bot: string,
     ): string => {
       if (!isDefault && configuredName) return configuredName;
@@ -934,14 +995,17 @@ export class DemoArena {
       }
 
       if (violetBot === 'reference' && (limeBot === 'reference' || !limeBot)) {
+        if (this.teamPool && this.teamPool.length === 1 && configuredName && configuredName !== 'Violet' && configuredName !== 'Lime') {
+          return configuredName;
+        }
         return side === 'violet' ? 'Violet' : 'Lime';
       }
       return 'Reference';
     };
 
     return {
-      violet: nameForSide('violet', defaultHome, configuredHome, violetBot),
-      lime: nameForSide('lime', defaultAway, configuredAway, limeBot),
+      violet: nameForSide('violet', defaultHome, configuredVioletName, violetBot),
+      lime: nameForSide('lime', defaultAway, configuredLimeName, limeBot),
     };
   }
 
@@ -964,12 +1028,52 @@ export class DemoArena {
     for (;;) {
       if (this.stopping) return;
 
-      const swapSides = Boolean(this.opts.randomSides && Math.random() < 0.5);
-      const violetBot = this.resolveSideBot('violet', swapSides);
-      const limeBot = this.resolveSideBot('lime', swapSides);
+      const submissionsDir = this.opts.submissionsDir ?? this.server.submissionsDirectory;
+      let violetBot: string;
+      let limeBot: string;
+      let configuredVioletName: string | undefined;
+      let configuredLimeName: string | undefined;
+
+      if (this.teamPool && this.teamPool.length > 0) {
+        let teamViolet: { name?: string; bots: string };
+        let teamLime: { name?: string; bots: string };
+
+        if (this.teamPool.length === 1) {
+          // If it's just one team it would just vs itself
+          const only = this.normalizeTeam(this.teamPool[0], submissionsDir);
+          teamViolet = only;
+          teamLime = only;
+        } else {
+          // Any number of > 1 teams in the list then we have them get randomly selected
+          const i = Math.floor(Math.random() * this.teamPool.length);
+          let j = Math.floor(Math.random() * (this.teamPool.length - 1));
+          if (j >= i) j++;
+          teamViolet = this.normalizeTeam(this.teamPool[i], submissionsDir);
+          teamLime = this.normalizeTeam(this.teamPool[j], submissionsDir);
+        }
+
+        if (this.opts.randomSides && Math.random() < 0.5) {
+          const tmp = teamViolet;
+          teamViolet = teamLime;
+          teamLime = tmp;
+        }
+
+        violetBot = teamViolet.bots;
+        limeBot = teamLime.bots;
+        configuredVioletName = teamViolet.name;
+        configuredLimeName = teamLime.name;
+      } else {
+        const swapSides = Boolean(this.opts.randomSides && Math.random() < 0.5);
+        violetBot = this.resolveSideBot('violet', swapSides);
+        limeBot = this.resolveSideBot('lime', swapSides);
+        const legacyTeams = this.opts.teams && !Array.isArray(this.opts.teams)
+          ? this.opts.teams
+          : { violet: 'Violet', lime: 'Lime' };
+        configuredVioletName = swapSides ? legacyTeams.lime : legacyTeams.violet;
+        configuredLimeName = swapSides ? legacyTeams.violet : legacyTeams.lime;
+      }
 
       // 1. Resolve submissions if either side uses a submitted team
-      const submissionsDir = this.opts.submissionsDir ?? this.server.submissionsDirectory;
       let resolvedLineup: Partial<Record<string, LineupEntry>> = {};
       if (submissionsDir && (this.isSubmission(violetBot) || this.isSubmission(limeBot))) {
         try {
@@ -983,7 +1087,13 @@ export class DemoArena {
       }
 
       // 2. Resolve display team names
-      const matchTeams = this.resolveTeamNames(resolvedLineup, violetBot, limeBot, swapSides);
+      const matchTeams = this.resolveTeamNames(
+        resolvedLineup,
+        violetBot,
+        limeBot,
+        configuredVioletName,
+        configuredLimeName,
+      );
       this.currentTeams = matchTeams;
 
       // 3. Spawn submission processes if any resolved
