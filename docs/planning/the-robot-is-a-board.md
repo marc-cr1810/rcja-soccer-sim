@@ -350,7 +350,172 @@ existing kept history pointed at a board.
 
 ---
 
-## The editor
+## The browser editor
+
+**It is first-class, and that is a constraint rather than a preference.** Phase
+5 exists because a team that cannot install Python is not a team that enters
+late, it is a team that does not enter. So the rule for this whole phase is:
+*anything the extension can do, this can do.* The moment that stops being true,
+the extension is the good way in and the Chromebook is a second-class entry.
+
+It is already CodeMirror 6 (`packages/workspace/`), which turns out to matter —
+see [Breakpoints](#breakpoints).
+
+### What changes
+
+- **The robot 1 / robot 2 switcher becomes two separate things.** A **project
+  picker**, because a team now has as many projects as it likes, and a
+  **Boards panel** showing both boards, where each one currently is, and whether
+  it passes. The switcher conflated source and hardware; they are different
+  nouns now.
+- **`lib/`** appears alongside the projects as a team-level folder, because that
+  is what it is.
+- **"Push to the competition" disappears entirely**, and this is the
+  simplification worth noticing. Under the board model a team never pushes to
+  the competition: they flash their boards, and the referee's check-in takes
+  what is on them. So the button becomes **Flash**, with a board target, and an
+  entire concept leaves the student's head.
+- **Editing is not flashing**, which is Phase 5's *editing is not submitting*
+  under the name that now fits. The workspace still holds whatever was last
+  typed, including code that does not parse, because an editor that refuses to
+  save broken code is one you cannot use halfway through a thought.
+
+### Breakpoints here too, and CodeMirror already has the parts
+
+The design is [below](#breakpoints); what matters here is that **the browser is
+not the second front end to get it.** If breakpoints were VS Code only, the
+decision to build them would have created exactly the two-tier system this
+project has refused everywhere else.
+
+The three socket messages are the real interface and DAP is one front end of
+two: `rcja debug` speaks DAP because that is what editors expect, and the
+browser speaks those same three messages over the WebSocket it already has,
+needing no adapter at all.
+
+The UI is ordinary work rather than a rewrite:
+
+- **Breakpoint dots** are CodeMirror 6's `gutter` and `GutterMarker`, which
+  exist for this.
+- **The stopped line** is a decoration, the same mechanism as the syntax
+  highlighting already there.
+- **Stack and locals** are a panel.
+- **Evaluate in a frame** is the REPL box, pointed at a frame instead of
+  `__main__` — the same one feature, two front ends, one more time.
+
+### The field beside the code, which is easier here
+
+The extension's one real engineering risk — a webview having none of the
+browser's cookies, so the field needs a short-lived view token — **does not
+exist in the browser.** Same origin, same session, an iframe or a split pane and
+nothing else. The token is a VS Code workaround, not a general requirement, and
+it is worth being clear about that so it does not get built as though it were.
+
+### Where it still ends up ahead
+
+Check-in status, the queue for a field, invitations from other teams and the
+match schedule all live on the team page, next to the editor. The extension can
+link to them; it should not reimplement them. [END-STATE.md](../../END-STATE.md)
+already wanted *"one page with two doors into the same folder"*, and boards,
+projects and fields converging is the version of that the board model asks for —
+a layout decision to take when building slice 2, not an architectural one.
+
+### What it gives up, unchanged from today
+
+No local files, no git, no other tooling, and no working offline. That was true
+in Phase 5 and is still true; the board model does not make it better or worse.
+
+---
+
+## Breakpoints
+
+Real ones: set a breakpoint in `main.py`, hit it, look at the call stack and the
+locals, step, evaluate an expression in that frame, continue.
+
+**The mechanism already exists and was already planned.** `playLockstep` holds
+the world until every program has answered the previous frame, and its own
+docstring calls it *"a diagnostic mode, not a competition mode."* Phase 13's
+original note wanted it for a scrubbable practice field; it serves breakpoints
+just as well, and for the same reason. A robot stopped inside its own `think()`
+has not answered, so **the world simply waits.** Nothing times out, nothing
+desynchronises, the last-command-stands rule never fires, and the field is
+standing still rather than hanging.
+
+So breakpoints are not a new risk bolted onto the simulator. They are a second
+consumer of a mode the simulator was already going to grow.
+
+### Practice only, and that is physics rather than purity
+
+A scored match runs under `playFast`, which *"takes whatever has arrived and
+steps regardless"* — and it must, because the rule that a hung robot's last
+command stands is what stops one team's laptop taking the other team's match
+down. A match cannot wait for somebody reading their locals, and a debugger
+that could pause a scored match would also be a way to buy thinking time.
+
+So a fixture arena refuses a debugger exactly as it refuses a prompt. Same gate,
+same test, same reason.
+
+### `rcja debug` is the adapter, not the extension
+
+The Debug Adapter Protocol is spoken **by the CLI, on stdio** — which is how
+VS Code launches debug adapters anyway. The extension contributes a debug type
+and a `launch.json` snippet and spawns `rcja debug`, which is a few dozen lines
+of TypeScript and no protocol knowledge.
+
+The payoff is that anything speaking DAP gets this: Thonny, `nvim-dap`, or
+whatever a student's mentor uses. Keeping the adapter in the CLI is the same
+decision as keeping `--json` there, for the same reason.
+
+### On the robot side, `bdb` and nothing installed
+
+The runtime runs the student's program under a `bdb.Bdb` subclass — standard
+library, built on `sys.settrace`, and it brings breakpoint bookkeeping,
+conditional breakpoints and correct step/next/return semantics with it. No
+`debugpy`, no pip, no dependency at a venue with no internet. (`sys.monitoring`
+is faster and is worth moving to if the floor ever rises above Python 3.11.)
+
+**`settrace` being slow does not matter here**, which is the part worth saying
+out loud: it is slow relative to wall-clock, and in lockstep the world is
+waiting for the robot rather than racing it. The CPU ceiling is not violated
+either — a process stopped at a breakpoint is blocked on a socket read, not
+burning its budget.
+
+Three messages on the agent socket carry it: set breakpoints, report a stop with
+its stack, and resume with a step mode. **Evaluating an expression in a frame is
+the REPL's `exec`**, pointed at a frame's namespace instead of `__main__` — so
+the prompt and the debugger are one feature with two front ends, not two.
+
+### Four things that have to be got right
+
+- **The lockstep deadline must be suspended while a debugger is attached.**
+  `deadlineMs` exists precisely so a hung program ends the run instead of
+  silently making it unreproducible — and a breakpoint is a deliberate hang. An
+  attached session lifts it; detaching restores it.
+- **The other robots freeze too, and the field has to say why.** In lockstep the
+  world waits for *everyone*, so an invited team's robot stops dead with no
+  explanation. The field shows *stopped at a breakpoint in Robot 1* to everybody
+  on it, or it reads as a crash.
+- **An attached debugger is a person present.** Phase 10 made a connected robot
+  deliberately *not* reset the idle-reclaim clock, so one forgotten laptop
+  cannot hold a field all day. Somebody sitting at a breakpoint is not that, and
+  reclaiming their field while they read their locals would be its own bug.
+- **Timing is not enforced in lockstep, and the field must say so.** This is the
+  one honest cost. A student who only ever debugs stopped can write a `think()`
+  far too slow for 20 ms and never find out, because lockstep hides exactly the
+  thing the CPU budget exists to expose. So lockstep is a mode you turn on and
+  visibly leave, and **Run it for real** replays the same arrangement at
+  wall-clock with the budget on. Debug stopped; verify running.
+
+### What it does not transfer
+
+Worth one paragraph in the student docs and no more: the robot you build will
+not have this. On a board you get `Ctrl-C`, a prompt and `print`, which is why
+those exist here too and why they work in a match where a breakpoint cannot.
+A breakpoint is a simulator affordance, and a good one — it is simply not a
+thing the hardware can lend you.
+
+---
+
+## The VS Code extension
 
 Last, and convenience over the two paths that matter. If it slipped a season
 nothing would break — which is the test it has to keep passing, because the
@@ -370,6 +535,9 @@ it is a second-class entry and the whole accessibility argument falls over.
   REPL, Show output, Diff board.
 - **The REPL as an ordinary terminal**, which is `rcja repl 1` in a terminal
   pane and costs nothing once the CLI exists.
+- **A debug type** contributing a `launch.json` snippet and spawning
+  `rcja debug` — the adapter is the CLI's, so this is a registration and not an
+  implementation. See [Breakpoints](#breakpoints).
 
 ### You flash a board, never a seat
 
@@ -514,93 +682,6 @@ CPython in the same `rcja-soccer` package — so completion for `Pin`, `ADC`,
 interpreter is pointed at the right environment. The extension's job is to
 point it, not to ship `.pyi` files.
 
-### Breakpoints
-
-Real ones: set a breakpoint in `main.py`, hit it, look at the call stack and the
-locals, step, evaluate an expression in that frame, continue.
-
-**The mechanism already exists and was already planned.** `playLockstep` holds
-the world until every program has answered the previous frame, and its own
-docstring calls it *"a diagnostic mode, not a competition mode."* Phase 13's
-original note wanted it for a scrubbable practice field; it serves breakpoints
-just as well, and for the same reason. A robot stopped inside its own `think()`
-has not answered, so **the world simply waits.** Nothing times out, nothing
-desynchronises, the last-command-stands rule never fires, and the field is
-standing still rather than hanging.
-
-So breakpoints are not a new risk bolted onto the simulator. They are a second
-consumer of a mode the simulator was already going to grow.
-
-#### Practice only, and that is physics rather than purity
-
-A scored match runs under `playFast`, which *"takes whatever has arrived and
-steps regardless"* — and it must, because the rule that a hung robot's last
-command stands is what stops one team's laptop taking the other team's match
-down. A match cannot wait for somebody reading their locals, and a debugger
-that could pause a scored match would also be a way to buy thinking time.
-
-So a fixture arena refuses a debugger exactly as it refuses a prompt. Same gate,
-same test, same reason.
-
-#### `rcja debug` is the adapter, not the extension
-
-The Debug Adapter Protocol is spoken **by the CLI, on stdio** — which is how
-VS Code launches debug adapters anyway. The extension contributes a debug type
-and a `launch.json` snippet and spawns `rcja debug`, which is a few dozen lines
-of TypeScript and no protocol knowledge.
-
-The payoff is that anything speaking DAP gets this: Thonny, `nvim-dap`, or
-whatever a student's mentor uses. Keeping the adapter in the CLI is the same
-decision as keeping `--json` there, for the same reason.
-
-#### On the robot side, `bdb` and nothing installed
-
-The runtime runs the student's program under a `bdb.Bdb` subclass — standard
-library, built on `sys.settrace`, and it brings breakpoint bookkeeping,
-conditional breakpoints and correct step/next/return semantics with it. No
-`debugpy`, no pip, no dependency at a venue with no internet. (`sys.monitoring`
-is faster and is worth moving to if the floor ever rises above Python 3.11.)
-
-**`settrace` being slow does not matter here**, which is the part worth saying
-out loud: it is slow relative to wall-clock, and in lockstep the world is
-waiting for the robot rather than racing it. The CPU ceiling is not violated
-either — a process stopped at a breakpoint is blocked on a socket read, not
-burning its budget.
-
-Three messages on the agent socket carry it: set breakpoints, report a stop with
-its stack, and resume with a step mode. **Evaluating an expression in a frame is
-the REPL's `exec`**, pointed at a frame's namespace instead of `__main__` — so
-the prompt and the debugger are one feature with two front ends, not two.
-
-#### Four things that have to be got right
-
-- **The lockstep deadline must be suspended while a debugger is attached.**
-  `deadlineMs` exists precisely so a hung program ends the run instead of
-  silently making it unreproducible — and a breakpoint is a deliberate hang. An
-  attached session lifts it; detaching restores it.
-- **The other robots freeze too, and the field has to say why.** In lockstep the
-  world waits for *everyone*, so an invited team's robot stops dead with no
-  explanation. The field shows *stopped at a breakpoint in Robot 1* to everybody
-  on it, or it reads as a crash.
-- **An attached debugger is a person present.** Phase 10 made a connected robot
-  deliberately *not* reset the idle-reclaim clock, so one forgotten laptop
-  cannot hold a field all day. Somebody sitting at a breakpoint is not that, and
-  reclaiming their field while they read their locals would be its own bug.
-- **Timing is not enforced in lockstep, and the field must say so.** This is the
-  one honest cost. A student who only ever debugs stopped can write a `think()`
-  far too slow for 20 ms and never find out, because lockstep hides exactly the
-  thing the CPU budget exists to expose. So lockstep is a mode you turn on and
-  visibly leave, and **Run it for real** replays the same arrangement at
-  wall-clock with the budget on. Debug stopped; verify running.
-
-#### What it does not transfer
-
-Worth one paragraph in the student docs and no more: the robot you build will
-not have this. On a board you get `Ctrl-C`, a prompt and `print`, which is why
-those exist here too and why they work in a match where a breakpoint cannot.
-A breakpoint is a simulator affordance, and a good one — it is simply not a
-thing the hardware can lend you.
-
 ### Packaging
 
 **`rcja` is a console script in the existing Python package**, not a new
@@ -683,7 +764,10 @@ Slices, each verified live before the next.
 2. **Projects and boards.** `workspaces/<team>/<robot>/` becomes projects plus
    two board filesystems plus `lib/`. Flash is the verb. Validation on arrival
    with a standing pass/fail. Seat kinds collapse to four; check-in replaces the
-   lineup-lock wording.
+   lineup-lock wording. The browser editor's robot switcher splits into a
+   project picker and a Boards panel, and **"Push to the competition" is
+   deleted rather than renamed** — a team flashes boards, and check-in takes
+   what is on them.
 3. **`rcja` CLI, and the device flow with it.** `/auth/device` plus its poll
    and the `/device` approval page, then `login`, `whoami`, `logout`, `new`,
    `ls`, `diff`, `push`, `rm`, `run`, `logs`. `submit.py` and `join.py` are
@@ -703,6 +787,11 @@ Slices, each verified live before the next.
    exactly as they refuse the prompt. **This is lifted out of Phase 14**, which
    had planned the stepping field for the scrubber — breakpoints need it sooner
    and the trace does not need to come with it.
+   **The browser's breakpoint UI lands in this slice, not after the
+   extension** — gutter markers, a stopped-line decoration, stack and locals,
+   and the REPL box aimed at a frame. Shipping the editor's debugger first and
+   the browser's later would make the Chromebook second-class for however long
+   "later" turned out to be.
 7. **The VS Code extension.** Boards view, flash, Run, REPL terminal, the
    debugger, and the field in a panel beside the code — a thin shell over
    `rcja`, with no protocol of its own and no credential store of its own. Its
@@ -740,6 +829,9 @@ extension first would quietly close it.
   field is not reclaimed while somebody sits at a breakpoint. A fixture arena
   refuses a debugger. And the same arrangement, run at wall-clock afterwards,
   still reports the CPU budget honestly.
+- Slice 6, in both front ends: the same breakpoint, hit from the browser and
+  from VS Code, reporting the same stack. A Chromebook with nothing installed
+  debugs a robot end to end.
 - Slice 7: drive the extension on a machine with no repo checkout, to catch
   anything the CLI was quietly getting from the working directory — and on one
   where `rcja` is in a virtualenv rather than on `PATH`, which is the failure

@@ -957,7 +957,11 @@ and seven slices.
   somewhere else: one feature, two front ends. The cost to be honest about is
   that **lockstep hides timing** — so it is a mode you visibly leave, and
   *Run it for real* replays the same arrangement at wall-clock with the budget
-  on. Debug stopped; verify running.
+  on. Debug stopped; verify running. **The browser gets the same debugger in the
+  same slice**, speaking those three messages directly over the socket it
+  already has: the editor is already CodeMirror 6, whose gutter API is built for
+  breakpoint markers. Shipping breakpoints to VS Code first would make the
+  Chromebook second-class at exactly the thing Phase 5 exists to prevent.
 - **The superseded paths are deleted, not shimmed**, because none of them has
   shipped to a team: `manifest.json`, `submit.py`, `join.py`, the documented
   bare `python myrobot.py --team --url` form, and the two seat kinds that merge.
