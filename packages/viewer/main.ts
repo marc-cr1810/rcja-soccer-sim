@@ -34,6 +34,10 @@ const summarySpotlights = document.getElementById('summary-spotlights')!;
 const summaryTeams = document.getElementById('summary-teams')!;
 const summaryRobotsBody = document.getElementById('summary-robots-body')!;
 const summaryStatusPill = document.getElementById('summary-status-pill');
+const summaryVerdictBadge = document.getElementById('summary-verdict-badge');
+const summaryGoalsStrip = document.getElementById('summary-goals-strip');
+const summaryGoalsChips = document.getElementById('summary-goals-chips');
+const summaryTimeLabel = document.getElementById('summary-time-label');
 
 let currentSummaryData: MatchResult | null = null;
 let currentNextMatchIn: number | undefined;
@@ -326,7 +330,7 @@ function receive(message: ViewMessage): void {
     currentNextMatchIn = message.nextMatchIn;
     matchFinished = true;
     updateSummaryButton();
-    if (!summaryShown) {
+    if (!summaryModal.hidden || !summaryShown) {
       showSummary({ ...message.result, nextMatchIn: message.nextMatchIn });
     }
     return;
@@ -355,11 +359,20 @@ function receive(message: ViewMessage): void {
       matchFinished = true;
       updateSummaryButton();
       if (!summaryShown) {
-        showSummary(currentSummaryData ? { ...currentSummaryData, nextMatchIn: currentNextMatchIn } : {
-          score: latest.score,
-          events: latest.events,
-          nextMatchIn: currentNextMatchIn,
-        });
+        if (currentSummaryData) {
+          showSummary({ ...currentSummaryData, nextMatchIn: currentNextMatchIn });
+        } else {
+          // Wait for the authoritative summary message from the server; fallback if it doesn't arrive within 1.5s
+          setTimeout(() => {
+            if (!summaryShown && matchFinished && latest && !currentSummaryData) {
+              showSummary({
+                score: latest.score,
+                events: latest.events,
+                nextMatchIn: currentNextMatchIn,
+              });
+            }
+          }, 1500);
+        }
       }
     }
   }
@@ -509,14 +522,71 @@ function showSummary(data: {
   const lScore = data.score.lime;
 
   let verdict = 'Match Drawn';
-  if (vScore > lScore) verdict = `🏆 ${violetTeam} Victory!`;
-  else if (lScore > vScore) verdict = `🏆 ${limeTeam} Victory!`;
+  let badgeClass = 'badge-draw';
+  let badgeIcon = '🤝';
+  if (vScore > lScore) {
+    verdict = `${violetTeam} Victory`;
+    badgeClass = 'badge-violet';
+    badgeIcon = '🏆';
+  } else if (lScore > vScore) {
+    verdict = `${limeTeam} Victory`;
+    badgeClass = 'badge-lime';
+    badgeIcon = '🏆';
+  }
 
   summaryTitle.textContent = verdict;
+  if (summaryVerdictBadge) {
+    summaryVerdictBadge.className = `verdict-badge ${badgeClass}`;
+    const iconSpan = summaryVerdictBadge.querySelector('.badge-icon');
+    if (iconSpan) iconSpan.textContent = badgeIcon;
+  }
+
   sumVioletName.textContent = violetTeam;
   sumLimeName.textContent = limeTeam;
   sumVioletScore.textContent = String(vScore);
   sumLimeScore.textContent = String(lScore);
+
+  if (summaryTimeLabel && latest) {
+    summaryTimeLabel.textContent = formatClock(latest.clock, latest.half);
+  }
+
+  // Goals timeline
+  const goalsTimeline: { team: 'violet' | 'lime'; at: number; half?: number; robotId?: string }[] = [];
+  if (data.goals && data.goals.length > 0) {
+    for (const g of data.goals) {
+      goalsTimeline.push(g);
+    }
+  } else if (data.events) {
+    for (const e of data.events) {
+      if (e.kind === 'goal' && e.team) {
+        goalsTimeline.push({ team: e.team, at: e.at, robotId: e.robotId });
+      }
+    }
+  }
+
+  if (summaryGoalsStrip && summaryGoalsChips) {
+    if (goalsTimeline.length > 0) {
+      summaryGoalsStrip.hidden = false;
+      summaryGoalsChips.innerHTML = goalsTimeline
+        .map((g) => {
+          const teamName = g.team === 'violet' ? violetTeam : limeTeam;
+          const robotNum = g.robotId ? `#${g.robotId.slice(g.robotId.lastIndexOf('-') + 1)}` : '';
+          const half = g.half ?? (g.at > halfSeconds ? 2 : 1);
+          return `
+            <span class="goal-chip ${g.team}">
+              <span class="chip-ball">⚽</span>
+              <span class="chip-time">${formatClock(g.at, half)}</span>
+              <span class="chip-team">${teamName}</span>
+              ${robotNum ? `<span class="chip-robot">${robotNum}</span>` : ''}
+            </span>
+          `;
+        })
+        .join('');
+    } else {
+      summaryGoalsStrip.hidden = true;
+      summaryGoalsChips.innerHTML = '';
+    }
+  }
 
   interface RobotEntry {
     id: string;
@@ -623,56 +693,104 @@ function showSummary(data: {
 
   const spotlights: string[] = [];
 
+  // 1. Top Scorer
   if (topScorer && topScorer.goals > 0) {
     spotlights.push(`
-      <div class="summary-spotlight-card ${topScorer.team}">
-        <div class="spotlight-icon">⚽</div>
-        <div class="spotlight-details">
-          <div class="spotlight-label">Top Scorer</div>
-          <div class="spotlight-robot">${topScorer.teamName} ${topScorer.number}</div>
-          <div class="spotlight-team ${topScorer.team}">${topScorer.role} &bull; ${topScorer.teamName}</div>
+      <div class="accolade-card">
+        <div class="accolade-header">
+          <span class="accolade-icon">⚽</span>
+          <span class="accolade-category">Most Goals Scored</span>
         </div>
-        <div class="spotlight-count">${topScorer.goals}</div>
+        <div class="accolade-body">
+          <div class="accolade-who">
+            <span class="robot-pill ${topScorer.team}">${topScorer.teamName} ${topScorer.number}</span>
+            <span class="team-name">${topScorer.teamName}</span>
+          </div>
+          <div class="accolade-stat">
+            <span class="stat-number">${topScorer.goals}</span>
+            <span class="stat-unit">${topScorer.goals === 1 ? 'goal' : 'goals'}</span>
+          </div>
+        </div>
       </div>
     `);
   } else {
     spotlights.push(`
-      <div class="summary-spotlight-card">
-        <div class="spotlight-icon">⚽</div>
-        <div class="spotlight-details">
-          <div class="spotlight-label">Top Scorer</div>
-          <div class="spotlight-robot">None</div>
-          <div class="spotlight-team">No goals scored</div>
+      <div class="accolade-card">
+        <div class="accolade-header">
+          <span class="accolade-icon">⚽</span>
+          <span class="accolade-category">Most Goals Scored</span>
         </div>
-        <div class="spotlight-count">0</div>
+        <div class="accolade-body">
+          <span class="accolade-empty">No goals scored</span>
+        </div>
       </div>
     `);
   }
 
-  if (topKeeper) {
+  // 2. Top Goalie
+  if (topKeeper && topKeeper.saves > 0) {
     spotlights.push(`
-      <div class="summary-spotlight-card ${topKeeper.team}">
-        <div class="spotlight-icon">🧤</div>
-        <div class="spotlight-details">
-          <div class="spotlight-label">Top Goalie</div>
-          <div class="spotlight-robot">${topKeeper.teamName} ${topKeeper.number}</div>
-          <div class="spotlight-team ${topKeeper.team}">${topKeeper.role} &bull; ${topKeeper.teamName}</div>
+      <div class="accolade-card">
+        <div class="accolade-header">
+          <span class="accolade-icon">🧤</span>
+          <span class="accolade-category">Most Saves Made</span>
         </div>
-        <div class="spotlight-count">${topKeeper.saves}</div>
+        <div class="accolade-body">
+          <div class="accolade-who">
+            <span class="robot-pill ${topKeeper.team}">${topKeeper.teamName} ${topKeeper.number}</span>
+            <span class="team-name">${topKeeper.teamName}</span>
+          </div>
+          <div class="accolade-stat">
+            <span class="stat-number">${topKeeper.saves}</span>
+            <span class="stat-unit">${topKeeper.saves === 1 ? 'save' : 'saves'}</span>
+          </div>
+        </div>
+      </div>
+    `);
+  } else if (topKeeper) {
+    spotlights.push(`
+      <div class="accolade-card">
+        <div class="accolade-header">
+          <span class="accolade-icon">🧤</span>
+          <span class="accolade-category">Most Saves Made</span>
+        </div>
+        <div class="accolade-body">
+          <span class="accolade-empty">No saves recorded</span>
+        </div>
       </div>
     `);
   }
 
+  // 3. Most Shots
   if (topShooter && topShooter.shots > 0) {
     spotlights.push(`
-      <div class="summary-spotlight-card ${topShooter.team}">
-        <div class="spotlight-icon">🎯</div>
-        <div class="spotlight-details">
-          <div class="spotlight-label">Most Shots</div>
-          <div class="spotlight-robot">${topShooter.teamName} ${topShooter.number}</div>
-          <div class="spotlight-team ${topShooter.team}">${topShooter.role} &bull; ${topShooter.teamName}</div>
+      <div class="accolade-card">
+        <div class="accolade-header">
+          <span class="accolade-icon">🎯</span>
+          <span class="accolade-category">Most Shots Fired</span>
         </div>
-        <div class="spotlight-count">${topShooter.shots}</div>
+        <div class="accolade-body">
+          <div class="accolade-who">
+            <span class="robot-pill ${topShooter.team}">${topShooter.teamName} ${topShooter.number}</span>
+            <span class="team-name">${topShooter.teamName}</span>
+          </div>
+          <div class="accolade-stat">
+            <span class="stat-number">${topShooter.shots}</span>
+            <span class="stat-unit">${topShooter.shots === 1 ? 'shot' : 'shots'}</span>
+          </div>
+        </div>
+      </div>
+    `);
+  } else {
+    spotlights.push(`
+      <div class="accolade-card">
+        <div class="accolade-header">
+          <span class="accolade-icon">🎯</span>
+          <span class="accolade-category">Most Shots Fired</span>
+        </div>
+        <div class="accolade-body">
+          <span class="accolade-empty">No shots recorded</span>
+        </div>
       </div>
     `);
   }
@@ -692,7 +810,7 @@ function showSummary(data: {
     const lPct = total > 0 ? (lVal / total) * 100 : 50;
     return `
       <div class="comparison-row">
-        <div class="comparison-header">
+        <div class="comparison-values">
           <span class="comp-num violet">${vVal}</span>
           <span class="comp-label">${label}</span>
           <span class="comp-num lime">${lVal}</span>
@@ -705,12 +823,17 @@ function showSummary(data: {
     `;
   }
 
-  summaryTeams.innerHTML = [
-    renderCompRow('Goals', vScore, lScore),
-    renderCompRow('Saves', vSaves, lSaves),
-    renderCompRow('Shots', vShots, lShots),
-    renderCompRow('Penalties & Cards', vCards, lCards),
-  ].join('');
+  summaryTeams.innerHTML = `
+    <div class="comparison-header">
+      <span class="side-title violet">${violetTeam}</span>
+      <span class="metric-title">Metric</span>
+      <span class="side-title lime">${limeTeam}</span>
+    </div>
+    ${renderCompRow('Goals Scored', vScore, lScore)}
+    ${renderCompRow('Saves Made', vSaves, lSaves)}
+    ${renderCompRow('Shots Fired', vShots, lShots)}
+    ${renderCompRow('Penalties & Cards (§5.7)', vCards, lCards)}
+  `;
 
   summaryRobotsBody.innerHTML = robotList
     .map((r) => {
@@ -718,19 +841,17 @@ function showSummary(data: {
       return `
         <tr>
           <td>
-            <div class="robot-cell">
-              <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${
-                isViolet ? 'var(--violet)' : 'var(--lime)'
-              }"></span>
+            <span class="robot-badge ${r.team}">
+              <span class="badge-dot"></span>
               ${r.teamName} ${r.number}
-            </div>
+            </span>
           </td>
           <td style="color:${isViolet ? 'var(--violet)' : 'var(--lime)'}; font-weight:600;">${r.teamName}</td>
           <td><span class="role-pill ${r.role.toLowerCase()}">${r.role}</span></td>
-          <td style="font-weight:${r.goals > 0 ? '700' : '400'}; color:${r.goals > 0 ? '#4ade80' : 'inherit'};">${r.goals}</td>
-          <td style="font-weight:${r.saves > 0 ? '700' : '400'};">${r.saves}</td>
+          <td class="${r.goals > 0 ? 'top-stat' : ''}">${r.goals}</td>
+          <td class="${r.saves > 0 ? 'top-stat' : ''}">${r.saves}</td>
           <td>${r.shots}</td>
-          <td style="color:${r.penalties > 0 ? '#f87171' : 'inherit'};">${r.penalties}</td>
+          <td class="${r.penalties > 0 ? 'warn-stat' : ''}">${r.penalties}</td>
         </tr>
       `;
     })

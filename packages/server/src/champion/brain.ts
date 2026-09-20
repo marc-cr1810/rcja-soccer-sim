@@ -83,6 +83,9 @@ export interface ChampionBrainParams {
   aimPost: number;
   /** How far either side of goal centre a screening striker may stand. */
   postScreen: number;
+  /** Cover keeps the striker inside the wings, past the 5.11 detector's 275 mm corridor. */
+  coverWingNear: number;
+  coverWingFar: number;
   /** Where the striker receives a keeper's pass: depth and wing. */
   receiveDepth: number;
   receiveWing: number;
@@ -102,6 +105,8 @@ export interface ChampionBrainParams {
 export const strikerParams: Omit<ChampionBrainParams, 'role'> = {
   aimPost: 155.0,
   postScreen: 190.0,
+  coverWingNear: 300.0,
+  coverWingFar: 420.0,
   receiveDepth: PENALTY_DEPTH + 520.0,
   receiveWing: HALF_WIDTH * 0.55,
   guardDist: 175.0,
@@ -120,6 +125,23 @@ function clamp(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, v));
 }
 
+/**
+ * What this robot is doing this tick, wider than a role name.
+ *
+ * A role is what a robot is assigned for the whole of play. A duty is decided
+ * per tick: both robots share one brain, and which of them presses the ball
+ * and which holds the cover spot is a vote, not an appointment. The
+ * difference matters when the two brains disagree - two robots with different
+ * ball estimates can both vote "press" - so the vote is smoothed by a commit
+ * window and settled with a seat-number tie-break.
+ */
+export type ChampionDuty = 'guard' | 'press' | 'sweep' | 'cover';
+
+/** How much closer (mm) a robot has to be to claim the press without a debate. */
+const PRESS_TIE = 120.0;
+/** Ticks of sustained disagreement before the press/cover vote flips. ~0.2s. */
+const PRESS_COMMIT = 10;
+
 export class ChampionBrain {
   private stallCount = 0;
   private breakoutTicks = 0;
@@ -132,10 +154,16 @@ export class ChampionBrain {
   /** Ticks the partner has stayed silent, while the fold conditions held. */
   private silentTicks = 0;
 
+  /** Current press/cover vote, and how long it has been disagreed with. */
+  private openDuty: ChampionDuty = 'press';
+  private openDutyTicks = 0;
+
   constructor(
     private readonly drive: DriveSpec,
     private readonly params: ChampionBrainParams,
     private readonly skill = 1.0,
+    /** Which seat this robot started on: 1 the nominal striker, 2 the nominal keeper. */
+    private readonly seat = 1,
   ) {}
 
   /** Swap which job this robot is doing. Mid-match, by the fold below. */
@@ -159,6 +187,8 @@ export class ChampionBrain {
     this.passWait = 0;
     this.everHeard = false;
     this.silentTicks = 0;
+    this.openDuty = 'press';
+    this.openDutyTicks = 0;
   }
 
   decide(
@@ -181,22 +211,135 @@ export class ChampionBrain {
     // A striker whose keeper has fallen silent takes over the goal - see
     // `foldedRole`. The keeper never abandons its line for a silent
     // striker, so the fold only ever goes one way.
-    const active = this.everHeard ? this.foldedRole(frame, ball, mateMsg) : this.params.role;
+    const keeper = this.everHeard ? this.foldedRole(frame, ball, mateMsg) === 'goalie' : this.params.role === 'goalie';
 
-    if (active === 'goalie') {
-      return this.goalDecide(frame, me, ball, heading, yawRate, effort, mateMsg, holding);
+    // Restarts are frozen to nominal roles (5.4.6, 5.4.7): the kicking robot
+    // must strike the spot ball, and the keeper must hold its line, so a duty
+    // vote must never pull either off those jobs while a kickoff is pending.
+    const duty: ChampionDuty = frame.kickoff.pending
+      ? this.params.role === 'goalie'
+        ? 'guard'
+        : 'press'
+      : this.dutyOf(keeper, me, ball, mateMsg, holding);
+
+    switch (duty) {
+      case 'guard':
+        return this.goalDecide(frame, me, ball, heading, yawRate, effort, mateMsg, holding);
+      case 'press':
+        return this.strikeDecide(
+          frame,
+          goalFrame,
+          me,
+          ball,
+          heading,
+          yawRate,
+          effort,
+          mateMsg,
+          holding,
+        );
+      case 'cover':
+        return this.coverDecide(me, ball, heading, yawRate, false);
+      case 'sweep':
+        return this.coverDecide(me, ball, heading, yawRate, true);
     }
-    return this.strikeDecide(
-      frame,
-      goalFrame,
-      me,
-      ball,
-      heading,
-      yawRate,
-      effort,
-      mateMsg,
-      holding,
-    );
+  }
+
+  /**
+   * Pick this tick's job. Both robots run the same rules on their own ball
+   * estimates, so the vote below can and does disagree; the commit window
+   * turns a flapping vote (yaw chatter is the clamp "fix" for that) into a
+   * settled one.
+   */
+  private dutyOf(keeper: boolean, me: FramedPose, ball: FramedBall, mateMsg: ChampionRadioMessage | null, holding: boolean): ChampionDuty {
+    // The danger gate: with the ball in our own box the layout is frozen to
+    // seats. The keeper works the ball; the striker covers the wings. It must
+    // NEVER involve the keeper being out of position, so this is decided
+    // before any vote.
+    const danger =
+      ball.seen &&
+      ball.x - OWN_LINE < PENALTY_DEPTH + 60.0 &&
+      Math.abs(ball.z) < PENALTY_WIDTH / 2 + 40.0;
+
+    // The ball being unseen, or in our own half, keeps everyone home: the
+    // keeper guards and the striker wins the ball. Only a ball actually
+    // upfield opens play.
+    const deep = !ball.seen || ball.x < 0;
+
+    if (keeper) {
+      if (danger || deep || holding) return 'guard';
+      // The keeper is the last line: it never leaves the half to press. Its
+      // "cover" is a sweep of the box front, the deepest position from which
+      // it can still be on the line before a slow ball in the box (5.8).
+      return 'sweep';
+    }
+    if (holding || danger || deep) return 'press';
+    return this.assignOpenDuty(me, ball, mateMsg);
+  }
+
+  /**
+   * The press/cover vote, only reached when the ball is genuinely upfield.
+   * Proximity to the ball (own estimate against the partner's, over the
+   * radio) decides who presses; a dead heat goes to seat 1 so the striker
+   * defaults to pressing. The vote needs PRESS_COMMIT ticks of sustained
+   * dissent before it flips.
+   */
+  private assignOpenDuty(me: FramedPose, ball: FramedBall, mateMsg: ChampionRadioMessage | null): ChampionDuty {
+    const mine = Math.hypot(ball.x - me.x, ball.z - me.z);
+    const their = mateMsg?.pos !== undefined ? Math.hypot(ball.x - mateMsg.pos[0], ball.z - mateMsg.pos[1]) : Infinity;
+    const press =
+      mine < their - PRESS_TIE ? true : their < mine - PRESS_TIE ? false : this.seat === 1;
+    const agree = press === (this.openDuty === 'press');
+    this.openDutyTicks = agree ? 0 : this.openDutyTicks + 1;
+    if (this.openDutyTicks >= PRESS_COMMIT) {
+      this.openDuty = press ? 'press' : 'cover';
+      this.openDutyTicks = 0;
+    }
+    return this.openDuty;
+  }
+
+  /**
+   * The two cover duties.
+   *
+   * `sweep` (the keeper, ball upfield): hold the box front on the ball's
+   * side, deep enough to cut off breakaways and long clearances yet close
+   * enough to be on the line before a slow ball in the box (5.8.2).
+   *
+   * `cover` (the striker, when it loses the press vote): hold a flexing
+   * outlet spot just upfield of the ball, so the formation flexes forward as
+   * the ball moves instead of standing still. A `GOAL_LINE - 400` cap keeps
+   * it clear of the keeper's mouth; from here it is a live receiver, a shadow
+   * on a breakaway defender, or - when this robot is alone on the field - a
+   * sweeper that would rather sit one pass deeper than the forward press.
+   */
+  private coverDecide(
+    me: FramedPose,
+    ball: FramedBall,
+    heading: number,
+    yawRate: number,
+    sweeper: boolean,
+  ): ActuatorFrame {
+    const p = this.params;
+    const meX = me.x;
+    const meZ = me.z;
+    const bx = ball.seen ? ball.x : 0;
+    const bz = ball.seen ? ball.z : 0;
+    const coverX = sweeper
+      ? OWN_LINE + PENALTY_DEPTH + 260.0
+      : Math.min(bx + 300.0, GOAL_LINE - 400.0);
+    const coverZ = sweeper
+      ? clamp(bz * 0.7, -430.0, 430.0)
+      : clamp(-bz * 0.4, -360.0, 360.0);
+    const dx = coverX - meX;
+    const dz = coverZ - meZ;
+    const gap = Math.hypot(dx, dz);
+    const travel = steerClearOfEdges(Math.atan2(dz, dx), meX, meZ, 210.0, p.leashX, p.leashZ);
+    const spin = spinTowards(wrapAngle(-heading), yawRate);
+    const speed = clamp(gap / 160.0, 0.3, 1.0) * this.skill;
+    return {
+      motors: mixOmni(this.drive, wrapAngle(travel - heading), speed, spin),
+      dribbler: 1,
+      say: this.broadcast('COVER', meX, meZ, false, ball, gap),
+    };
   }
 
   // --------------------------------------------------------------- striker
@@ -362,26 +505,34 @@ export class ChampionBrain {
       depthInField < PENALTY_DEPTH + 60 &&
       Math.abs(bz) < PENALTY_WIDTH / 2 + 40;
 
+    // 6. Danger gate: ball in our box, keeper is working it (Rule 5.11).
+    //
+    // One defender on the ball has to be the keeper, so the striker's job is
+    // the thing only it can be: the near-wing outlet the keeper can clear to,
+    // standing where a second defender does not open the goal. The 5.11.1
+    // detector counts a defender as "directly blocking the goal" only inside
+    // |z| <= 275 (world.ts `multipleDefenceCandidates`), so the cover spot
+    // lives in the wings - always past 275 - and flexes with the ball's z.
+    // Two defenders in the box are then never both blocking the mouth, which
+    // is the whole of the rule that used to move one of them to midfield.
     const keeperActive = mateMsg && mateMsg.role === 'goalie';
     const keeperOffLine = Boolean(mateMsg?.offLine);
 
     if (keeperActive && inOurBox && !holding) {
-      const waitX = OWN_LINE + PENALTY_DEPTH + (keeperOffLine ? 40.0 : 90.0);
-      const waitZ = clamp(
-        bz * 0.55,
-        keeperOffLine ? -p.postScreen : -300.0,
-        keeperOffLine ? p.postScreen : 300.0,
-      );
+      const wingSign = Math.abs(bz) > 60 ? Math.sign(bz) : Math.abs(meZ) > 1 ? Math.sign(meZ) : 1;
+      const waitX = OWN_LINE + PENALTY_DEPTH + (keeperOffLine ? 40.0 : 110.0);
+      const wing =
+        clamp(p.coverWingNear + Math.abs(bz) * 0.25, p.coverWingNear, p.coverWingFar) * wingSign;
+      const waitZ = wing;
       const gap = Math.hypot(waitX - meX, waitZ - meZ);
       const travel = Math.atan2(waitZ - meZ, waitX - meX);
       const spin = spinTowards(wrapAngle(push - heading), yawRate);
       const speed = (gap > 35 ? clamp(gap / 150.0, 0.3, 1.0) : 0.0) * this.skill;
-      const intent = keeperOffLine ? 'COVER_MOUTH' : 'COVER';
 
       return {
         motors: mixOmni(this.drive, wrapAngle(travel - heading), speed, spin),
         dribbler: 1,
-        say: this.broadcast(intent, meX, meZ, false, ball),
+        say: this.broadcast('COVER_TOP', meX, meZ, false, ball),
       };
     }
 

@@ -62,7 +62,7 @@ export class ChampionAgent implements Agent {
       role: this.role,
       ...(this.role === 'goalie' ? goalieParams : strikerParams),
     };
-    this.brain = new ChampionBrain(this.drive, params, this.skill);
+    this.brain = new ChampionBrain(this.drive, params, this.skill, opts.number === 1 ? 1 : 2);
   }
 
   reset(): void {

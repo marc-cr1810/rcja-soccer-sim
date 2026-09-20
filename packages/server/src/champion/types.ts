@@ -16,6 +16,7 @@ export type ChampionIntent =
   | 'PASS'
   | 'RECEIVE'
   | 'COVER'
+  | 'COVER_TOP'
   | 'COVER_MOUTH'
   | 'SMOTHER'
   | 'GUARD'

@@ -42,27 +42,48 @@
       <div class="summary-modal" role="dialog" aria-modal="true" aria-labelledby="summary-title">
         <button type="button" class="summary-close-btn" id="summary-close" aria-label="Close summary">&times;</button>
         <div class="summary-header">
-          <div class="summary-status-pill" id="summary-status-pill">Full Time Summary</div>
-          <h2 id="summary-title" class="summary-verdict">Match Finished</h2>
+          <div class="summary-top-banner">
+            <div class="verdict-badge" id="summary-verdict-badge">
+              <span class="badge-icon">🏆</span>
+              <span class="badge-text" id="summary-title">Match Finished</span>
+            </div>
+            <div class="summary-status-pill" id="summary-status-pill">Full Time</div>
+          </div>
           <div class="summary-hero-score">
-            <div class="team-col violet">
-              <span class="team-name" id="sum-violet-name">Violet</span>
-              <span class="team-score" id="sum-violet-score">0</span>
+            <div class="hero-team home violet">
+              <div class="team-bar"></div>
+              <div class="team-meta">
+                <span class="team-role">Home &middot; Violet</span>
+                <span class="team-name" id="sum-violet-name">Violet</span>
+              </div>
+              <div class="hero-goals" id="sum-violet-score">0</div>
             </div>
-            <span class="score-dash">:</span>
-            <div class="team-col lime">
-              <span class="team-score" id="sum-lime-score">0</span>
-              <span class="team-name" id="sum-lime-name">Lime</span>
+            <div class="hero-center">
+              <span class="ft-pill">FT</span>
+              <span class="vs-dash">&ndash;</span>
+              <span class="total-legs" id="summary-time-label">10:00</span>
             </div>
+            <div class="hero-team away lime">
+              <div class="hero-goals" id="sum-lime-score">0</div>
+              <div class="team-meta">
+                <span class="team-role">Away &middot; Lime</span>
+                <span class="team-name" id="sum-lime-name">Lime</span>
+              </div>
+              <div class="team-bar"></div>
+            </div>
+          </div>
+          <div class="summary-goals-strip" id="summary-goals-strip" hidden>
+            <span class="goals-strip-label">Goals</span>
+            <div class="goals-chips" id="summary-goals-chips"></div>
           </div>
         </div>
 
         <div class="summary-body">
-          <div class="summary-block-heading">Match Spotlights</div>
-          <div class="summary-spotlights" id="summary-spotlights"></div>
+          <div class="summary-block-heading">Player Spotlights</div>
+          <div class="accolades-grid" id="summary-spotlights"></div>
 
           <div class="summary-block-heading">Team Comparison</div>
-          <div class="summary-teams" id="summary-teams"></div>
+          <div class="team-comparison-card" id="summary-teams"></div>
 
           <div class="summary-block-heading">Robot Performance</div>
           <div class="summary-robots-wrap">
@@ -75,7 +96,7 @@
                   <th>Goals</th>
                   <th>Saves</th>
                   <th>Shots</th>
-                  <th>Cards</th>
+                  <th>Penalties (&sect;5.7)</th>
                 </tr>
               </thead>
               <tbody id="summary-robots-body"></tbody>

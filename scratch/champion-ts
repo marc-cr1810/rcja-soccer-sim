@@ -1,0 +1,11 @@
+# The pinned champion a changed one must beat, by commit.
+#
+# `scratch/duel-ts.sh` plays the working-tree champion against this sha, both
+# arrangements pooled, and that is the benchmark a change has to clear the
+# same way champion-vs-python gates a champion against the python example.
+# A winner is measured over enough matches to mean something, never over one
+# or two.
+#
+# This first pin is the "best so far" working tree, frozen at its commit
+# before any of the dynamic-role work begins.
+ab6ce00ad96be1d910be3fcd58138329a20b7388

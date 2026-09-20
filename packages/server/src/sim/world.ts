@@ -339,6 +339,8 @@ export class World {
   commsActivity: Record<TeamId, number> = { violet: -99, lime: -99 };
   /** The robot that last had physical contact or kicked the ball, and when. */
   lastBallTouch: { robotId: string; team: TeamId; at: number } | null = null;
+  /** Most recent touch per team, so deflected shots do not erase the shooter's attribution. */
+  lastTouchByTeam: Record<TeamId, { robotId: string; at: number } | null> = { violet: null, lime: null };
 
   /**
    * Flips every physics tick. Robot-robot collisions and separation are
@@ -674,6 +676,7 @@ export class World {
   private applyArrangement(arrangement: Arrangement, kickingOff: TeamId): void {
     this.restartCount++;
     this.lastBallTouch = null;
+    this.lastTouchByTeam = { violet: null, lime: null };
     // A robot still serving a 5.7 stand-down does not get a free pass just
     // because some restart repositions everyone else - only returnRobot()
     // (5.7.4) brings it back, automatically or by a referee's hand. Without
@@ -827,7 +830,10 @@ export class World {
       if (sweptHit?.hit === 'robot' && sweptHit.robotId) {
         const robotId = sweptHit.robotId;
         const r = actives.find((a) => a.id === robotId);
-        if (r) this.lastBallTouch = { robotId: r.id, team: r.team, at: this.clock };
+        if (r) {
+          this.lastBallTouch = { robotId: r.id, team: r.team, at: this.clock };
+          this.lastTouchByTeam[r.team] = { robotId: r.id, at: this.clock };
+        }
       }
     }
 
@@ -867,6 +873,7 @@ export class World {
         ballDVX += this.scratchBallTrial.vx - this.scratchBallBefore.vx;
         ballDVZ += this.scratchBallTrial.vz - this.scratchBallBefore.vz;
         this.lastBallTouch = { robotId: robot.id, team: robot.team, at: this.clock };
+        this.lastTouchByTeam[robot.team] = { robotId: robot.id, at: this.clock };
       }
     }
     this.ball.x += ballDX;
@@ -996,7 +1003,10 @@ export class World {
 
     this.score[scorer] += 1;
     let scoringRobotId: string | undefined = undefined;
-    if (this.lastBallTouch && this.clock - this.lastBallTouch.at < 6.0 && this.lastBallTouch.team === scorer) {
+    const teamTouch = this.lastTouchByTeam[scorer];
+    if (teamTouch && this.clock - teamTouch.at < 10.0) {
+      scoringRobotId = teamTouch.robotId;
+    } else if (this.lastBallTouch && this.clock - this.lastBallTouch.at < 10.0 && this.lastBallTouch.team === scorer) {
       scoringRobotId = this.lastBallTouch.robotId;
     }
     this.emit({

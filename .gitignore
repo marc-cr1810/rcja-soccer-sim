@@ -84,3 +84,6 @@ Desktop.ini
 .idea/
 *.sublime-workspace
 *.sublime-project
+
+# Linked worktrees the duel harness materialises for pinned champions
+scratch/.wt-*/

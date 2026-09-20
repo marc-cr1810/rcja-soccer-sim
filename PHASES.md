@@ -860,56 +860,197 @@ person holding this screen is the one being shouted at.
 
 ---
 
-## Phase 13 — See what your robot saw
+## Phase 13 — The robot is a board
+
+*Gate: a student who has used a Pico connects to their robot, copies files onto
+it, interrupts it, types `ball.read_u16()` at a `>>>` prompt and gets a number —
+then carries the same robot onto a practice field and into a match, without
+uploading anything a second time.*
+
+The API fidelity is already here: `Pin`, `PWM`, `ADC` on a real pinout, a camera
+that speaks a framed protocol over a UART, one runtime owning one connection.
+**It stops at the module boundary.** Above `import machine` the vocabulary is
+the deployment system's — four ways for code to reach a field, five seat kinds
+of which three are the same code at different staleness, a `manifest.json` no
+board has, and tokens and URLs a child copies off a web page into a terminal.
+
+The two layers now openly contradict each other: `examples/board.py` reads the
+robot switch and says *"two robots a side, and the same program on both"*, while
+[writing a robot](docs/writing-a-robot.md) says a submission is one robot and a
+team with two pushes twice.
+
+[docs/planning/the-robot-is-a-board.md](docs/planning/the-robot-is-a-board.md)
+is the working plan — the nouns, six workflows written out, the deletion list
+and seven slices.
+
+- **Four nouns and one verb.** A **project** is a folder of Python and a team
+  has as many as it likes. **`lib/`** is a team-level folder that lands on every
+  board — MicroPython's own convention, not one invented here. A **board** is a
+  filesystem and a team has exactly two, because that is how many robots a side
+  has. A **seat** is where a board plays. The verb is **flash**.
+- **Two robots, three layouts, no modes.** One project flashed to both; two
+  projects, one per board; or two projects sharing `lib/`. All three fall out of
+  *projects → boards* and the server never learns which a team chose. The solo
+  student writes one project and flashes both, which is also what one student
+  with two real robots does.
+- **No roles in the starter.** Flashed to both boards it makes two robots that
+  chase the same ball and get in each other's way, and *that is the first real
+  problem the team gets to solve*. Roles are a strategy decision, not a platform
+  feature; `board.robot` is there on pin 41 for the afternoon they want it.
+- **Moving a robot copies nothing.** A seat holds a board. The one moment a copy
+  is taken is **check-in** — Phase 11's lineup lock, which is already a copy
+  rather than a flag, under the name a team knows from scrutineering. What plays
+  is the last check-in that passed, so breaking your code at nine at night
+  cannot break your entry.
+- **A REPL, because it is how a child learns what a sensor is.** Ctrl-C, `>>>`,
+  `ball.read_u16()`, a hand over the sensor, ask again. It fits the seam that
+  already exists: `sleep_ms()` is the frame boundary and `Timer` callbacks
+  already run in that window, so a statement `exec`'d there gets the same honest
+  deal. Adding a message type breaks no robot anybody has written — Phase 9's
+  reason when it added `disabled`. **Your board, your field**: a fixture arena
+  refuses it, because a prompt into a scored match is cheating.
+- **A pit is an arrangement, not a new arena.** Phase 4 already settled that one
+  robot alone is an arrangement rather than a special case, so "your robot on
+  the bench with the USB in" is a one-robot, no-ball, stopped field. What changes
+  is the accounting: **the cap counts occupied seats rather than arenas**, so
+  somebody checking whether their compass works stops competing with a full
+  four-robot rehearsal. The pit's real cost gets measured before any number goes
+  in a config.
+- **A CLI first, and an extension over it.** `rcja login` once, then `new`,
+  `ls`, `diff`, `push`, `run`, `repl`, `logs` — no URL, token or key ever typed
+  again. Much of it already exists as HTTP: `/workspace-api/*` is most of a board
+  filesystem and an API key already works anywhere a session does. The VS Code
+  extension is then what MicroPico is, adding no protocol of its own — the same
+  argument this file already makes about the trace. Thonny is the more common
+  tool at the young end of RCJ and is a plausible second wrapper over the same
+  CLI; building the CLI first is what keeps that door open.
+- **The editor is last and stays convenience.** A Boards view showing what is
+  actually on each robot, flash and Run as buttons, the REPL as a terminal —
+  and one thing MicroPico cannot have, the field in a panel beside the code,
+  since here the robot is on a screen rather than on your desk. `rcja` ships as
+  a console script in the existing `rcja-soccer`
+  package, the way `rcja-join` and `rcja-submit` already do — one `pip install`
+  for the library, `machine` and the tool. If the extension slipped a season
+  nothing would break, which is the test it has to keep passing: the moment it
+  is the good way in, the laptop that cannot install it is second-class.
+- **Signing in is a device code**, the shape `gh auth login` uses: `rcja login`
+  prints a short code, the student approves it in the browser they are already
+  signed into, and an ordinary `rcja_` key lands in `~/.config/rcja/`. Nothing
+  secret is typed by a child and nothing secret is copied out of a page. The key
+  names its machine, so `/team/settings` becomes a list of authorised laptops
+  with a Revoke against each. Registration is unchanged and stays invite-first,
+  and `rcja login` against a laptop `serve` says there is nothing to log into
+  rather than failing. **It does not make a hall network safe** — that is
+  Phase 15, and it was owed before this phase existed.
+- **Breakpoints, and the mode that makes them honest.** Set one in `main.py`,
+  hit it, read the stack and the locals, step, evaluate in that frame. The
+  mechanism is one this file already planned for the scrubber:
+  [`playLockstep`](packages/server/src/match/lockstep.ts) holds the world until
+  every program has answered, so a robot stopped inside its own `think()` simply
+  stops the field rather than timing out. **Practice only, and that is physics
+  rather than purity** — a scored match runs under `playFast` and must, because
+  the last-command-stands rule is what stops one team's laptop taking another
+  team's match down. On the robot side it is `bdb` from the standard library, so
+  no `debugpy` and no pip; the adapter is `rcja debug` speaking DAP on stdio, so
+  the editor contributes a launch type and nothing else, and anything else that
+  speaks DAP gets it free. Evaluating in a frame *is* the prompt's `exec` aimed
+  somewhere else: one feature, two front ends. The cost to be honest about is
+  that **lockstep hides timing** — so it is a mode you visibly leave, and
+  *Run it for real* replays the same arrangement at wall-clock with the budget
+  on. Debug stopped; verify running.
+- **The superseded paths are deleted, not shimmed**, because none of them has
+  shipped to a team: `manifest.json`, `submit.py`, `join.py`, the documented
+  bare `python myrobot.py --team --url` form, and the two seat kinds that merge.
+  The argv convention itself stays — it is how the server spawns a board, and no
+  student sees it.
+
+---
+
+## Phase 14 — See what your robot saw
 
 *Gate: a team finds a real bug in their robot by scrubbing back to the tick
 where it last saw the ball — without adding a print statement.*
 
-A VS Code extension, for the team who has Python and is now losing matches for
-reasons they cannot see. This is the single hardest thing about the league: a
-robot that plays badly and a robot that is perceiving badly look identical from
-the outside, and the only tool a team has today is printing things in a loop
-that runs fifty times a second.
+For the team who is now losing matches for reasons they cannot see. This is the
+single hardest thing about the league: a robot that plays badly and a robot
+that is perceiving badly look identical from the outside.
 
-It is its own phase rather than part of Phase 5 because the two have nothing
-in common but a target — Phase 5 is for a student who cannot run Python at all,
-this is for one who can — and because one phase with two gates is a phase that
+It is separate from Phase 13 because the two have nothing in common but a
+target — Phase 13 is for the student's first afternoon, this is for the team
+that is already good — and because one phase with two gates is a phase that
 passes neither for months. It sits last because it does not block a season from
 running: everything before it is needed to hold an event, and this is needed to
 get good at one.
 
 > It was Phase 7 until the accounts work was split into
-> [6 through 10](END-STATE.md), and it has drifted up twice since. Renumbering
-> stays free above 6 and nowhere else — eight places in the source name Phase 6
-> as the one that builds accounts, and Phase 6 still is; nothing in the source
+> [6 through 10](END-STATE.md), and it has drifted up since. Renumbering stays
+> free above 6 and nowhere else — eight places in the source name Phase 6 as
+> the one that builds accounts, and Phase 6 still is; nothing in the source
 > names any phase above it.
 
 - **The trace, first and on its own.** Sensor and actuator frames per tick,
   recorded from a match, written as a file. Nothing records these today.
-  It lands as a CLI flag and a file format before any extension exists,
+  It lands as a CLI flag and a file format before any viewer exists,
   because a trace is useful to a team with a terminal on the day it works,
-  and because a data layer designed inside an editor plug-in comes out shaped
+  and because a data layer designed inside a plug-in comes out shaped
   like that plug-in.
 - **The inspector.** For the tick under the cursor: the IR ring with the
   sector that fired, the line sensors and what each was over, the four range
   beams and where they ended, and the goal blobs as arcs — the reading, not an
   interpretation of it, because working out what a blob means is the team's
   job and the thing they are here to learn.
-- **A practice field that stops.** [`playLockstep`](src/lockstep.ts) already
-  holds the world until every program has answered, and is already written as
-  a diagnostic mode that a competition must never use. A practice field that
-  runs under it gets step and pause honestly, with the match standing still
-  rather than the connection timing out.
-- **No `debugpy`, and no pip anything.** Real breakpoints were the obvious
-  design and they cost a dependency, which is the one thing this league has
-  refused at every turn. A field that steps plus a trace you can scrub answers
-  "what did it see and what did it do about it", which is the question — and
-  answers it for the team whose laptop would not have let them install a
-  debugger either.
-- **Scaffold, run, submit.** A team folder from the palette, a practice match
-  against the reference agent, and a push to a venue server — the same three
-  things [`python/submit.py`](python/submit.py) and the docs already describe,
-  minus the terminal.
+- **The stepping field is Phase 13's now.** This phase used to carry it, on the
+  way to a scrubber. Breakpoints needed it sooner, so
+  [`playLockstep`](packages/server/src/match/lockstep.ts) behind a practice
+  field lands there and the trace does not have to wait for it.
+- **Still no pip anything.** Phase 13's debugger is `bdb` from the standard
+  library and this phase's trace is a file format; neither costs a dependency,
+  which is the one thing this league has refused at every turn. What the trace
+  adds over a breakpoint is the question a breakpoint cannot answer — *what did
+  it see on the tick before the one I stopped on* — because by the time you know
+  where to stop, the interesting tick is already gone.
+
+---
+
+## Phase 15 — A venue you can trust the wifi of
+
+*Gate: a student signs in, flashes a board and referees a match at a venue, and
+somebody else on the same wifi running a packet capture learns nothing they
+could use.*
+
+**This is owed rather than new.** Accounts have crossed hall networks since
+Phase 6, and [league.ts](packages/server/src/league/league.ts) declines to set
+`Secure` on the session cookie for an honest reason — *"a venue server is
+routinely plain http on a hall's own network, and a cookie a browser refuses to
+send is a login that silently does not work."* That comment is correct about
+today and is also a description of the problem. A password, an `rcja_` key and
+Phase 13's device code are all readable in the clear on that network, and no
+amount of care in the login flow changes it.
+
+It is separate from Phase 13 because credential *handling* and credential
+*transport* are different problems with different failure modes, and because
+certificate trust on school-managed laptops is its own swamp — one that could
+eat a phase about students writing robots. It is last because a venue runs
+today without it, the way a venue ran without accounts before Phase 6.
+
+- **The honest threat model, written down first.** A school hall, one flat
+  network, thirty laptops belonging to children, and no expectation of an
+  administrator. What is actually worth protecting is a team's ability to push
+  code and a referee's ability to control a match — not spectator traffic,
+  which is public by design.
+- **Certificates without a certificate authority argument.** The candidates are
+  a self-signed cert the venue distributes, a local CA, or a real name with a
+  real cert where the venue has internet. Each has a different failure on a
+  locked-down laptop, and the choice wants measuring on actual school hardware
+  rather than reasoning about.
+- **Degrade honestly, never silently.** A venue that cannot get TLS up twenty
+  minutes before the first match must still run — that is the whole ethic of
+  this codebase — but everybody signing in should be able to see which kind of
+  venue they are on. A plain-http venue that looks identical to a secured one is
+  worse than one that says so.
+- **The laptop match server keeps needing none of it.** `serve` on a classroom
+  laptop has no accounts, no credentials and nothing to intercept, and it stays
+  exactly as cheap as it is.
 
 ---
 

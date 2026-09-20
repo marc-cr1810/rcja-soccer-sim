@@ -676,6 +676,72 @@ describe('staged matches (Phase 4)', () => {
       expect(typeof stats!.penalties).toBe('number');
     }
   });
+
+  it('detects shots on target and goalie saves', () => {
+    const m = new Match({
+      agents: teams(),
+      halfSeconds: 10,
+      seed: 1,
+    });
+    const limeDefends = m.world.defendingGoal('lime');
+    const targetX = limeDefends === 'yellow' ? 915 : -915;
+    const shootDir = targetX > 0 ? 1 : -1;
+
+    m.world.ball.x = targetX - shootDir * 300;
+    m.world.ball.z = 0;
+    m.world.ball.vx = shootDir * 600;
+    m.world.ball.vz = 0;
+    m.world.lastBallTouch = { robotId: 'violet-1', team: 'violet', at: m.world.clock };
+    m.world.lastTouchByTeam['violet'] = { robotId: 'violet-1', at: m.world.clock };
+
+    const goalie = m.world.robots.find((r) => r.id === 'lime-2')!;
+    goalie.x = targetX - shootDir * 100;
+    goalie.z = 0;
+
+    const dt = 1 / 100;
+    for (let i = 0; i < 20; i++) {
+      m.step(dt);
+    }
+
+    const res = m.result();
+    expect(res.robotStats).toBeDefined();
+    expect(res.robotStats!['violet-1']!.shots).toBeGreaterThanOrEqual(1);
+    expect(res.robotStats!['lime-2']!.saves).toBeGreaterThanOrEqual(1);
+  });
+
+  it('credits shooter with a goal even when deflected by a defender', () => {
+    const m = new Match({
+      agents: teams(),
+      halfSeconds: 10,
+      seed: 1,
+    });
+    const violetAttacks = m.world.defendingGoal('lime');
+    const targetX = violetAttacks === 'yellow' ? 915 : -915;
+    const dir = targetX > 0 ? 1 : -1;
+
+    // Violet-1 touched ball
+    m.world.ball.x = targetX - dir * 200;
+    m.world.ball.z = 0;
+    m.world.ball.vx = dir * 1200;
+    m.world.ball.vz = 0;
+    m.world.lastBallTouch = { robotId: 'violet-1', team: 'violet', at: m.world.clock };
+    m.world.lastTouchByTeam['violet'] = { robotId: 'violet-1', at: m.world.clock };
+
+    // Defender touches ball on way into goal
+    m.world.lastBallTouch = { robotId: 'lime-2', team: 'lime', at: m.world.clock + 0.05 };
+
+    // Move ball into goal back
+    m.world.ball.x = targetX + dir * 60;
+    const dt = 1 / 100;
+    m.step(dt);
+
+    const res = m.result();
+    expect(res.score.violet).toBe(1);
+    expect(res.goals.length).toBe(1);
+    expect(res.goals[0]?.robotId).toBe('violet-1');
+    expect(res.robotStats).toBeDefined();
+    expect(res.robotStats!['violet-1']!.goals).toBe(1);
+  });
 });
 
 /**

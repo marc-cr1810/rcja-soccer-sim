@@ -23,6 +23,7 @@ import {
   type MatchResult, type RefereeAction, type ScoreCorrection,
   type RobotStats, type SlotReport,
 } from '@rcja/shared/view';
+import { GOAL_MOUTH_X, HALF_GOAL_SHELL, HALF_LENGTH, PENALTY_DEPTH } from '../sim/field';
 
 // Re-export so callers of match.ts keep working without import changes.
 export type { MatchResult, RefereeAction, ScoreCorrection, RobotStats, SlotReport };
@@ -636,6 +637,7 @@ export class Match {
     this.world.ball.vx = Math.cos(robot.heading) * KICK_SPEED;
     this.world.ball.vz = Math.sin(robot.heading) * KICK_SPEED;
     this.world.lastBallTouch = { robotId: robot.id, team: robot.team, at: this.world.clock };
+    this.world.lastTouchByTeam[robot.team] = { robotId: robot.id, at: this.world.clock };
     this.ensureStats(robot.id).shots++;
     this.lastShotAt[robot.id] = this.world.clock;
   }
@@ -656,6 +658,8 @@ export class Match {
       const grip = Math.min(1, DRIBBLE_GRIP * power * dt * PHYSICS_HZ);
       this.world.ball.vx += (robot.vx - this.world.ball.vx) * grip;
       this.world.ball.vz += (robot.vz - this.world.ball.vz) * grip;
+      this.world.lastBallTouch = { robotId: robot.id, team: robot.team, at: this.world.clock };
+      this.world.lastTouchByTeam[robot.team] = { robotId: robot.id, at: this.world.clock };
     }
   }
 
@@ -685,15 +689,18 @@ export class Match {
   private detectShotBeforeStep(): void {
     const ball = this.world.ball;
     const speed = Math.hypot(ball.vx, ball.vz);
-    if (speed < 450) return;
+    if (speed < 300) return;
 
-    // Check if moving towards cyan (-1200)
-    if (ball.vx < -350) {
-      const t = (-1200 - ball.x) / ball.vx;
-      if (t > 0 && t < 2.2) {
+    // Cyan goal mouth sits at -GOAL_MOUTH_X (-915)
+    if (ball.vx < -250) {
+      const t = (-GOAL_MOUTH_X - ball.x) / ball.vx;
+      if (t > 0 && t < 2.5) {
         const crossZ = ball.z + ball.vz * t;
-        if (Math.abs(crossZ) < 250) {
-          const shooterId = this.world.lastBallTouch?.robotId;
+        if (Math.abs(crossZ) <= HALF_GOAL_SHELL + 10) {
+          const attackingTeam: TeamId = this.world.defendingGoal('violet') === 'cyan' ? 'lime' : 'violet';
+          const shooterId = this.world.lastBallTouch?.team === attackingTeam
+            ? this.world.lastBallTouch.robotId
+            : this.world.lastTouchByTeam[attackingTeam]?.robotId;
           this.shotInFlight = { targetGoal: 'cyan', shooterId, at: this.world.clock };
           if (shooterId && (this.world.clock - (this.lastShotAt[shooterId] ?? -99) > 1.0)) {
             this.lastShotAt[shooterId] = this.world.clock;
@@ -701,13 +708,16 @@ export class Match {
           }
         }
       }
-    } else if (ball.vx > 350) {
-      // Check if moving towards yellow (+1200)
-      const t = (1200 - ball.x) / ball.vx;
-      if (t > 0 && t < 2.2) {
+    } else if (ball.vx > 250) {
+      // Yellow goal mouth sits at +GOAL_MOUTH_X (+915)
+      const t = (GOAL_MOUTH_X - ball.x) / ball.vx;
+      if (t > 0 && t < 2.5) {
         const crossZ = ball.z + ball.vz * t;
-        if (Math.abs(crossZ) < 250) {
-          const shooterId = this.world.lastBallTouch?.robotId;
+        if (Math.abs(crossZ) <= HALF_GOAL_SHELL + 10) {
+          const attackingTeam: TeamId = this.world.defendingGoal('violet') === 'yellow' ? 'lime' : 'violet';
+          const shooterId = this.world.lastBallTouch?.team === attackingTeam
+            ? this.world.lastBallTouch.robotId
+            : this.world.lastTouchByTeam[attackingTeam]?.robotId;
           this.shotInFlight = { targetGoal: 'yellow', shooterId, at: this.world.clock };
           if (shooterId && (this.world.clock - (this.lastShotAt[shooterId] ?? -99) > 1.0)) {
             this.lastShotAt[shooterId] = this.world.clock;
@@ -724,18 +734,27 @@ export class Match {
       this.shotInFlight = null;
       return;
     }
+    // If a goal was scored in this step, do not count it as a save
+    if (this.world.score.violet > this.lastScore.violet || this.world.score.lime > this.lastScore.lime) {
+      this.shotInFlight = null;
+      return;
+    }
+
     const targetGoal = this.shotInFlight.targetGoal;
     const defTeam: TeamId = this.world.defendingGoal('violet') === targetGoal ? 'violet' : 'lime';
     const ball = this.world.ball;
 
     for (const robot of this.world.robots) {
       if (robot.team !== defTeam || robot.removed) continue;
-      const inDefArea = Math.abs(robot.x) > 1200 - 450;
+      // In or near the defending penalty area
+      const inDefArea = Math.abs(robot.x) > HALF_LENGTH - PENALTY_DEPTH - 60;
       if (!inDefArea && !robot.isGoalie) continue;
 
       const dist = Math.hypot(robot.x - ball.x, robot.z - ball.z);
-      if (dist <= robot.radius + ball.radius + 18) {
-        if (this.world.clock - (this.lastSaveAt[robot.id] ?? -99) > 1.2) {
+      const touched = this.world.lastBallTouch?.robotId === robot.id &&
+        Math.abs(this.world.clock - this.world.lastBallTouch.at) < 0.05;
+      if (touched || dist <= robot.radius + ball.radius + 30) {
+        if (this.world.clock - (this.lastSaveAt[robot.id] ?? -99) > 1.0) {
           this.lastSaveAt[robot.id] = this.world.clock;
           this.ensureStats(robot.id).saves++;
         }
@@ -797,11 +816,14 @@ export class Match {
         this.lastScore[team]++;
         this.shotInFlight = null;
         const lastGoalEvent = [...this.world.events].reverse().find((e) => e.kind === 'goal' && e.team === team);
-        const robotId = lastGoalEvent?.robotId;
-        this.goals.push({ team, at: this.world.clock, half: this.world.half, robotId });
-        if (robotId) {
-          this.ensureStats(robotId).goals++;
+        let robotId = lastGoalEvent?.robotId;
+        if (!robotId) {
+          // Fallback if no attacker was credited (e.g. own goal or untracked deflection)
+          const teamTouch = this.world.lastTouchByTeam?.[team];
+          robotId = teamTouch?.robotId ?? `${team}-1`;
         }
+        this.goals.push({ team, at: this.world.clock, half: this.world.half, robotId });
+        this.ensureStats(robotId).goals++;
       }
     }
     this.checkMercy();
