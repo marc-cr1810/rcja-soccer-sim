@@ -69,6 +69,13 @@ import {
 const GOAL_LINE = HALF_LENGTH;
 /** And the goal being defended: always the other one. */
 const OWN_LINE = -HALF_LENGTH;
+/**
+ * Ticks a keeper must have been back at its post before the striker gives the
+ * net back. Long enough that the mouth is never bare while the keeper is off
+ * carrying, short enough that the striker is back on the attack promptly.
+ * 25 ticks ~ 0.5 s at 50 Hz.
+ */
+const HANDBACK_TICKS = 25;
 
 /**
  * The constants that tell a robot which job it is doing.
@@ -137,6 +144,16 @@ export class ChampionBrain {
   /** Ticks the partner has stayed silent, while the fold conditions held. */
   private silentTicks = 0;
 
+  /**
+   * The striker-as-keeper swap (Rule 5.8's nominated goalie is seat 2, so
+   * only it may legally leave the goal). While seat 2 carries the ball out,
+   * the striker takes the net; it stays there until seat 2 has been home for
+   * a sustained window, so the handover handback cannot leave the mouth
+   * momentarily bare, and it decays so a one-tick radio gap does not flap it.
+   */
+  private guardian = false;
+  private handbackTicks = 0;
+
   constructor(
     private readonly drive: DriveSpec,
     private readonly params: ChampionBrainParams,
@@ -164,6 +181,8 @@ export class ChampionBrain {
     this.passWait = 0;
     this.everHeard = false;
     this.silentTicks = 0;
+    this.guardian = false;
+    this.handbackTicks = 0;
   }
 
   decide(
@@ -184,14 +203,17 @@ export class ChampionBrain {
     if (mateMsg && !this.everHeard) this.everHeard = true;
 
     // A striker whose keeper has fallen silent takes over the goal - see
-    // `foldedRole`. The keeper never abandons its line for a silent
-    // striker, so the fold only ever goes one way. During a pending kickoff
-    // `foldedRole` resets and returns the nominal role, keeping the kicking
-    // robot on the spot and the keeper on its line (5.4.6, 5.4.7).
-    const keeper = this.everHeard ? this.foldedRole(frame, ball, mateMsg) === 'goalie' : this.params.role === 'goalie';
+    // `foldedRole` - and a keeper that carries the ball out (the swap) hands
+    // the net to the striker. The striker never abandons its line for a silent
+    // striker, and only seat 2 is whatever the referee means by "goalie", so
+    // the keeper never swaps the other way. During a pending kickoff
+    // `liveRole` returns nominal roles, keeping the kicking robot on the spot
+    // and the keeper on its line (5.4.6, 5.4.7).
+    const live = this.liveRole(frame, me, ball, mateMsg, holding);
 
-    if (keeper) {
-      return this.goalDecide(frame, me, ball, heading, yawRate, effort, mateMsg, holding);
+    if (live === 'goalie') {
+      const viaWing = this.params.role === 'striker';
+      return this.goalDecide(frame, me, ball, heading, yawRate, effort, mateMsg, holding, viaWing);
     }
     return this.strikeDecide(
       frame,
@@ -204,6 +226,65 @@ export class ChampionBrain {
       mateMsg,
       holding,
     );
+  }
+
+  /**
+   * Decide which of the two jobs this robot is actually doing this tick.
+   *
+   * Nominal roles are fixed by seat: seat 1 the striker, seat 2 the nominated
+   * keeper (world.ts spawns `isGoalie` on seat 2 and the referee keys 5.8 to
+   * it). Nominal is also the *only* legal layout at a pending kickoff (5.4.6,
+   * 5.4.7), so that is returned before anything else.
+   *
+   * The one swap permitted is the keeper's: holding the ball it becomes the
+   * striker and carries it out; loose again, it is the keeper once more. The
+   * striker covers the other half of the swap - it takes the net whenever the
+   * keeper is not home - and gives it back only once the keeper has been home
+   * for `HANDBACK_TICKS`, so the mouth is never bare while the keeper is off
+   * carrying, and never double-occupied after it returns (5.11).
+   */
+  private liveRole(
+    frame: SensorFrame,
+    me: FramedPose,
+    ball: FramedBall,
+    mateMsg: ChampionRadioMessage | null,
+    holding: boolean,
+  ): ChampionRole {
+    if (frame.kickoff.pending) return this.params.role;
+
+    if (this.params.role === 'goalie') {
+      if (!holding) return 'goalie';
+      // A keeper holding in its box passes when the striker is framed upfield
+      // (the proven breakout), and only carries out when there is no such
+      // receiver - where the swap turns a parked clear into a breakaway.
+      const outlet = mateMsg?.pos;
+      const passOn =
+        Boolean(outlet) && outlet![0] - me.x > 250.0 && mateMsg?.role === 'striker';
+      return passOn ? 'goalie' : 'striker';
+    }
+
+    // Nominal striker: the fold first (keeper silent, ball deep - see
+    // `foldedRole`), then the audible swap.
+    if (this.foldedRole(frame, ball, mateMsg) === 'goalie') return 'goalie';
+
+    if (mateMsg && mateMsg.role === 'goalie') {
+      const homeLimit = OWN_LINE + PENALTY_DEPTH + 150;
+      if (mateMsg.pos && mateMsg.pos[0] > homeLimit) {
+        // Keeper is off carrying (or stranded upfield): the striker is the net.
+        this.guardian = true;
+        this.handbackTicks = 0;
+        return 'goalie';
+      }
+      if (this.guardian) {
+        this.handbackTicks++;
+        if (this.handbackTicks >= HANDBACK_TICKS) this.guardian = false;
+        if (this.guardian) return 'goalie';
+      }
+    }
+
+    this.guardian = false;
+    this.handbackTicks = 0;
+    return 'striker';
   }
 
   // --------------------------------------------------------------- striker
@@ -514,6 +595,7 @@ export class ChampionBrain {
     _effort: WheelEffort,
     mateMsg: ChampionRadioMessage | null,
     holding: boolean,
+    viaWing = false,
   ): ActuatorFrame {
     const p = this.params;
     const meX = me.x;
@@ -555,6 +637,21 @@ export class ChampionBrain {
         dribbler: 1,
         say: this.broadcast('OFF_THE_LINE', meX, meZ, holding, ball),
       };
+    }
+
+    // 3.5 Swap return lane: a striker taking the net while the keeper carries
+    // the ball out must not cross the keeper's outgoing lane up the middle,
+    // or the two robots bump into each other mid-pitch (the sim resolves the
+    // overlap with momentum). So while it is still far from its post it comes
+    // home via the far wing, and only cuts into the mouth once it is already
+    // at box depth - by which time the carrier has gone.
+    if (viaWing) {
+      const gapToPost = Math.hypot(guardX - meX, -meZ);
+      if (gapToPost > 380.0) {
+        const wx = OWN_LINE + PENALTY_DEPTH + 40.0;
+        const wz = clamp((meZ >= 0 ? -1.0 : 1.0) * 430.0, -430.0, 430.0);
+        return this.hold(meX, meZ, wx, wz, squareSpin, heading, 'GUARD', me.confidence);
+      }
     }
 
     // 4. Lost Ball Fallback
