@@ -21,7 +21,7 @@ import { spawnSync } from 'node:child_process';
 import { checkLatestRelease, formatUpdateBanner, performUpgrade, GITHUB_REPO } from './update';
 import { randomBytes } from 'node:crypto';
 import { cpus, homedir, networkInterfaces, userInfo } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { DEFAULT_OPTIONS, formatBench, runBench, type BenchResult } from '../league/bench';
 import { slugifyTeam } from './manifest';
 import { isLeagueId, type LeagueId } from '@rcja/shared/leagues';
@@ -1057,26 +1057,51 @@ async function tournament(flags: Map<string, string>): Promise<void> {
 }
 
 /**
- * Resolves the default storage directory for league assets.
- * - Option B (in this repository for testing): `./data/<subdir>`.
- * - Option A (proper install on an actual system): `~/.local/share/rcja-soccer-sim/<subdir>` (Linux XDG standard).
+ * The repository root, from anywhere inside a checkout of it.
+ *
+ * Walks up looking for the root `package.json` rather than only checking the
+ * directory it was handed. Since the monorepo restructure that distinction is
+ * load-bearing: `packages/server/package.json` exists and is named
+ * `@rcja/server`, so a check of the current directory alone finds a
+ * package.json, decides it is the wrong project, and falls through.
+ */
+function repositoryRoot(from: string): string | null {
+  let dir = resolve(from);
+  for (;;) {
+    const pkg = join(dir, 'package.json');
+    if (existsSync(pkg)) {
+      try {
+        if (JSON.parse(readFileSync(pkg, 'utf8')).name === 'rcja-soccer-sim') return dir;
+      } catch { }
+    }
+    const parent = dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
+/**
+ * Where a server keeps what it accumulates: pushed submissions, teams' working
+ * folders, tournaments, and the accounts database.
+ *
+ * Inside a checkout it is always `<repository root>/data/<subdir>`, whichever
+ * directory within the checkout the server was started from. Anywhere else it
+ * is the XDG user data directory, which is what an installed binary gets.
+ *
+ * "Whichever directory" is the part that was broken. Only `cwd` itself was
+ * examined, so starting the server from `packages/server` - which `bun run
+ * --cwd packages/server` and the package's own `cli` script both do - silently
+ * used `~/.local/share` instead, and a developer would find their pushes and
+ * accounts in a different place depending on where they happened to be
+ * standing. `.gitignore` anchors `/data/` to the root to match this.
  */
 export function defaultStorageDir(
   subdir: 'league' | 'tournaments' | 'submissions' | 'workspaces' | 'pushes',
   cwd: string = process.cwd(),
 ): string {
-  // 1. If running inside this project repo (detected by package.json name):
-  const localPkg = resolve(cwd, 'package.json');
-  if (existsSync(localPkg)) {
-    try {
-      const pkg = JSON.parse(readFileSync(localPkg, 'utf8'));
-      if (pkg.name === 'rcja-soccer-sim') {
-        return resolve(cwd, 'data', subdir);
-      }
-    } catch { }
-  }
+  const root = repositoryRoot(cwd);
+  if (root) return resolve(root, 'data', subdir);
 
-  // 2. Otherwise use XDG user data directory (~/.local/share/rcja-soccer-sim/<subdir>)
   const xdgData = process.env.XDG_DATA_HOME || join(homedir(), '.local', 'share');
   return join(xdgData, 'rcja-soccer-sim', subdir);
 }

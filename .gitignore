@@ -32,13 +32,24 @@ build/
 .ruff_cache/
 
 # ─── Runtime State & Databases ────────────────────────────────────────────────
-# Runtime state a server accumulates in whatever directory it is run from:
-# pushed submissions, teams' working folders, tournaments, and accounts database.
-data/
-submissions/
-workspaces/
-tournaments/
-league/
+# Runtime state a server accumulates: pushed submissions, teams' working
+# folders, tournaments, and the accounts database. `defaultStorageDir()` in
+# `packages/server/src/infra/cli.ts` puts all of it under the repository root
+# when the server is run from anywhere inside a checkout, so these are anchored
+# to the root with a leading slash.
+#
+# The slash is load-bearing, not tidiness. Written bare, a pattern like
+# `league/` matches a directory of that name at *any* depth - and it did:
+# `packages/server/src/league/` and `packages/server/tests/league/`, 27 files
+# and 16,000 lines of the league, tournament, arena, practice and bench
+# subsystem, were silently untracked from the monorepo restructure onwards, so
+# a fresh clone could not build. Keep every one of these anchored, and think
+# twice before adding a bare directory name to this file at all.
+/data/
+/submissions/
+/workspaces/
+/tournaments/
+/league/
 *.db
 *.db-shm
 *.db-wal
