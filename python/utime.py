@@ -1,16 +1,21 @@
-"""MicroPython utime module compatibility for RCJA Soccer Sim."""
+"""MicroPython's `utime` - CPython's `time`, with the board functions on it.
 
-from __future__ import annotations
+`utime` and `time` are the same module on a board, and they are the same
+module here: this file makes sure the MicroPython additions are installed and
+then binds its own name to `time` itself.
 
+That identity is not tidiness. This module used to do `from time import *`
+*before* importing `machine`, which copied the unpatched `sleep` and kept it -
+so `utime.sleep()` was CPython's blocking sleep and silently advanced nothing,
+while `time.sleep()` did the right thing. Being the same object makes a whole
+class of that bug impossible rather than fixed.
+"""
+
+import sys as _sys
 import time as _time
-from time import *  # noqa: F403
 
-# Ensure machine has initialized the time patches
-import machine  # noqa: F401
+from machine import _timebase
 
-sleep_ms = getattr(_time, "sleep_ms")
-sleep_us = getattr(_time, "sleep_us")
-ticks_ms = getattr(_time, "ticks_ms")
-ticks_us = getattr(_time, "ticks_us")
-ticks_diff = getattr(_time, "ticks_diff")
-ticks_add = getattr(_time, "ticks_add")
+_timebase.install()
+
+_sys.modules[__name__] = _time

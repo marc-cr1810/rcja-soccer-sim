@@ -42,8 +42,12 @@ DEFAULT_BALL_STRENGTH_PIN = 4
 DEFAULT_BALL_BEARING_PIN = 5
 
 # Directional IR photodiode ring (8 zones matching angles: 0, 45, 90, 135, 180, 225, 270, 315 deg)
-# Must not collide with any other ADC pin below - read_adc() picks the first
-# matching category, so a shared pin number silently shadows one of them.
+# Must not collide with ANY other pin in this file - not just the other ADC
+# categories. read_adc() picks the first matching category, so two sensors on
+# one number silently shadow one of them; and a number shared with a motor or
+# the kicker describes a board that cannot be built, because one physical pin
+# cannot be both a direction output and a sensor input.
+# `tests/test_config.py` enforces this across every category, actuators included.
 DEFAULT_IR_RING_PINS = [0, 6, 7, 8, 23, 25, 1, 3]
 
 # Analog Compass & Gyro
@@ -53,10 +57,23 @@ DEFAULT_GYRO_PIN = 22
 # Ultrasonic Distance Sensors (Front, Back, Left, Right)
 DEFAULT_ULTRASONIC_PINS = {
     "front": 2,
-    "back": 15,
+    "back": 10,
     "left": 9,
-    "right": 13,
+    "right": 11,
 }
+
+# Ball gate - the switch in the dribbler's mouth that closes when it has the
+# ball. Named here rather than hardcoded in `Runtime.get_pin_value()`, where it
+# used to live: a pin the config could not see was a pin the collision guard
+# could not check, and a pin a team could not remap for their own board.
+DEFAULT_BALL_GATE_PIN = 28
+
+# Reset causes, for machine.reset_cause()
+PWRON_RESET = 1
+HARD_RESET = 2
+WDT_RESET = 3
+DEEPSLEEP_RESET = 4
+SOFT_RESET = 5
 
 # Standard I2C Addresses
 I2C_ADDR_MPU6050 = 0x68

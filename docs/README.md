@@ -1,6 +1,6 @@
 # Documentation
 
-Seven things, in the order a team actually needs them:
+Eight things, in the order a team actually needs them:
 
 1. **[Writing a robot](writing-a-robot.md)** — the folder format a submission
    is, the argv convention every entry script follows, and where the sensor
@@ -17,13 +17,17 @@ Seven things, in the order a team actually needs them:
    a robot can see and do: every sensor field, the gotchas that catch a first
    attempt, and the helpers (`drive`, `field`, `sense`) that come with the
    library.
-6. **[Running a tournament](running-a-tournament.md)** — for whoever is
+6. **[MicroPython](micropython.md)** — the robot is a MicroPython program, and
+   the same file runs on a real ESP32. The virtual board and its pinout, what
+   `time.sleep_ms()` actually does to the simulation, and the three places the
+   simulator is honestly different from hardware.
+7. **[Running a tournament](running-a-tournament.md)** — for whoever is
    running the event rather than entering it: a draw, a division played
    through with a referee, and a table that survives the laptop being closed.
-7. **[Running a league](running-a-league.md)** — the venue deployment: a
+8. **[Running a league](running-a-league.md)** — the venue deployment: a
    public front page, accounts for teams, referees and organisers, and the
    same fixture loop behind it. Watching still needs no account.
 
 The top-level [README](../README.md) is the pitch — what this is, why the
 physics is shaped the way it is, what the league itself looks like. These
-seven are the manual.
+eight are the manual.

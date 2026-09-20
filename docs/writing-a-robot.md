@@ -2,9 +2,11 @@
 
 This is about the **submission** — the folder you push to a venue server and
 the shape it has to be in. For the sensor/actuator API itself — what `s.ball`
-means, why bearings are quantised, what `robot.motors(...)` takes — see
-[python/README.md](../python/README.md). This page is about packaging that
-program so a server can validate it, sandbox it, and load it into a match.
+means, why bearings are quantised, what `rt.send_command(...)` takes — see
+[python/README.md](../python/README.md), and
+[docs/micropython.md](micropython.md) for the board and its pinout. This page
+is about packaging that program so a server can validate it, sandbox it, and
+load it into a match.
 
 ## One folder, one robot
 
@@ -42,9 +44,32 @@ how.
 
 ## The argv convention
 
-There is no separate runner — the entry script itself is what gets executed,
-and it has to accept the arguments the server (or you, testing locally) hands
-it:
+There is no separate runner — the entry script itself is what gets executed.
+When a server spawns it for a match it passes five arguments:
+
+```
+--team violet --number 1 --name "ACT Robotics" --url <address> --token <token>
+```
+
+**You do not have to do anything with them.** `machine.Runtime` reads them off
+`sys.argv` itself when it connects, so a plain MicroPython program is a
+complete, valid submission:
+
+```python
+from machine import Pin, PWM
+import time
+
+fl = PWM(Pin(12), freq=1000, duty_u16=0)
+
+while True:
+    fl.duty_u16(30000)
+    time.sleep_ms(20)
+```
+
+The one way to get this wrong is to parse the arguments *yourself* and forget
+one. `argparse` exits with "unrecognized arguments" on a flag it has not been
+told about, so a script that declares four of the five crashes the instant a
+server spawns it. If you use `argparse`, declare all five:
 
 ```python
 import argparse
@@ -56,28 +81,14 @@ parser.add_argument("--name", default=None)
 parser.add_argument("--url", default="ws://localhost:8080/agent")
 parser.add_argument("--token", default=None)
 args = parser.parse_args()
-
-from rcja_soccer import Robot
-
-robot = Robot(team=args.team, number=args.number, name=args.name, token=args.token)
-
-@robot.tick
-def think(s, me):
-    return robot.coast()
-
-robot.run(args.url)
 ```
 
-`--token` is the one easy to forget. A server loading your submission into a
-real match always passes one — proof the connecting program is the one the
-platform actually validated for this team's this robot, not just whatever a
-socket claims to be — and an entry script whose `argparse` doesn't accept it
-will fail the moment it's spawned for a match, even though the push itself
-validated cleanly. (Validation does catch this for you: pushing a script with
-no `--token` argument fails at push time with a clear reason, precisely so
-you find out before match day rather than during it.) Running your own
-script by hand, with no `--token` on the command line, is unaffected — it
-defaults to `None` and joins exactly as it always has.
+`--token` is the one easy to forget. A server always passes it — proof the
+connecting program is the one the platform actually validated for this team's
+this robot, not just whatever a socket claims to be. Validation catches a
+missing one for you: the push runs your script with all five flags, so it fails
+at push time with a clear reason rather than on match day. Running your own
+script by hand with no `--token` is unaffected.
 
 `examples/striker.py` and `examples/goalie.py` are the canonical version of
 this convention — copy from there.
@@ -86,8 +97,8 @@ this convention — copy from there.
 
 Rule 5.7 takes a damaged robot off the field for thirty seconds. While you are
 off, **your program keeps running but stops being asked anything**: no sensor
-frames arrive, so your tick function does not run, and the server tells you why
-about once a second. You will see it on your own terminal:
+frames arrive, `rt.off_field` goes true, and the server tells you why about
+once a second. You will see it on your own terminal:
 
 ```
 [Violet/1] off the field under rule 5.7.1 (damaged); back in 30s
@@ -101,19 +112,20 @@ When you are put back, rule 5.7.4 replaces you at a corner of your own penalty
 box, so whatever you were chasing has moved. The first frame after you return
 has **`s.returned`** set, and it is set on that one frame only.
 
-**Your memory is not cleared for you**, and that is deliberate. Both habits are
-real and both are legal: some teams switch the robot off and on again, so the
+**Nothing is cleared for you**, and that is deliberate. Both habits are real
+and both are legal: some teams switch the robot off and on again, so the
 software starts from scratch; others leave it running with a start/stop button,
 so it carries on with what it knew and waits for the acknowledgement. Your
 program here was never actually stopped, so it is the second kind. If you want
 the first, ask for it:
 
 ```python
-@robot.tick
-def think(s, me):
+while True:
+    s = rt.sensors()
     if s.returned:
         # Off and on again: forget everything, we have been moved.
-        me.clear()
+        locator.reset()
+        ball.reset()
     ...
 ```
 

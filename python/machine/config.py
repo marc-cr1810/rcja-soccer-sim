@@ -25,6 +25,7 @@ class PinConfig:
         self.compass = data.get("compass", constants.DEFAULT_COMPASS_PIN)
         self.gyro = data.get("gyro", constants.DEFAULT_GYRO_PIN)
         self.ultrasonics = data.get("ultrasonics", constants.DEFAULT_ULTRASONIC_PINS)
+        self.ball_gate = data.get("ball_gate", constants.DEFAULT_BALL_GATE_PIN)
 
 
 _config: PinConfig | None = None

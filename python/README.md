@@ -1,25 +1,40 @@
 # Writing a robot
 
-Your robot is a function. It is called fifty times a second, it is given what
-the sensors report, and it returns what the motors should do.
+Your robot is a loop. It reads what the sensors report, decides what the motors
+should do, and sleeps — and the sleep is what sends the command and brings back
+the next set of readings, fifty times a second.
 
 ```python
-from rcja_soccer import Robot, drive
+import time
 
-robot = Robot(team="violet", number=1, name="ACT")
+from machine import Runtime
+from rcja_soccer import coast, drive
 
-@robot.tick
-def think(s, me):
+rt = Runtime.get()
+
+while True:
+    s = rt.sensors()
     if s.ball is None:          # an opponent is blocking the infrared
-        return robot.coast()
-    return robot.motors(drive(bearing=s.ball.bearing, speed=0.8), dribbler=1.0)
+        rt.send_command(motors=coast())
+    else:
+        rt.send_command(motors=drive(bearing=s.ball.bearing, speed=0.8), dribbler=1.0)
 
-robot.run()
+    time.sleep_ms(20)
 ```
 
-No dependencies, on purpose. `pip install` pulls in nothing at all, because the
-schools this league exists to reach are the ones where pip is behind a proxy,
-offline, or not something a student is allowed to run.
+That is a MicroPython program, not something shaped like one. `machine` is the
+hardware API a real ESP32 or RP2040 gives you, and it is what owns the
+connection here — so the same file runs on a board with the motors actually
+wired to those pins. You can skip `rcja_soccer` entirely and drive `Pin`, `PWM`
+and `ADC` directly if you would rather; see
+[docs/micropython.md](../docs/micropython.md) for the board, the pinout and
+what `Timer` and the rest do here.
+
+`rcja_soccer` is an ordinary library on top: functions that take readings and
+return numbers, with no network code of its own. No dependencies, on purpose.
+`pip install` pulls in nothing at all, because the schools this league exists
+to reach are the ones where pip is behind a proxy, offline, or not something a
+student is allowed to run.
 
 ## Try it
 
@@ -94,8 +109,16 @@ ball position and no map: a real robot does not have those, so neither do you.
 | `s.kickoff.countdown` | Seconds left before the whistle makes the kick-off live; hold still while it's above 0. |
 | `s.playing` | False before the whistle and at a stoppage. |
 
-`me` is yours. Anything you put on it survives to the next tick, and it is
-cleared at every kick-off.
+Your own state is whatever you keep in local variables outside the loop —
+there is no framework holding it for you, and nothing is reset on your behalf.
+`rcja_soccer.Memory` is a small convenience if you want somewhere to hang
+things, but a plain variable is just as good. Either way, clearing at a
+kick-off is something you do yourself:
+
+```python
+if s.kickoff.pending:
+    ball.reset()
+```
 
 ## Nine things that will catch you out
 
@@ -197,13 +220,27 @@ allows; carrying is not.
 ## What your robot can do
 
 ```python
-robot.motors(powers, dribbler=0.0, kicker=False, say=None)
-robot.coast()
+rt.send_command(motors=powers, dribbler=0.0, kicker=False, say=None)
 ```
 
-`powers` is four numbers, −1 to 1, one per wheel. `drive(bearing, speed, spin)`
-works them out for you and is ordinary code in `rcja_soccer/drive.py` — read
-it, and replace it when you want to beat someone.
+`powers` is four numbers, −1 to 1, one per wheel — `coast()` is four zeros.
+`drive(bearing, speed, spin)` works them out for you and is ordinary code in
+`rcja_soccer/drive.py` — read it, and replace it when you want to beat someone.
+
+Nothing is sent when you call this. It stages the command, and your next
+`time.sleep_ms()` is what puts it on the wire and waits for the next frame. A
+loop that never sleeps never sends anything at all.
+
+You can drive the motors through `machine` pins instead, which is what a
+program written for a real board does:
+
+```python
+fl = PWM(Pin(12), freq=1000, duty_u16=0)
+fl_dir = Pin(13, Pin.OUT)
+```
+
+Both work, on one connection. If you use both in the same tick,
+`send_command()` wins and the pin writes are dropped.
 
 `say` reaches your team mate under rule 4.2.5. It expires after 0.4 seconds, so
 it is for "I have the ball", not for a plan.
@@ -234,11 +271,26 @@ one of them.
 
 ## When it goes wrong
 
-A program that raises keeps its last command standing, the same as a real robot
-whose control loop has hung, and the match carries on. The exception is printed
-once per tick, so a robot that crashes every tick is loud rather than silent —
-but it will also drive in a straight line into a wall, so read the output.
+**An uncaught exception ends your program**, the same as it would on a board.
+The traceback prints, the process exits, the socket closes — and a program that
+disconnects during play is a 5.7.1 removal, so your robot is carried off for
+thirty seconds. If you would rather limp than stop, catch it yourself:
 
-Missing a tick is not an error. If your answer does not arrive in time the
+```python
+while True:
+    s = rt.sensors()
+    try:
+        think(s)
+    except Exception as error:
+        print(error, file=sys.stderr)
+        rt.send_command(motors=coast())
+    time.sleep_ms(20)
+```
+
+That is worth doing for a competition and not worth doing while you are
+developing, where a traceback that stops everything is the fastest way to find
+out what you broke.
+
+**Missing a tick is not an error.** If your answer does not arrive in time the
 previous command simply stays, which is what a motor controller does between
 loop iterations. Slow code plays badly; it does not forfeit.

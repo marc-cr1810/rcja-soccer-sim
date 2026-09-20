@@ -28,7 +28,41 @@ export interface ValidateOptions {
   tickTimeoutMs?: number;
 }
 
-const ALLOWED_EXTRA = new Set(['rcja_soccer', 'machine', 'utime']);
+/**
+ * What a submission may import beyond the standard library and its own folder.
+ *
+ * `rcja_soccer` is the soccer library; everything else here is the MicroPython
+ * compatibility layer, and is the reason a file written for a real ESP32 runs
+ * unmodified. The `u*` names are what a board calls standard-library modules -
+ * `python/ustruct.py` and friends bind each one straight to its CPython
+ * original - so a program importing `ustruct` is importing `struct`, and
+ * rejecting it here would reject the board spelling of code we accept.
+ *
+ * Kept in step with `python/pyproject.toml`'s `py-modules` by
+ * `submission.test.ts`, which fails if the two drift apart.
+ */
+export const ALLOWED_EXTRA = new Set([
+  'rcja_soccer',
+  'machine',
+  'micropython',
+  'uasyncio',
+  'ubinascii',
+  'ucollections',
+  'uerrno',
+  'uhashlib',
+  'uheapq',
+  'uio',
+  'ujson',
+  'uos',
+  'urandom',
+  'ure',
+  'uselect',
+  'usocket',
+  'ustruct',
+  'usys',
+  'utime',
+  'uzlib',
+]);
 
 /**
  * A fingerprint of the code in a submission folder, for the match record.
@@ -121,7 +155,8 @@ async function checkStatic(
       }
       return fail(
         `${file} imports "${mod}", which is not available at a venue with no internet and ` +
-        'no pip. Only the standard library, rcja_soccer, machine, utime, and files in this same folder are.',
+        'no pip. Only the standard library, the MicroPython modules (machine, utime, ' +
+        'micropython and the u* aliases), rcja_soccer, and files in this same folder are.',
       );
     }
   }

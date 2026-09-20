@@ -20,4 +20,30 @@ rcja-submit = "rcja_soccer.submit:main"
 include = ["rcja_soccer*", "machine*"]
 
 [tool.setuptools]
-py-modules = ["utime", "join", "submit"]
+# `utime` and the `u*` aliases are the names a board uses for standard-library
+# modules; shipping them means a program written for real hardware imports
+# cleanly here. `rcja_soccer_bootstrap` is the startup hook - see its
+# docstring, and `sitecustomize.py` for the in-repo equivalent.
+py-modules = [
+    "join",
+    "micropython",
+    "rcja_soccer_bootstrap",
+    "submit",
+    "uasyncio",
+    "ubinascii",
+    "ucollections",
+    "uerrno",
+    "uhashlib",
+    "uheapq",
+    "uio",
+    "ujson",
+    "uos",
+    "urandom",
+    "ure",
+    "uselect",
+    "usocket",
+    "ustruct",
+    "usys",
+    "utime",
+    "uzlib",
+]

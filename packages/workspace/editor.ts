@@ -124,8 +124,9 @@ const highlighting = HighlightStyle.define([
   { tag: [tags.definition(tags.variableName)], color: COLOURS.variable },
   { tag: [tags.operator, tags.punctuation, tags.separator, tags.bracket], color: COLOURS.operator },
   { tag: tags.invalid, color: COLOURS.invalid },
-  // A decorator — @robot.tick — is the first unfamiliar thing in the starter
-  // robot, so it is worth it not looking like punctuation.
+  // Decorators. The starter robot is a plain loop and has none, but a team
+  // that reaches for @micropython.native has reached for something worth
+  // seeing, so it should not read as punctuation.
   { tag: tags.meta, color: COLOURS.function },
 ]);
 

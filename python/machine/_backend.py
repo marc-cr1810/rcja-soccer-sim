@@ -9,7 +9,7 @@ import sys
 import time
 from typing import Any, Callable
 
-from . import constants
+from . import _sched, _timebase, constants
 from .config import get_config
 from .reading import Reading
 
@@ -56,6 +56,24 @@ class Runtime:
 
         self.last_frame: dict[str, Any] = {}
         self.clock: float = 0.0
+        #: Sensor frames received since this program started, across
+        #: reconnects. `_timebase` counts milliseconds in these rather than in
+        #: `clock`, which is match time: it stops at every stoppage and is 0
+        #: for the whole pre-kick-off period, neither of which a board's
+        #: `ticks_ms()` does.
+        self.frames: int = 0
+        #: Host monotonic at the last frame, for sub-tick interpolation.
+        self.last_frame_at: float = _timebase._real_monotonic()
+        #: Host milliseconds at this runtime's first successful join. Readings
+        #: before it are host time since the program started; readings after
+        #: it continue from exactly where that left off, which is what stops
+        #: `ticks_ms()` jumping backwards the instant a robot joins a match.
+        #: Only the *first* join sets it - a reconnect must not shift the
+        #: clock, and does not have to, because the frame count survives one.
+        self.tick_epoch_ms: float | None = None
+        #: Highest value `ticks_ms()` has handed out, so it can never hand out
+        #: a smaller one. See `_timebase._elapsed_ms()`.
+        self.ticks_floor_ms: float = 0.0
         self.off_field = False
         self.last_kickoff = False
         self._cached_reading: Reading | None = None
@@ -108,7 +126,10 @@ class Runtime:
                 idle = time.monotonic() - self._last_connected
                 if idle > self.reconnect_for:
                     raise
-                time.sleep(1.0)
+                # Deliberately the captured CPython sleep, not `time.sleep`:
+                # that name now advances the simulation, so going through it
+                # here would recurse straight back into `ensure_connected`.
+                _timebase._real_sleep(1.0)
 
     def _connect_once(self, opener: Callable[[str], Any], join_url_value: str | None, join_token_value: str | None) -> None:
         """One join attempt: open a socket, shake hands, wait for the first frame."""
@@ -180,6 +201,8 @@ class Runtime:
 
         self.connected = True
         self._last_connected = time.monotonic()
+        if self.tick_epoch_ms is None:
+            self.tick_epoch_ms = _timebase._host_ms()
 
         # 4. Wait for the first sensor frame before unblocking user hardware reads
         while True:
@@ -200,6 +223,8 @@ class Runtime:
     def _update_sensor_frame(self, frame: dict[str, Any]) -> None:
         self.last_frame = frame
         self.clock = frame.get("clock", 0.0)
+        self.frames += 1
+        self.last_frame_at = _timebase._real_monotonic()
         self.off_field = False
         self._cached_reading = None
         self._cached_reading_frame = None
@@ -237,7 +262,7 @@ class Runtime:
                 return 1 if val > 0.45 else 0
 
         # Ball gate / held sensor
-        if pin_id == 28:
+        if pin_id == cfg.ball_gate:
             return 1 if self.last_frame.get("ballGate", {}).get("held", False) else 0
 
         return 0
@@ -381,6 +406,30 @@ class Runtime:
 
         return 0
 
+    def pulse_us(self, pin_id: int, timeout_us: int = 1_000_000) -> int:
+        """Round-trip echo width for an ultrasonic on this pin, in microseconds.
+
+        `machine.time_pulse_us()` is how an HC-SR04 is actually read on a
+        board - trigger, then measure how long the echo pin stays high - so a
+        program written for real hardware reaches its rangefinders through
+        this rather than through `ADC`. Sound covers a millimetre and back in
+        about 5.83us at 343 m/s.
+
+        Returns -2 for "no echo within the timeout", which is what the real
+        function returns, and what an ultrasonic pointed at open space does.
+        """
+        self.ensure_connected()
+        cfg = get_config()
+        range_data = self.last_frame.get("range", {})
+        for direction, u_pin in cfg.ultrasonics.items():
+            if pin_id == u_pin:
+                dist = range_data.get(direction)
+                if dist is None:
+                    return -2
+                micros = int(dist * 5.83)
+                return -2 if micros > timeout_us else micros
+        return -2
+
     # -------------------------------------------------------------------------
     # Virtual I2C Bus Simulation
     # -------------------------------------------------------------------------
@@ -447,9 +496,21 @@ class Runtime:
         if self._sleep_accum_ms < 15.0:
             return  # Allow small sub-tick intervals without forcing an early flush
 
-        # Calculate number of physics ticks to advance
-        ticks = max(1, int(round(self._sleep_accum_ms / 20.0)))
-        self._sleep_accum_ms = 0.0
+        # Calculate number of physics ticks to advance. Floor, not round: a
+        # rounded count overshoots (`sleep_ms(30)` became two whole ticks) and
+        # leaves nothing to carry, so the correction below could never happen.
+        # Flooring plus the carry paces a 30ms loop as 1, 2, 1, 2 ticks, which
+        # averages to the 30ms that was actually asked for.
+        ticks = max(1, int(self._sleep_accum_ms / 20.0))
+        # Carry the remainder rather than discarding it. Zeroing here made a
+        # program pacing on anything that is not a multiple of 20ms drift
+        # against the simulation, a little further every iteration. Floored at
+        # zero because a negative balance would make the next sleep fall under
+        # the threshold above and skip its flush entirely - which is the
+        # silent-no-op failure this whole slice exists to remove.
+        self._sleep_accum_ms -= ticks * 20.0
+        if self._sleep_accum_ms < 0.0:
+            self._sleep_accum_ms = 0.0
 
         from rcja_soccer.transport import TransportError
 
@@ -477,6 +538,7 @@ class Runtime:
                         msg_type = msg.get("type")
                         if msg_type == "sensors":
                             self._update_sensor_frame(msg["frame"])
+                            _sched.service()
                             break
                         elif msg_type == "disabled":
                             if not self.off_field:

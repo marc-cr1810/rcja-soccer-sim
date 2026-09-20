@@ -80,13 +80,15 @@ it.
 
 **Push to the competition** when you want it to count. It is checked the moment
 you push, not at the moment you play: the manifest has to parse, the code has
-to be valid Python, it can only import the standard library and `rcja_soccer`,
-and it has to answer one tick. If any of that fails you get told why, in words
+to be valid Python, it can only import the standard library, `rcja_soccer` and
+the MicroPython modules (`machine`, `utime`, `micropython` and the `u*`
+aliases), and it has to answer one tick. If any of that fails you get told why, in words
 you can act on:
 
 ```
 robot.py imports "numpy", which is not available at a venue with no internet
-and no pip. Only the standard library, rcja_soccer, and files in this same
+and no pip. Only the standard library, the MicroPython modules (machine,
+utime, micropython and the u* aliases), rcja_soccer, and files in this same
 folder are.
 ```
 

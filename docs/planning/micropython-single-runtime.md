@@ -10,7 +10,7 @@ its own WebSocket connection under the same robot slot. This was proved live
 `machine` object, `machine.Runtime` tries to open a second connection for the
 same seat and the server rejects it every tick (`"violet-1 is already
 connected"`), which `Robot._play()` swallows silently — the robot just never
-sends a command again. `docs/micropython-compatibility-plan.md`'s "Hybrid
+sends a command again. `docs/micropython.md`'s "Hybrid
 Mode" section describes this combination working; it never did.
 
 Rather than build a seam to reconcile two runtimes, collapse to one:
@@ -165,7 +165,7 @@ Two need real changes:
 ### 7. Docs
 
 Rewrite the "Hybrid Mode" section out of
-`docs/micropython-compatibility-plan.md` entirely — there's only one paradigm
+`docs/micropython.md` entirely — there's only one paradigm
 now. Document `Runtime.sensors()`/`Runtime.send_command()` as the two calls
 that bridge `machine` and `rcja_soccer`.
 
