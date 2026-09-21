@@ -42,11 +42,25 @@ interface Shot {
   keeperInPath: boolean;    // opposing keeper centre within reach of the path at launch
   keeperLateral: number;    // keeper's distance from the path, mm
   keeperDepth: number;      // keeper's distance ahead of the ball along the path
+  keeperMargin: number;     // how far the keeper must move across to block, mm (<=0: already blocking)
+  keeperToward: number;     // keeper speed towards the path at launch, mm/s (negative: moving away)
   touched: string | null;   // first robot the ball met after leaving
   outcome?: string;
 }
 
 const shots: Shot[] = [];
+// A striker's spell on the ball: from first contact until it has been clear of
+// the ball for SPELL_GAP seconds, and how that spell ended.
+const SPELL_GAP = 0.3;
+interface Spell { by: string; start: number; lastContact: number; kicked: boolean; oppTouched: boolean; out: boolean }
+const spells: Record<string, Spell | null> = {};
+const spellEnds: Record<string, number> = {};
+const spellLengths: number[] = [];
+const endSpell = (sp: Spell) => {
+  const why = sp.kicked ? 'kicked' : sp.out ? 'went out' : sp.oppTouched ? 'opponent took it' : 'loose / other';
+  spellEnds[why] = (spellEnds[why] ?? 0) + 1;
+  spellLengths.push(sp.lastContact - sp.start);
+};
 let live: Shot | null = null;
 let prevSpeed = 0;
 const deg = (a: number) => (a * 180) / Math.PI;
@@ -94,6 +108,27 @@ try {
         }
         scored = { violet: score.violet, lime: score.lime };
 
+        // Possession spells for the strikers.
+        const inContact = new Set<string>();
+        if (!w.ballAway) {
+          for (const r of w.robots) {
+            if (r.removed) continue;
+            if (Math.hypot(ball.x - r.x, ball.z - r.z) - r.radius - ball.radius < 10) inContact.add(r.id);
+          }
+        }
+        for (const id of ['violet-1', 'lime-1']) {
+          const sp = spells[id];
+          const team = id.split('-')[0];
+          if (sp) {
+            if ([...inContact].some((o) => !o.startsWith(team))) sp.oppTouched = true;
+            if (w.ballAway) sp.out = true;
+            if (inContact.has(id)) sp.lastContact = w.clock;
+            else if (w.clock - sp.lastContact > SPELL_GAP || w.ballAway) { endSpell(sp); spells[id] = null; }
+          } else if (inContact.has(id)) {
+            spells[id] = { by: id, start: w.clock, lastContact: w.clock, kicked: false, oppTouched: false, out: false };
+          }
+        }
+
         if (speed > 2000 && prevSpeed < 1500 && Math.hypot(ball.x, ball.z) > 150) {
           let by: any = null;
           let best = Infinity;
@@ -102,6 +137,7 @@ try {
             const g = Math.hypot(ball.x - r.x, ball.z - r.z);
             if (g < best) { best = g; by = r; }
           }
+          if (by && spells[by.id]) spells[by.id]!.kicked = true;
           if (by && by.id.endsWith('-1')) {
             if (live) { live.outcome = 'superseded'; shots.push(live); }
             const h = crossing(ball.x, ball.z, Math.cos(by.heading), Math.sin(by.heading));
@@ -110,18 +146,22 @@ try {
             const side = -by.vx * Math.sin(by.heading) + by.vz * Math.cos(by.heading);
             const other = by.id.startsWith('violet') ? 'lime-2' : 'violet-2';
             const k = w.robots.find((r: any) => r.id === other && !r.removed);
-            let lateral = NaN, depth = NaN, inPath = false;
+            let lateral = NaN, depth = NaN, inPath = false, margin = NaN, toward = NaN;
             if (k) {
               const rx = k.x - ball.x, rz = k.z - ball.z;
               depth = rx * ux + rz * uz;
-              lateral = Math.abs(-rx * uz + rz * ux);
+              const signed = -rx * uz + rz * ux;
+              lateral = Math.abs(signed);
               inPath = depth > 0 && lateral < k.radius + ball.radius;
+              margin = lateral - k.radius - ball.radius;
+              toward = -Math.sign(signed) * (-k.vx * uz + k.vz * ux);
             }
             live = {
               by: by.id, at: w.clock, range: b.range, headZ: h.z, ballZ: b.z,
               launchErr: deg(Math.abs(wrap(Math.atan2(uz, ux) - by.heading))),
               robotSpeed: Math.hypot(by.vx, by.vz), sideSpeed: side,
               keeperInPath: inPath, keeperLateral: lateral, keeperDepth: depth, touched: null,
+              keeperMargin: margin, keeperToward: toward,
             };
           }
         }
@@ -172,8 +212,30 @@ try {
     const xs = heads.filter((s) => s.keeperInPath === inPath);
     console.log(`   ${inPath ? 'in path    ' : 'not in path'} n=${xs.length}: ${outcomes(xs)}`);
   }
+  console.log(`\nwhere on-target-by-path shots cross the line (|z| from goal centre, posts at 225):`);
+  const pathOn = shots.filter((s) => onTarget(s.ballZ));
+  for (const [lo, hi] of [[0, 60], [60, 120], [120, 160], [160, 204]]) {
+    const xs = pathOn.filter((s) => Math.abs(s.ballZ) >= lo! && Math.abs(s.ballZ) < hi!);
+    console.log(`   ${String(lo).padStart(3)}-${String(hi).padEnd(3)} n=${String(xs.length).padEnd(4)} goal ${pct(count(xs, (s) => s.outcome === 'goal'), xs.length).padEnd(9)} keeper-in-path ${pct(count(xs, (s) => s.keeperInPath), xs.length)}`);
+  }
   console.log(`\noff target by heading: ${shots.length - heads.length}: ${outcomes(shots.filter((s) => !onTarget(s.headZ)))}`);
   console.log(`robot speed at kick median ${med(shots.map((s) => s.robotSpeed)).toFixed(0)} mm/s, |side| median ${med(shots.map((s) => Math.abs(s.sideSpeed))).toFixed(0)}`);
+
+  console.log(`\nkeeper motion at launch (on target by ball path, keeper not already blocking):`);
+  const open = shots.filter((s) => onTarget(s.ballZ) && s.keeperMargin > 0);
+  for (const [lo, hi] of [[0, 60], [60, 120], [120, 200], [200, 999]]) {
+    const xs = open.filter((s) => s.keeperMargin >= lo! && s.keeperMargin < hi!);
+    console.log(`   must travel ${String(lo).padStart(3)}-${String(hi).padEnd(3)} mm  n=${String(xs.length).padEnd(4)} goal ${pct(count(xs, (s) => s.outcome === 'goal'), xs.length)}`);
+  }
+  for (const [label, f] of [['moving away (< -100 mm/s)', (v: number) => v < -100], ['still (+-100)', (v: number) => Math.abs(v) <= 100], ['moving toward (> 100)', (v: number) => v > 100]] as const) {
+    const xs = open.filter((s) => f(s.keeperToward));
+    console.log(`   keeper ${label.padEnd(26)} n=${String(xs.length).padEnd(4)} goal ${pct(count(xs, (s) => s.outcome === 'goal'), xs.length)}`);
+  }
+
+  const total = Object.values(spellEnds).reduce((a, b) => a + b, 0);
+  const matches = (s1! - s0! + 1);
+  console.log(`\nstriker spells on the ball: ${total} (${(total / matches / 2).toFixed(1)} per striker per match), median ${med(spellLengths).toFixed(2)} s`);
+  for (const [k, v] of Object.entries(spellEnds).sort((a, b) => b[1] - a[1])) console.log(`   ${k.padEnd(18)} ${pct(v, total)}`);
 } finally {
   try { process.kill(-child.pid!, 'SIGTERM'); } catch { /* gone */ }
   await server.close?.();

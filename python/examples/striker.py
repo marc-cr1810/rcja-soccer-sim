@@ -74,7 +74,6 @@ from rcja_soccer import (
 from rcja_soccer.field import (
     BALL_RADIUS,
     CONTACT_RANGE,
-    HALF_GOAL_WIDTH,
     HALF_LENGTH,
     HALF_WIDTH,
     PENALTY_DEPTH,
@@ -169,7 +168,10 @@ KICKOFF_WINDOW = 3.0
 frame = GoalFrame(TEAM)
 
 #: Inside the posts by enough that the ball fits and a keeper on the line has
-#: to actually move. The posts are at 225 mm.
+#: to actually move. The posts are at 225 mm. Only the aim for a goal the
+#: camera cannot see: once it can, the middle of the widest visible gap is
+#: aimed at instead. 185 was duelled against this and measured the same
+#: (148-152 over 100 matches) - the keeper gets across either way.
 AIM_POST = 155.0
 
 #: How far either side of the goal centre a covering striker ever stands when
@@ -732,7 +734,7 @@ def choose_aim(
         # of the aim either.
         trust_me_z = abs(me_z) > 1.0 and me_confidence >= 1.0
         post = math.copysign(AIM_POST, -me_z if trust_me_z else frame.up_x)
-    return frame.their_x, clamp(post, -HALF_GOAL_WIDTH + 70, HALF_GOAL_WIDTH - 70)
+    return frame.their_x, post
 
 
 def cover(s, me, me_x, me_z, bz, heading, spin, frame: GoalFrame, guard_mouth: bool = False):
