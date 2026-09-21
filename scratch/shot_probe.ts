@@ -44,6 +44,9 @@ interface Shot {
   keeperDepth: number;      // keeper's distance ahead of the ball along the path
   keeperMargin: number;     // how far the keeper must move across to block, mm (<=0: already blocking)
   keeperToward: number;     // keeper speed towards the path at launch, mm/s (negative: moving away)
+  said: number | null;
+  goal: string;             // which goal the ball's path is heading for: yellow is +x
+      // the shooter's own estimate, if its radio carries one as `wt` (mm/s, positive = away)
   touched: string | null;   // first robot the ball met after leaving
   outcome?: string;
 }
@@ -83,6 +86,7 @@ try {
       halfSeconds: half,
       seed,
       mercyMargin: null,
+      idealSensors: process.env.IDEAL === '1',
       observe: (m) => {
         const w = m.world as any;
         const ball = w.ball;
@@ -161,7 +165,8 @@ try {
               launchErr: deg(Math.abs(wrap(Math.atan2(uz, ux) - by.heading))),
               robotSpeed: Math.hypot(by.vx, by.vz), sideSpeed: side,
               keeperInPath: inPath, keeperLateral: lateral, keeperDepth: depth, touched: null,
-              keeperMargin: margin, keeperToward: toward,
+              keeperMargin: margin, keeperToward: toward, goal: ux > 0 ? 'yellow' : 'cyan',
+              said: typeof (m as any).actuators?.[by.id]?.say?.wt === 'number' ? (m as any).actuators[by.id].say.wt : null,
             };
           }
         }
@@ -230,6 +235,23 @@ try {
   for (const [label, f] of [['moving away (< -100 mm/s)', (v: number) => v < -100], ['still (+-100)', (v: number) => Math.abs(v) <= 100], ['moving toward (> 100)', (v: number) => v > 100]] as const) {
     const xs = open.filter((s) => f(s.keeperToward));
     console.log(`   keeper ${label.padEnd(26)} n=${String(xs.length).padEnd(4)} goal ${pct(count(xs, (s) => s.outcome === 'goal'), xs.length)}`);
+  }
+
+  console.log(`\nby the goal the shot is heading for:`);
+  for (const g of ['yellow', 'cyan']) {
+    const xs = shots.filter((s) => s.goal === g);
+    const on = xs.filter((s) => onTarget(s.ballZ));
+    console.log(`   ${g.padEnd(7)} kicks ${String(xs.length).padEnd(4)} on target ${String(on.length).padEnd(4)} ${outcomes(on)}   range median ${med(on.map((s) => s.range)).toFixed(0)}  keeper-in-path ${pct(count(on, (s) => s.keeperInPath), on.length)}  keeper toward ${pct(count(on, (s) => s.keeperToward > 100), on.length)}`);
+  }
+
+  const both = shots.filter((s) => s.said != null && Number.isFinite(s.keeperToward) && s.keeperMargin > 0);
+  if (both.length) {
+    console.log(`\nthe shooter's estimate vs truth (${both.length} shots with both, keeper not already blocking):`);
+    for (const [label, f] of [['truth: toward > 100', (v: number) => v > 100], ['truth: still', (v: number) => Math.abs(v) <= 100], ['truth: away < -100', (v: number) => v < -100]] as const) {
+      const xs = both.filter((s) => f(s.keeperToward));
+      const said = xs.map((s) => s.said!).sort((a, b) => a - b);
+      console.log(`   ${label.padEnd(20)} n=${String(xs.length).padEnd(4)} estimate median ${med(said).toFixed(0).padStart(5)}  (est. closing < -150: ${count(xs, (s) => s.said! < -150)})`);
+    }
   }
 
   const total = Object.values(spellEnds).reduce((a, b) => a + b, 0);

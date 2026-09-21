@@ -599,7 +599,15 @@ def think(s, me):
             # Aimed right, but there is a robot in front. Carry on round it:
             # the heading stays on the goal, and an omni drive can travel
             # sideways while it does.
-            side = -1.0 if me_z > 0 else 1.0
+            #
+            # Towards the middle, which is a side of the *attack*, not of the
+            # field: the turn is applied to `push`, which points the opposite
+            # way at the other end. Taken from a bare `me_z` it went round
+            # towards the middle attacking yellow and towards the touchline
+            # attacking cyan - measured, half as many shots at cyan (97 v 213
+            # over ten matches).
+            _, lateral = frame.to_frame(me_x, me_z)
+            side = -1.0 if lateral > 0 else 1.0
             travel_field = wrap_angle(push + side * 1.15)
             travel_field = steer_clear_of_edges(
                 travel_field, me_x, me_z, 190.0,
