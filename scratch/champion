@@ -9,4 +9,8 @@
 # Play both arrangements (each version on each side) and pool them, so a side
 # effect cannot be mistaken for an improvement.
 
-d6dfeca
+#
+# d6dfeca speaks protocol 5 and cannot connect since 7cff72f bumped it to 6, so
+# d871595 is pinned on its own margin over the tree it replaced (beed68a):
+# 156-85, W-D-L 30-8-12 over 50 matches, both arrangements favouring it.
+d871595
