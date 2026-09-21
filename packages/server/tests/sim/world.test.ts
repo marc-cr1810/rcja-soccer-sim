@@ -312,7 +312,12 @@ describe('forcing (5.6.1.3 and 5.6.1.4)', () => {
 
     // Violet striker pushing Lime goalie at edge of Yellow penalty box (615 mm to 915 mm)
     // Put y2 at 750 (inside box), c1 at 520, ball at 635
-    for (let t = 0; t < 0.25; t += 1 / 120) {
+    //
+    // Shoving for 0.8 s, not the 0.25 s this used to use. The duration was
+    // incidental when any contact at all disallowed a goal; now it is the
+    // whole question, and a quarter second of contact is a striker going past
+    // a keeper rather than through one.
+    for (let t = 0; t < 0.8; t += 1 / 120) {
       y2!.x = 750;
       y2!.z = 0;
       c1!.x = 520;
@@ -332,6 +337,40 @@ describe('forcing (5.6.1.3 and 5.6.1.4)', () => {
     // Goal must be disallowed!
     expect(w.score.violet).toBe(0);
     expect(w.events.some((e) => e.rule === '5.6.1.3' && e.message.includes('Goal disallowed'))).toBe(true);
+  });
+
+  it('does NOT disallow a goal because the striker brushed the keeper on the way past', () => {
+    /*
+     * Reported from a real match: a striker carried the ball in, the keeper
+     * came out and just missed it, the ball went in - and instead of a goal
+     * the ball was moved to the centre spot for lack of progress.
+     *
+     * The disallow keyed off `lastForcingTeam`, which is set on ANY tick where
+     * an attacker with the ball touches a defender in the box. A goal within
+     * 0.8 s of a single touch was wiped. Measured over champion and reference
+     * play that was 163 goals, 22% of every goal scored, 75 of them on one
+     * tick of contact - and not one had been shoving long enough to be the
+     * offence 5.6.1.3 actually describes.
+     */
+    const w = world('open');
+    w.running = true;
+    const [c1, c2, y1, y2] = w.robots;
+    c2!.x = -800; c2!.z = -500;
+    y1!.x = -500; y1!.z = -500;
+
+    // The same geometry as the test above, held for two ticks instead of 0.8 s.
+    for (let t = 0; t < 2 / 120; t += 1 / 120) {
+      y2!.x = 750; y2!.z = 0;
+      c1!.x = 520; c1!.z = 0; c1!.heading = 0; c1!.vx = 600;
+      w.ball.x = 635; w.ball.z = 0; w.ball.vx = 0;
+      w.step(1 / 120);
+    }
+
+    w.ball.x = GOAL_BACK_X;
+    w.step(1 / 120);
+
+    expect(w.score.violet).toBe(1);
+    expect(w.events.some((e) => (e.message ?? '').includes('Goal disallowed'))).toBe(false);
   });
 
   it('calls 5.6.1.4 lack of progress when attacker forces defenders into multiple defence', () => {
@@ -810,6 +849,45 @@ describe('lack of progress (5.6)', () => {
     if (calledAt !== null) {
       expect(calledAt - contestedFrom!).toBeGreaterThan(4.9);
     }
+  });
+
+  it('does NOT call it on a ball being played around a goalmouth', () => {
+    /*
+     * Reported from real matches, more than once and with feeling: a ball
+     * kicked at the goal, plainly moving the whole time, called for lack of
+     * progress.
+     *
+     * PROGRESS_DISTANCE is measured from a single mark, so it asks where the
+     * ball ENDED UP. A ball being hammered back and forth across a goalmouth
+     * ends up nowhere without ever once being stuck, and the straightness
+     * let-off cannot save it either, because a ball going back and forth is
+     * not going straight. Measured on real play, those windows had the ball at
+     * 205-346 mm/s mean with peaks past 2 m/s, ranging over a box 389-604 mm
+     * across - while windows where the ball was genuinely stopped had a span
+     * of ZERO at the 90th percentile.
+     */
+    const w = world('open');
+    w.running = true;
+    const [c1, c2, y1, y2] = w.robots;
+    c2!.x = -800; c2!.z = 400; y2!.x = -700; y2!.z = -400;
+
+    // Striker and keeper both on it, the ball worked across the mouth.
+    let peak = 0;
+    for (let t = 0; t < 14; t += 1 / 120) {
+      const bz = Math.sin(t * 2.2) * 210;
+      w.ball.x = HALF_LENGTH - 260 + Math.cos(t * 3.1) * 60;
+      w.ball.z = bz;
+      w.ball.vx = -Math.sin(t * 3.1) * 186;
+      w.ball.vz = Math.cos(t * 2.2) * 462;
+      peak = Math.max(peak, Math.hypot(w.ball.vx, w.ball.vz));
+      c1!.x = w.ball.x - 150; c1!.z = bz;
+      y1!.x = w.ball.x + 160; y1!.z = bz;
+      w.step(1 / 120);
+    }
+
+    // It really was being played, not nudged.
+    expect(peak).toBeGreaterThan(400);
+    expect(w.events.some((e) => e.kind === 'lack-of-progress')).toBe(false);
   });
 
   it('escalates from a neutral point to the centre on the second call', () => {

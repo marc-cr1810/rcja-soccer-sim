@@ -66,6 +66,9 @@ class GoalFrame:
         #: flips it at half time, and that is the only announcement of the swap
         #: a robot gets - see `update()`.
         self._anchored_direction = None
+        #: The camera's name for our goal at the last anchor, and ``None``
+        #: before the first. See the nearest-goal comment in `update()`.
+        self._mine_colour = None
 
     def update(self, s, heading: float, me_x: float, me_z: float) -> None:
         # The first frame of a kick-off is the moment to look, because `me` is
@@ -133,10 +136,31 @@ class GoalFrame:
         # own net. Require a clear margin (> ~5% shorter range, i.e. 0.81x in
         # the squared domain) so ambiguous near-equal readings are left as-is
         # rather than swapped on noise.
+        #
+        # And "at a kick-off" is the load-bearing part. The start button also
+        # goes down when a referee stops play and restarts it where everyone
+        # stands - a ball out, a lack of progress - and a striker that is
+        # re-anchored 400 mm into the opponents' half finds *their* goal nearer
+        # and attacks its own for the rest of the half. Nearest-goal is only
+        # asked when the answer can have changed: the first anchor of all, and
+        # the end switch moving. Otherwise the goal that was ours still is, and
+        # only the geometry is refreshed.
         d_mine = (my_x - me_x) ** 2 + (my_z - me_z) ** 2
         d_theirs = (their_x - me_x) ** 2 + (their_z - me_z) ** 2
-        if d_theirs < d_mine * 0.81:
+        if self._mine_colour is not None and not swapped:
+            flip = self._mine_colour != _GOAL_OF_TEAM[self.team]
+        elif d_theirs < d_mine * 0.81:
+            flip = True
+        elif d_mine < d_theirs * 0.81 or self._mine_colour is None:
+            flip = False
+        else:
+            # Too close to call at an end change: the ends did change, so ours
+            # is the one that was not ours before - not the one named after us,
+            # which is wrong in every second half.
+            flip = self._mine_colour == _GOAL_OF_TEAM[self.team]
+        if flip:
             my_x, my_z, their_x, their_z = their_x, their_z, my_x, my_z
+        self._mine_colour = _GOAL_OF_TEAM[self.other if flip else self.team]
 
         dx = their_x - my_x
         dz = their_z - my_z

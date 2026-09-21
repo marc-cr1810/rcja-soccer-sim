@@ -189,6 +189,14 @@ export class FieldRenderer {
   cameraMode: CameraMode = 'referee';
   /** Where the follow camera is currently looking, eased toward the ball. */
   private readonly followLook = new THREE.Vector3();
+  /** Smoothed ball velocity in metres/second. */
+  private readonly ballVelocity = new THREE.Vector3();
+  /** Last seen ball position for velocity calculation. */
+  private readonly lastBallPos = new THREE.Vector3();
+  /** Smoothed facing direction: +1 facing Yellow goal, -1 facing Cyan goal. */
+  private followFacing = 1;
+  /** Whether the follow camera has been initialized with the current ball position. */
+  private followInitialized = false;
   orbitAngle = 0;
   /** Rule 4.2.5: whether to visually render the 3D communication lines between robots (default false). */
   showCommsLines = false;
@@ -397,6 +405,7 @@ export class FieldRenderer {
   private updateCamera(world: RenderView, dt: number): void {
     const target = new THREE.Vector3(0, 0, 0);
     const pos = new THREE.Vector3();
+    const safeDt = Math.max(0.001, Math.min(dt, 0.1));
 
     switch (this.cameraMode) {
       case 'referee': {
@@ -435,18 +444,51 @@ export class FieldRenderer {
       }
       case 'follow': {
         this.camera.up.set(0, 1, 0);
-        const ball = new THREE.Vector3(world.ball.x * MM, 0, world.ball.z * MM);
-        // Snap the view point on entry; ease it every frame after, so the
-        // camera does not whip around whenever the ball changes course.
-        if (this.lastCameraMode !== 'follow') this.followLook.copy(ball);
-        else this.followLook.lerp(ball, 0.05);
+        const ballY = (world.ball.y ?? world.ball.radius ?? 21) * MM;
+        const ballPos = new THREE.Vector3(world.ball.x * MM, ballY, world.ball.z * MM);
+
+        if (this.lastCameraMode !== 'follow' || !this.followInitialized) {
+          this.followLook.copy(ballPos);
+          this.lastBallPos.copy(ballPos);
+          this.ballVelocity.set(0, 0, 0);
+          this.followFacing = THREE.MathUtils.clamp(ballPos.x / 0.35, -1, 1);
+          this.followInitialized = true;
+        } else {
+          const rawVel = ballPos.clone().sub(this.lastBallPos).divideScalar(safeDt);
+          this.lastBallPos.copy(ballPos);
+          // Very smooth velocity estimation to prevent any derivative noise
+          const velSmoothing = 1 - Math.exp(-3 * safeDt);
+          this.ballVelocity.lerp(rawVel, velSmoothing);
+        }
+
+        // Smoothly track the ball position as the look target
+        const lookSmoothing = 1 - Math.exp(-6 * safeDt);
+        this.followLook.lerp(ballPos, lookSmoothing);
         target.copy(this.followLook);
-        pos.set(this.followLook.x - 0.9, 1.0, this.followLook.z + 1.1);
+
+        // Dynamically face whichever goal the play is targeting:
+        // +1 = play is in Yellow's half (camera sits towards cyan side, looking +x towards Yellow goal)
+        // -1 = play is in Cyan's half (camera sits towards yellow side, looking -x towards Cyan goal)
+        // Midfield = camera looks across the pitch from the spectator sideline
+        const biasX = this.followLook.x + this.ballVelocity.x * 0.3;
+        const targetFacing = THREE.MathUtils.clamp(biasX / 0.35, -1, 1);
+        this.followFacing = THREE.MathUtils.lerp(this.followFacing, targetFacing, 1 - Math.exp(-2.5 * safeDt));
+
+        // Offset X based on facing: when facing Yellow (+1), camera is at x - 0.75;
+        // when facing Cyan (-1), camera is at x + 0.75.
+        const offsetX = -0.75 * this.followFacing;
+
+        // Position camera on the spectator sideline (+z), at fixed height and distance
+        pos.set(
+          this.followLook.x + offsetX,
+          1.05,
+          this.followLook.z + 1.15,
+        );
         break;
       }
       case 'orbit': {
         this.camera.up.set(0, 1, 0);
-        this.orbitAngle += dt * 0.1;
+        this.orbitAngle += safeDt * 0.1;
         const r = 2.4;
         pos.set(Math.cos(this.orbitAngle) * r, 1.5, Math.sin(this.orbitAngle) * r);
         break;
@@ -456,8 +498,15 @@ export class FieldRenderer {
     if (this.lastCameraMode !== this.cameraMode) {
       this.lastCameraMode = this.cameraMode;
       this.camera.position.copy(pos);
+    } else if (this.cameraMode === 'follow') {
+      // followLook is already smoothly damped. Lerping position tightly to pos
+      // keeps the camera offset rigid relative to the smoothed look target,
+      // avoiding phase-lag wobble.
+      const posSmoothing = 1 - Math.exp(-12 * safeDt);
+      this.camera.position.lerp(pos, posSmoothing);
     } else {
-      this.camera.position.lerp(pos, this.cameraMode === 'follow' ? 0.05 : 0.08);
+      const posSmoothing = 1 - Math.exp(-8 * safeDt);
+      this.camera.position.lerp(pos, posSmoothing);
     }
     this.camera.lookAt(target);
   }

@@ -126,7 +126,17 @@ describe('a misbehaving program only hurts itself', () => {
     const agents = { ...teams() } as unknown as Record<string, Agent>;
     agents['violet-1'] = crasher;
     agents['violet-2'] = crasher;
-    const r = play(5, agents as unknown as MatchAgents, 120);
+    // Mercy off, because this test is about a crashed program not taking the
+    // match down with it, not about the scoreline. With it on the live side
+    // now puts ten unanswered goals past a team that cannot move and the
+    // referee ends it early - which is the mercy rule working, and would make
+    // this assertion fail for a reason that has nothing to do with crashes.
+    const r = new Match({
+      agents: agents as unknown as MatchAgents,
+      halfSeconds: 120,
+      seed: 5,
+      mercyMargin: null,
+    }).run();
     // The match runs to the whistle, the dead side's faults are on the record,
     // and the working side's programs are untouched by any of it.
     expect(r.clock).toBeGreaterThanOrEqual(240 - 1);

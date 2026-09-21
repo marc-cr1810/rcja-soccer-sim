@@ -272,6 +272,29 @@ const PROGRESS_STRAIGHTNESS = 0.6;
 const PROGRESS_MIN_PATH = 120;
 
 /**
+ * How much ground the ball has to range over before it is plainly not stuck.
+ *
+ * `PROGRESS_DISTANCE` is measured from a single mark, so it asks whether the
+ * ball ENDED UP anywhere - and a ball being hammered back and forth across a
+ * goalmouth never ends up anywhere while never once being stuck. Reported from
+ * a real match, repeatedly, as a ball kicked into the goal mouth and called
+ * for lack of progress while it was moving the whole time. Measured, those
+ * windows had the ball at a mean of 205-346 mm/s with peaks over 2 m/s,
+ * ranging over a box 389-604 mm across.
+ *
+ * The bounding box is what tells them apart, and the separation is not close:
+ * across 168 calls, windows where the ball was genuinely stopped had a span of
+ * ZERO at the 90th percentile. At 350 mm this lets off seven calls and not one
+ * of them was on a still ball.
+ *
+ * Deliberately not a speed test. The old speed shortcut reset the window on any
+ * instantaneous flicker over 60 mm/s, which a jostled ball crosses constantly,
+ * and removing it is why this function was rewritten. A ball rattling inside a
+ * robot's width still covers no ground and is still called.
+ */
+const PROGRESS_SPAN = 350;
+
+/**
  * Rule 5.6.1.1: no robot has any chance of locating the ball.
  *
  * The case that forced this was a ball that rolled into the goal and stopped
@@ -331,6 +354,29 @@ const NEGLECTED_SECONDS = 5;
  * and a robot lining something up is not what this is about.
  */
 export const HELD_BALL_SECONDS = 8;
+
+/**
+ * Rule 5.6.1.3: how long a robot has to be shoving before it is forcing.
+ *
+ * `FORCING_SECONDS` is the offence - hold a defender in its own box that long
+ * while driving at goal and the referee stops play. `FORCING_GOAL_SECONDS` is
+ * the lower bar a goal has to clear to be disallowed as "a direct result of
+ * forcing", because a goal scored at 1.2 s can never happen: the referee has
+ * already blown up for it.
+ *
+ * Any bar at all is the fix. The disallow used to key off `lastForcingTeam`,
+ * which is set on ANY tick where an attacker with the ball touches a defender
+ * in the box - so a striker who so much as brushed the keeper on the way past
+ * lost the goal. Measured over champion and reference play: 163 goals
+ * disallowed, 22% of every goal scored, of which 75 were disallowed on a
+ * SINGLE TICK of contact, the median contact was 0.04 s, and not one had gone
+ * on long enough to be the offence the rule describes.
+ *
+ * Reported from a real match as a striker beating the keeper and the goal
+ * being turned into a lack-of-progress restart at the centre spot.
+ */
+const FORCING_SECONDS = 1.2;
+const FORCING_GOAL_SECONDS = 0.6;
 
 /** Robot mass in grams, by league weight cap (rule 4.1.1). */
 function robotMass(league: League): number {
@@ -465,10 +511,23 @@ export class World {
   private pathSinceMark = 0;
   /** Which window the progress clock is running under; a change restarts it. */
   private progressKind: 'contested' | 'held' | null = null;
+  /** The ball's bounding box since `progressMark`, for the `PROGRESS_SPAN` test. */
+  private spanMinX = 0;
+  private spanMaxX = 0;
+  private spanMinZ = 0;
+  private spanMaxZ = 0;
   /** How many times lack of progress has been called since the last restart (5.6.2). */
   lackOfProgressCount = 0;
   /** Whether the ball now in the goal has already been counted. See `detectGoal`. */
   private goalGiven = false;
+  /**
+   * The longest this forcing episode has run, not how much is left of it.
+   *
+   * `forcingDuration` decays once the shoving stops, at twice the rate it
+   * built up, so by the time a goal arrives it says almost nothing about what
+   * happened just before. The peak is what 5.6.1.3 is asking about.
+   */
+  private forcingPeak = 0;
   /** Suppresses the 5.11.1 detector per team so it reports once, not per frame. */
   private multipleDefenceCooldown: Record<TeamId, number> = { violet: 0, lime: 0 };
   /** Rule 5.11.1: Sustained duration both defenders have been directly blocking the goal. */
@@ -839,6 +898,7 @@ export class World {
     this.multipleDefenceCooldown = { violet: 0, lime: 0 };
     this.multipleDefenceDwell = { violet: 0, lime: 0 };
     this.forcingDuration = 0;
+    this.forcingPeak = 0;
     this.lastForcingTeam = null;
     this.sinceForcing = 999;
     this.reportedOutOfPlay = false;
@@ -1110,7 +1170,11 @@ export class World {
     const scorer: TeamId = this.defendingGoal('violet') === scoringSide ? 'lime' : 'violet';
 
     // Rule 5.6.1.3: If a goal is scored as a direct result of forcing, it will be disallowed!
-    if (this.lastForcingTeam === scorer && this.sinceForcing < 0.8) {
+    if (
+      this.lastForcingTeam === scorer &&
+      this.sinceForcing < 0.8 &&
+      this.forcingPeak >= FORCING_GOAL_SECONDS
+    ) {
       this.emit({
         kind: 'lack-of-progress',
         rule: '5.6.1.3',
@@ -1120,6 +1184,7 @@ export class World {
       this.lastForcingTeam = null;
       this.sinceForcing = 999;
       this.forcingDuration = 0;
+      this.forcingPeak = 0;
       if (this.autoResolve) {
         this.callLackOfProgress();
       } else {
@@ -1214,6 +1279,10 @@ export class World {
     this.progressPrev = { x: this.ball.x, z: this.ball.z };
     this.sinceProgressMark = 0;
     this.pathSinceMark = 0;
+    this.spanMinX = this.ball.x;
+    this.spanMaxX = this.ball.x;
+    this.spanMinZ = this.ball.z;
+    this.spanMaxZ = this.ball.z;
   }
 
   /**
@@ -1477,6 +1546,26 @@ export class World {
     } else {
       this.sinceProgressMark += dt;
       this.pathSinceMark += distance(this.ball, this.progressPrev);
+      this.spanMinX = Math.min(this.spanMinX, this.ball.x);
+      this.spanMaxX = Math.max(this.spanMaxX, this.ball.x);
+      this.spanMinZ = Math.min(this.spanMinZ, this.ball.z);
+      this.spanMaxZ = Math.max(this.spanMaxZ, this.ball.z);
+      /*
+       * Ranged over real ground, wherever it happens to be standing now.
+       *
+       * Only while the ball is CONTESTED, and the difference is the whole
+       * point. Two opponents moving a ball over half a metre of goalmouth are
+       * playing it; the rule is asking whether it is stuck between them, and
+       * it plainly is not. One robot alone is being asked a different
+       * question - whether it is taking the ball anywhere - and a robot
+       * spinning the ball in a circle around itself covers a big box while
+       * getting nowhere at all. That one is still a stall, and displacement
+       * is the right measure for it.
+       */
+      if (kind === 'contested') {
+        const span = Math.hypot(this.spanMaxX - this.spanMinX, this.spanMaxZ - this.spanMinZ);
+        if (span > PROGRESS_SPAN) this.restartProgressWindow();
+      }
     }
     this.progressPrev = { x: this.ball.x, z: this.ball.z };
 
@@ -1565,11 +1654,13 @@ export class World {
 
     if (forcingAttacker) {
       this.forcingDuration += dt;
+      this.forcingPeak = Math.max(this.forcingPeak, this.forcingDuration);
       this.lastForcingTeam = forcingAttacker.team;
       this.sinceForcing = 0;
 
-      if (this.forcingDuration > 1.2) {
+      if (this.forcingDuration > FORCING_SECONDS) {
         this.forcingDuration = 0;
+        this.forcingPeak = 0;
         this.emit({
           kind: 'lack-of-progress',
           rule: '5.6.1.3',
@@ -1586,6 +1677,8 @@ export class World {
     } else {
       this.forcingDuration = Math.max(0, this.forcingDuration - dt * 2);
       this.sinceForcing += dt;
+      // The episode is over once it is too old to taint a goal anyway.
+      if (this.sinceForcing >= 0.8) this.forcingPeak = 0;
     }
   }
 
