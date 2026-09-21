@@ -58,6 +58,7 @@ import {
   passIsOpen,
   spinTowards,
   steerBallInside,
+  stoppingSpeed,
   steerClearOfEdges,
   tangentApproach,
   widestOpening,
@@ -828,7 +829,7 @@ export class ChampionBrain {
     }
 
     const travel = steerClearOfEdges(Math.atan2(dz, dx), meX, meZ, 210.0, p.leashX, p.leashZ);
-    const speed = clamp(gap / 90.0, 0.3, 1.0) * this.skill;
+    const speed = stoppingSpeed(gap, 0.3) * this.skill;
 
     return {
       motors: mixOmni(this.drive, wrapAngle(travel - heading), speed, spin),

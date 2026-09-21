@@ -330,6 +330,45 @@ export function passIsOpen(
 }
 
 /**
+ * How hard the robot may count on braking when it plans to stop, mm/s².
+ *
+ * The carpet caps braking, not the motors: 0.7 grip on a quarter of the weight
+ * per wheel allows about 4860 mm/s² between two wheel axes, less along one. But
+ * planning to that figure lost: a robot has to stop inside its gap *after* the
+ * camera, the estimator and a 50 Hz control loop have had their say, and a
+ * keeper's mark keeps moving as the ball estimate is corrected, so it is always
+ * braking for a target that is no longer there. Both eat stopping distance.
+ *
+ * Measured by `scratch/quick_duel.ts`, keeper `hold()` on this law vs the
+ * pinned champion's linear gap/90, 180 matches each on grip physics:
+ * 4000 → ×1.12 goals, 2000 → ×1.93, 1500 → ×2.22 (wins 159-12), 1000 → ×2.35
+ * (wins 156-12). 1000 and 1500 are inside the screen's noise of each other.
+ * On the pre-grip drive the same change was worth only ×1.06-1.14, so this is
+ * a fix for grip, not a keeper that was always mistuned.
+ *
+ * Tried on top and not kept, all within noise at 180 matches: the same law for
+ * the striker's cover (×2.21) and receive (×2.09); the keeper leading a slow
+ * ball by 0.15-0.45 s (×2.19-2.51, not monotonic); lifting small spin commands
+ * over the 10% gearbox deadband (×2.03-2.22).
+ */
+export const BRAKE_DECEL = 1500;
+
+/** Top speed at full power driving forward, mm/s. */
+export const TOP_SPEED = 1150;
+
+/**
+ * The fastest speed, as a fraction of full power, that can still stop in `gap`.
+ *
+ * √(2·a·d) is the speed a constant brake sheds over d. A linear gap/K law has
+ * the opposite shape: it asks for full speed at K mm out, which a grip-limited
+ * robot cannot stop from, then crawls over the last few centimetres where it
+ * could have kept moving.
+ */
+export function stoppingSpeed(gap: number, floor = 0.0): number {
+  return clamp(Math.sqrt(2 * BRAKE_DECEL * Math.max(0, gap)) / TOP_SPEED, floor, 1.0);
+}
+
+/**
  * PD Spin Controller clamped to [-1, 1].
  */
 export function spinTowards(error: number, yawRate: number, kp = 1.3, kd = 0.35): number {

@@ -6,6 +6,8 @@
 # A winner is measured over enough matches to mean something, never over one
 # or two.
 #
-# This first pin is the "best so far" working tree, frozen at its commit
-# before any of the dynamic-role work begins.
-ab6ce00ad96be1d910be3fcd58138329a20b7388
+# Re-pinned 2026-09-22 from ab6ce00 to HEAD. ab6ce00 declares protocol 5 and the
+# server has spoken 6 since 7cff72f, so its runner could no longer join a match
+# at all. HEAD is also the right bar for what comes next: it is the champion
+# as tuned on the old 9.2 m/s² drive, before the retune for wheel grip.
+beed68a6cf78154d16fe61349685ddb8df04076c
