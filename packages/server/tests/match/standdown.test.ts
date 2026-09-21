@@ -126,7 +126,8 @@ describe('a robot taken off for damage', () => {
     expect(last.type).toBe('disabled');
     expect(last.rule).toBe('5.7.1');
     expect(last.reason).toContain('damaged');
-    expect(last.returnsIn).toBeGreaterThan(0);
+    // Not when it will be back: a robot in somebody's hands has no way to know.
+    expect('returnsIn' in last).toBe(false);
   });
 
   it('sends no sensors while it is off', () => {
@@ -142,7 +143,7 @@ describe('a robot taken off for damage', () => {
     expect(socket.frames.length).toBe(atRemoval);
   });
 
-  it('says so on the first frame back, and only that one', () => {
+  it('comes back with its start button being pressed, like a robot put back by hand', () => {
     const { match, socket } = playing();
     run(match, 1);
 
@@ -150,10 +151,16 @@ describe('a robot taken off for damage', () => {
     const atRemoval = socket.frames.length;
     run(match, 45);
 
+    // Nothing says "you were removed": a robot cannot tell that from any
+    // other restart. What it gets is what a real one gets - the button up as
+    // it goes back on, then down.
     const after = socket.frames.slice(atRemoval);
-    expect(after.length).toBeGreaterThan(0);
-    expect(after[0]!.returned).toBe(true);
-    expect(after.slice(1).every((f) => f.returned === false)).toBe(true);
+    expect(after.length).toBeGreaterThan(3);
+    // Only the first return is checked: any later restart in these 45 seconds
+    // lifts the button again, as it does for every robot.
+    expect(after[0]!.start).toBe(false);
+    expect(after[1]!.start).toBe(false);
+    expect(after[2]!.start).toBe(true);
   });
 
   it('does not serve a second stand-down for dropping out while already off', () => {
@@ -195,7 +202,7 @@ describe('a match that is not running', () => {
 
     // Frames flow, so the socket never goes quiet waiting for a referee.
     expect(socket.frames.length).toBeGreaterThan(0);
-    expect(socket.frames.every((f) => f.playing === false)).toBe(true);
+    expect(socket.frames.every((f) => f.start === false)).toBe(true);
     // And nothing moved: no clock, no ball, no robot.
     expect(match.world.clock).toBe(0);
     expect(match.world.ball.x).toBe(ball.x);

@@ -14,13 +14,11 @@ import type { SensorFrame, ActuatorFrame } from '../../src/match/protocol';
 describe('Protobuf wire encoder/decoder', () => {
   test('SensorFrame roundtrip', () => {
     const frame: SensorFrame = {
-      clock: 12.345,
+      time: 12.345,
       robot: 2,
       team: 'lime',
       attackDirection: -1,
-      playing: true,
-      returned: false,
-      kickoff: { pending: true, ours: false, countdown: 4.5 },
+      start: true,
       ball: { bearing: 1.23, strength: 0.85 },
       compass: { heading: -0.45 },
       gyro: { rate: 2.5 },
@@ -53,15 +51,11 @@ describe('Protobuf wire encoder/decoder', () => {
     expect(encoded.length).toBeGreaterThan(0);
     const decoded = decodeSensorFrame(encoded);
 
-    expect(decoded.clock).toBeCloseTo(frame.clock, 4);
+    expect(decoded.time).toBeCloseTo(frame.time, 4);
+    expect(decoded.start).toBe(frame.start);
     expect(decoded.robot).toBe(frame.robot);
     expect(decoded.team).toBe(frame.team);
     expect(decoded.attackDirection).toBe(frame.attackDirection);
-    expect(decoded.playing).toBe(frame.playing);
-    expect(decoded.returned).toBe(frame.returned);
-    expect(decoded.kickoff.pending).toBe(frame.kickoff.pending);
-    expect(decoded.kickoff.ours).toBe(frame.kickoff.ours);
-    expect(decoded.kickoff.countdown).toBeCloseTo(frame.kickoff.countdown, 2);
 
     expect(decoded.ball).not.toBeNull();
     expect(decoded.ball!.bearing).toBeCloseTo(frame.ball!.bearing, 2);
@@ -114,13 +108,11 @@ describe('Protobuf wire encoder/decoder', () => {
 
   test('ServerMessage and ClientMessage wrappers', () => {
     const frame: SensorFrame = {
-      clock: 1.0,
+      time: 1.0,
       robot: 1,
       team: 'violet',
       attackDirection: 1,
-      playing: true,
-      returned: false,
-      kickoff: { pending: false, ours: true, countdown: 0 },
+      start: true,
       ball: null,
       compass: { heading: 0 },
       gyro: { rate: 0 },

@@ -54,14 +54,14 @@ class Fake:
     def close(self):
         self.closed = True
 
-def sensors(clock, pending=False):
-    return {"type": "sensors", "frame": {"clock": clock, "kickoff": {"pending": pending}}}
+def sensors(at, start=True):
+    return {"type": "sensors", "frame": {"time": at, "start": start}}
 
 script = [
     {"type": "welcome", "robot": "violet-1", "motors": 3},
     sensors(0.0),
     sensors(1.0),
-    sensors(2.0, pending=True),
+    sensors(2.0, start=False),
     sensors(3.0),
     sensors(4.0),
 ]
@@ -97,15 +97,15 @@ try:
     # Frame 1.0 (raises, coast)
     try:
         s = Reading(rt.raw_frame())
-        if s.clock == 1.0:
+        if s.time == 1.0:
             raise RuntimeError("a bug in somebody's robot")
     except RuntimeError:
         pass
     rt.sync_tick(20)
 
-    # Frame 2.0 (kickoff pending, clears memory)
+    # Frame 2.0 (start button up - a restart - clears memory)
     s = Reading(rt.raw_frame())
-    if s.kickoff.pending:
+    if not s.start:
         me.clear()
     me.n = me.get("n", 0) + 1
     rt.send_command(motors=[0.1, 0.2, 0.3, 0.4], say={"n": me.n})
@@ -158,7 +158,7 @@ describe.skipIf(!pythonAvailable)('the transport seam', () => {
     const out = runHarness();
     expect(out.join).toEqual({
       type: 'join',
-      protocol: 5,
+      protocol: 6,
       team: 'violet',
       robot: 1,
       name: 'ACT',

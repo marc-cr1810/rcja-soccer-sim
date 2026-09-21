@@ -185,6 +185,11 @@ export interface PlayRequest {
    */
   heldBallSeconds?: number;
   /**
+   * How long a person takes to put the ball on a neutral point, from
+   * `rules.ballPlacement{Min,Max}Seconds` - sent for the same reason.
+   */
+  ballPlacementSeconds?: { min: number; max: number };
+  /**
    * Goals the pre-game penalty clock awarded before a ball was kicked.
    *
    * Applied as score corrections at clock 0, so a match that kicks off 3-0
@@ -695,6 +700,7 @@ export class FixtureArena {
         mercyMargin: request.mercyMargin,
         halfTimeSeconds: request.halfTimeSeconds,
         heldBallSeconds: request.heldBallSeconds,
+        ballPlacementSeconds: request.ballPlacementSeconds,
         penalties: request.penalties,
       });
 

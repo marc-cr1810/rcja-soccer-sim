@@ -445,7 +445,12 @@ export class FieldRenderer {
       case 'follow': {
         this.camera.up.set(0, 1, 0);
         const ballY = (world.ball.y ?? world.ball.radius ?? 21) * MM;
-        const ballPos = new THREE.Vector3(world.ball.x * MM, ballY, world.ball.z * MM);
+        // A ball off the field leaves the camera where it last saw it, rather
+        // than swinging to wherever the hidden ball happens to sit.
+        const ballPos =
+          world.ball.absent && this.followInitialized
+            ? this.lastBallPos.clone()
+            : new THREE.Vector3(world.ball.x * MM, ballY, world.ball.z * MM);
 
         if (this.lastCameraMode !== 'follow' || !this.followInitialized) {
           this.followLook.copy(ballPos);
@@ -531,6 +536,7 @@ export class FieldRenderer {
 
   render(world: RenderView, dt: number): void {
     this.syncRobots(world);
+    this.ballMesh.visible = !world.ball.absent;
     this.ballMesh.position.set(
       world.ball.x * MM,
       (world.ball.y ?? world.ball.radius) * MM,

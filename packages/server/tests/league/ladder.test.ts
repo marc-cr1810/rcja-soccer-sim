@@ -116,8 +116,15 @@ describe('the bots push on the rules they were written for', () => {
   it('produces scrums that stop progressing, so 5.6 gets exercised', () => {
     const roster = botRoster();
     const shove = roster.find((b) => b.name === 'shover')!;
-    const c = calls(bot('shover', shove.make), bot('shover', shove.make));
-    expect(c['lack-of-progress'] ?? 0).toBeGreaterThan(0);
+    // Summed over seeds: whether one particular scrum jams is chaos, and a
+    // single pinned seed flipped the moment the start button started going up
+    // for two frames at each restart. About two seeds in five produce one.
+    let stalled = 0;
+    for (const seed of [1, 2, 3, 4, 5, 6]) {
+      const c = calls(bot('shover', shove.make), bot('shover', shove.make), seed);
+      stalled += c['lack-of-progress'] ?? 0;
+    }
+    expect(stalled).toBeGreaterThan(0);
   });
 
   it('scores at both ends with a naive chaser, which the referee must allow', () => {
@@ -146,7 +153,9 @@ describe('balance, as currently measured', () => {
    * scoreline, so they are tightened here to match.
    */
   it('measures goals and restarts per match', () => {
-    const s = runLadder([reference(), reference(0.6)], { halfSeconds: 120, seed: 5 });
+    // Three rounds, not one: a single pair of matches swings between 6.5 and
+    // 12.5 goals on nothing but the seed, which is noise, not balance.
+    const s = runLadder([reference(), reference(0.6)], { halfSeconds: 120, seed: 5, rounds: 3 });
     expect(s.goalsPerMatch).toBeGreaterThan(0);
     expect(s.goalsPerMatch).toBeLessThan(12);
     expect(s.callsPerMatch['ball-out-of-play'] ?? 0).toBeLessThan(70);

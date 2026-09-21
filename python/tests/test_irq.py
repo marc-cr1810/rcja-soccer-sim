@@ -118,31 +118,15 @@ class TestHumanPins(unittest.TestCase):
         teardown()
 
     def test_the_start_button_is_down_while_play_is_live(self) -> None:
-        rt, _ = connected_singleton([sensor_frame(0.0, playing=True)["frame"]])
+        rt, _ = connected_singleton([sensor_frame(0.0, start=True)["frame"]])
         self.assertEqual(Pin(CFG.start, Pin.IN).value(), 1)
 
     def test_the_button_is_up_at_a_stoppage(self) -> None:
-        rt, _ = connected_singleton([sensor_frame(0.0, playing=False)["frame"]])
-        self.assertEqual(Pin(CFG.start, Pin.IN).value(), 0)
-
-    def test_the_button_is_up_through_the_pre_whistle_countdown(self) -> None:
-        # The load-bearing one. The server keeps `playing` true *through* the
-        # countdown at a restart, and a human does not press start until the
-        # whistle. Map the raw flag and every robot encroaches at every
-        # kick-off.
-        rt, _ = connected_singleton(
-            [
-                sensor_frame(
-                    0.0,
-                    playing=True,
-                    kickoff={"pending": True, "ours": True, "countdown": 2.4},
-                )["frame"]
-            ]
-        )
+        rt, _ = connected_singleton([sensor_frame(0.0, start=False)["frame"]])
         self.assertEqual(Pin(CFG.start, Pin.IN).value(), 0)
 
     def test_the_button_is_up_while_the_robot_is_off_the_field(self) -> None:
-        rt, _ = connected_singleton([sensor_frame(0.0, playing=True)["frame"]])
+        rt, _ = connected_singleton([sensor_frame(0.0, start=True)["frame"]])
         rt.off_field = True
         self.assertEqual(Pin(CFG.start, Pin.IN).value(), 0)
 
@@ -157,8 +141,8 @@ class TestHumanPins(unittest.TestCase):
     def test_the_whistle_is_a_rising_edge_on_the_button(self) -> None:
         rt, _ = connected_singleton(
             [
-                sensor_frame(0.0, playing=False)["frame"],
-                sensor_frame(0.02, playing=True)["frame"],
+                sensor_frame(0.0, start=False)["frame"],
+                sensor_frame(0.02, start=True)["frame"],
             ]
         )
         whistles = []

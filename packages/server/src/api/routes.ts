@@ -42,6 +42,7 @@ import {
   ResetPasswordBodySchema,
   ReturnRobotBodySchema,
   RosterBodySchema,
+  BallBodySchema,
   ResolveBodySchema,
   SaveBodySchema,
   ScheduleResponseSchema,
@@ -450,6 +451,20 @@ route({
   responses: {
     '200': json(PracticeStateResponseSchema, 'Rostered — state returned'),
     '400': error('Bad request — "seat" and boolean "onField" are required'),
+    '404': error('This server is not a practice field'),
+  },
+});
+
+route({
+  method: 'post',
+  path: '/practice-api/ball',
+  summary: 'Take the ball off the field, or put it back',
+  request: {
+    body: { content: { [JSON]: { schema: BallBodySchema } } },
+  },
+  responses: {
+    '200': json(PracticeStateResponseSchema, 'Ball switched — state returned'),
+    '400': error('Bad request — boolean "onField" is required'),
     '404': error('This server is not a practice field'),
   },
 });

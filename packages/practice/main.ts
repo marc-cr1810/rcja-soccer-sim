@@ -83,6 +83,8 @@ interface SeatState {
 interface PracticeState {
   running: boolean;
   resolve: 'restage' | 'play-on' | 'freeze';
+  /** False while the ball has been taken off this field. */
+  ballOnField: boolean;
   clock: number;
   score: { violet: number; lime: number };
   arrangement: { robots: { id: string; x: number; z: number }[]; ball: { x: number; z: number } };
@@ -107,6 +109,7 @@ const seatsPanel = document.getElementById('seats')!;
 const notice = document.getElementById('notice')!;
 const output = document.getElementById('output')!;
 const modes = document.getElementById('modes')!;
+const ballToggle = document.getElementById('ball-toggle') as HTMLButtonElement;
 
 const board = {
   violetName: document.getElementById('violet-name')!,
@@ -144,8 +147,10 @@ function blend(from: ViewFrame, to: ViewFrame, t: number): ViewFrame {
     ...to,
     ball: {
       ...to.ball,
-      x: lerp(from.ball.x, to.ball.x, t),
-      z: lerp(from.ball.z, to.ball.z, t),
+      // A ball that has just been put down arrives where it was put, rather
+      // than gliding there from wherever it was picked up.
+      x: from.ball.absent ? to.ball.x : lerp(from.ball.x, to.ball.x, t),
+      z: from.ball.absent ? to.ball.z : lerp(from.ball.z, to.ball.z, t),
       y: to.ball.y === undefined ? undefined : lerp(from.ball.y ?? 0, to.ball.y, t),
     },
     robots: to.robots.map((r) => {
@@ -307,6 +312,9 @@ function renderModes(): void {
   for (const button of modes.querySelectorAll<HTMLButtonElement>('button[data-mode]')) {
     button.classList.toggle('on', button.dataset['mode'] === state?.resolve);
   }
+  const off = state?.ballOnField === false;
+  ballToggle.textContent = off ? 'Put the ball back' : 'Take the ball away';
+  ballToggle.classList.toggle('on', off);
 }
 
 function labelFor(id: SeatId): string {
@@ -524,7 +532,8 @@ function nearest(at: { x: number; z: number }): 'ball' | SeatId | null {
       best = robot.id as SeatId;
     }
   }
-  const ball = Math.hypot(latest.ball.x - at.x, latest.ball.z - at.z);
+  // A ball that is not on the field is not there to be grabbed.
+  const ball = latest.ball.absent ? Infinity : Math.hypot(latest.ball.x - at.x, latest.ball.z - at.z);
   // The ball wins a tie: it is smaller, it is usually the thing being placed,
   // and a robot standing on it is the one case where both are under the
   // pointer at once.
@@ -618,6 +627,8 @@ function connect(): void {
 document.querySelectorAll<HTMLButtonElement>('button[data-action]').forEach((button) => {
   button.addEventListener('click', () => void act(button.dataset['action']!));
 });
+
+ballToggle.addEventListener('click', () => void act('ball', { onField: state?.ballOnField === false }));
 
 modes.querySelectorAll<HTMLButtonElement>('button[data-mode]').forEach((button) => {
   button.addEventListener('click', () => void act('resolve', { mode: button.dataset['mode'] }));

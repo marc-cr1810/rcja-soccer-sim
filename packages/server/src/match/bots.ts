@@ -31,7 +31,7 @@ const stop: ActuatorFrame = { motors: [0, 0, 0, 0] };
 export const naiveChaser: Agent = {
   name: 'naive-chaser',
   tick(frame) {
-    if (!frame.playing || !frame.ball) return stop;
+    if (!frame.start || !frame.ball) return stop;
     return { motors: mixOmni(drive, frame.ball.bearing, 1, 0), dribbler: 1 };
   },
 };
@@ -46,7 +46,7 @@ export const naiveChaser: Agent = {
 export const shover: Agent = {
   name: 'shover',
   tick(frame) {
-    if (!frame.playing || !frame.ball) return { motors: mixOmni(drive, 0, 0.4, 0) };
+    if (!frame.start || !frame.ball) return { motors: mixOmni(drive, 0, 0.4, 0) };
     const spin = Math.max(-1, Math.min(1, frame.ball.bearing * 2));
     return { motors: mixOmni(drive, 0, 1, spin), dribbler: 1 };
   },
@@ -55,7 +55,7 @@ export const shover: Agent = {
 /** Spins on the spot. Sees everything, does nothing about it. */
 export const spinner: Agent = {
   name: 'spinner',
-  tick: (frame) => (frame.playing ? { motors: mixOmni(drive, 0, 0, 1) } : stop),
+  tick: (frame) => (frame.start ? { motors: mixOmni(drive, 0, 0, 1) } : stop),
 };
 
 /** Stands still. The control case, and the one the reference agent still trips on. */
@@ -75,7 +75,7 @@ export function camper(team: 'violet' | 'lime'): Agent {
   return {
     name: `camper-${team}`,
     tick(frame) {
-      if (!frame.playing) return stop;
+      if (!frame.start) return stop;
       // Facing away from the attack direction points at its own goal - ends
       // swap at half-time (rule 1.4/5.4), so this is read from the frame
       // rather than fixed from `team` at construction time.
@@ -98,7 +98,7 @@ export function camper(team: 'violet' | 'lime'): Agent {
 export const waller: Agent = {
   name: 'waller',
   tick(frame) {
-    if (!frame.playing) return stop;
+    if (!frame.start) return stop;
     const ranges: [number, number | null][] = [
       [0, frame.range.front],
       [Math.PI / 2, frame.range.left],
@@ -130,7 +130,7 @@ export function wanderer(seed: number): Agent {
   return {
     name: `wanderer-${seed}`,
     tick(frame: SensorFrame): ActuatorFrame {
-      if (!frame.playing) return stop;
+      if (!frame.start) return stop;
       if (hold-- <= 0) {
         state ^= state << 13;
         state ^= state >>> 17;

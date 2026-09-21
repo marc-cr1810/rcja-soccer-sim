@@ -33,11 +33,12 @@ class Fake:
     def close(self):
         self.closed = True
 
-def sensors(clock, ball_strength=0.8, ball_bearing=0.0):
+def sensors(at, ball_strength=0.8, ball_bearing=0.0):
     return {
         "type": "sensors",
         "frame": {
-            "clock": clock,
+            "time": at,
+            "start": True,
             "ball": {"strength": ball_strength, "bearing": ball_bearing},
             "lines": [{"value": 0.1}, {"value": 0.9}],
             "range": {"front": 1000},
@@ -122,7 +123,7 @@ describe.skipIf(!pythonAvailable)('the MicroPython transport and wire contract',
     expect(result.opened.length).toBeGreaterThan(0);
     expect(result.join).toMatchObject({
       type: 'join',
-      protocol: 5,
+      protocol: 6,
     });
   });
 

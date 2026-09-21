@@ -20,7 +20,7 @@ from ._transport import (
 )
 from .config import get_config
 
-PROTOCOL_VERSION = 5
+PROTOCOL_VERSION = 6
 DEFAULT_URL = "ws://localhost:8080/agent"
 #: How long to keep retrying a lost connection, in seconds, before giving up
 #: and letting the error propagate. The clock restarts on every successful
@@ -102,12 +102,13 @@ class Runtime:
         self.format: str = "json"
 
         self.last_frame: dict[str, Any] = {}
-        self.clock: float = 0.0
+        #: The robot's own clock from the last frame (`SensorFrame.time`),
+        #: seconds since it was switched on for this match.
+        self.robot_time: float = 0.0
         #: Sensor frames received since this program started, across
         #: reconnects. `_timebase` counts milliseconds in these rather than in
-        #: `clock`, which is match time: it stops at every stoppage and is 0
-        #: for the whole pre-kick-off period, neither of which a board's
-        #: `ticks_ms()` does.
+        #: `robot_time`, which starts again at every match; a board's
+        #: `ticks_ms()` only starts again when it is power-cycled.
         self.frames: int = 0
         #: Host monotonic at the last frame, for sub-tick interpolation.
         self.last_frame_at: float = _timebase._real_monotonic()
@@ -288,7 +289,17 @@ class Runtime:
 
     def _update_sensor_frame(self, frame: dict[str, Any]) -> None:
         self.last_frame = frame
-        self.clock = frame.get("clock", 0.0)
+        previous_time = self.robot_time
+        self.robot_time = frame.get("time", 0.0)
+        # The robot's clock only runs backwards when a new match has started,
+        # and the server's encoder totals start again from zero with it. Differencing
+        # across that would replay the whole last match backwards as edges -
+        # one IRQ callback each, ~50ms of them in one frame, during which the
+        # robot answers nothing while its kick-off goes by. The wheels did not
+        # move: take the new totals as a fresh baseline.
+        if self.robot_time < previous_time:
+            self._enc_prev = [None] * len(self._enc_prev)
+            self._enc_carry = [0.0] * len(self._enc_carry)
         self.frames += 1
         self.last_frame_at = _timebase._real_monotonic()
         self.off_field = False
@@ -365,10 +376,12 @@ class Runtime:
         wire twenty times over.
 
         What identifies a message is *when it was sent*, which the frame gives
-        as `clock - age`. Deduplicating on `age` alone looks equivalent and is
-        not: at a stoppage the match clock stops, so every frame reports the
-        same message as `age == 0.0` and an age-based rule calls each one new.
-        Measured live - a single `write()` arrived ninety times.
+        as `time - age`. Deduplicating on `age` alone looks equivalent and is
+        not: a message arrives in consecutive frames at consecutive ages, so an
+        age-based rule calls each one new. (When ages ran on the match clock
+        they froze at a stoppage instead - a single `write()` arrived ninety
+        times.) The link and the robot's clock both run every frame, so
+        `time - age` is fixed for the life of a message.
         """
         cfg = get_config()
         uart_id = cfg.radio_uart.get("id", 1)
@@ -376,14 +389,14 @@ class Runtime:
             self._radio_sent_at.clear()
             return
 
-        clock = float(frame.get("clock", 0.0))
+        now = float(frame.get("time", 0.0))
         seen: dict[int, float] = {}
         lines = bytearray()
         for message in frame.get("messages", []) or []:
             sender = message.get("from")
             if sender is None:
                 continue
-            sent_at = clock - float(message.get("age", 0.0))
+            sent_at = now - float(message.get("age", 0.0))
             seen[sender] = sent_at
             previous = self._radio_sent_at.get(sender)
             if previous is not None and abs(sent_at - previous) < 1e-6:
@@ -588,16 +601,12 @@ class Runtime:
         if pin_id == cfg.ball_gate:
             return 1 if self.last_frame.get("ballGate", {}).get("held", False) else 0
 
-        # The start button. A human holds it down while play is live, and the
-        # gate on `countdown` is the whole reason this is not just `playing`:
-        # the server keeps `playing` true *through* the pre-whistle countdown
-        # at a restart, and a human does not press start until the whistle. Map
-        # the raw flag and every robot on the field encroaches at every
-        # kick-off.
+        # The start button, which the server now sends as the button itself -
+        # up through a stoppage, a kick-off countdown and the moment of every
+        # restart. Up while off the field too: nobody presses start on a robot
+        # in their hands.
         if pin_id == cfg.start:
-            if self.off_field or not self.last_frame.get("playing", False):
-                return 0
-            if self.last_frame.get("kickoff", {}).get("countdown", 0.0) > 0.0:
+            if self.off_field or not self.last_frame.get("start", False):
                 return 0
             return 1
 

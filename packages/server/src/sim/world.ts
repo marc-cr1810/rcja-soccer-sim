@@ -224,6 +224,16 @@ export interface MatchConfig {
    * do about it is the referee's, and referees differ.
    */
   heldBallSeconds?: number;
+  /**
+   * How long a person takes to carry the ball to a neutral point when 5.6.2
+   * or 5.9.2 moves it, drawn per placement from this range off the match
+   * seed. Defaults to BALL_PLACEMENT_SECONDS; a max of 0 puts it down in the
+   * same tick, which is what every match did before this existed.
+   *
+   * While it is in somebody's hand the ball is not on the field: nothing
+   * touches it, no rule about it can fire, and no robot can sense it.
+   */
+  ballPlacementSeconds?: { min: number; max: number };
 }
 
 /** Rule 4.1.1: every league caps the robot at a 220 mm cylinder. */
@@ -354,6 +364,26 @@ const NEGLECTED_SECONDS = 5;
  * and a robot lining something up is not what this is about.
  */
 export const HELD_BALL_SECONDS = 8;
+
+/**
+ * Half a second is a quick hand close to the spot; two is an unhurried walk
+ * round the field. See `MatchConfig.ballPlacementSeconds`.
+ */
+export const BALL_PLACEMENT_SECONDS = { min: 0.5, max: 2.0 } as const;
+
+/** The `placementJitter` slot the placement delay draws from, clear of every robot's. */
+const BALL_PLACEMENT_KEY = 0xba11;
+
+/**
+ * Why the ball is not on the field, when it is not.
+ *
+ * `hand`: somebody is carrying it to a neutral point, and puts it down when
+ * `remaining` runs out. `off`: a practice field has taken it away, and it
+ * stays away - through restarts and restages - until it is switched back on.
+ */
+export type BallAway =
+  | { kind: 'hand'; remaining: number; from: Point; toCentre: boolean }
+  | { kind: 'off' };
 
 /**
  * Rule 5.6.1.3: how long a robot has to be shoving before it is forcing.
@@ -564,6 +594,12 @@ export class World {
    */
   private consecutiveIllegalKickOffs = 0;
   /**
+   * Kick-offs so far. Every one is somebody lifting their robots, putting them
+   * down on their marks and pressing start again; the match turns a change in
+   * this into the start button going up for a moment. See `Match.buttonUp`.
+   */
+  kickOffs = 0;
+  /**
    * Without auto-resolution the ball stays where it went out, so the detector
    * would fire on every frame. Latched until the ball is placed again.
    */
@@ -571,6 +607,10 @@ export class World {
 
   /** Count of restarts placed, providing stateless, order-independent jitter. */
   private restartCount = 0;
+  /** Why the ball is off the field, or null while it is on it. */
+  private ballAway: BallAway | null = null;
+  /** Count of placements by hand, the placement delay's analogue of `restartCount`. */
+  private liftCount = 0;
 
   /**
    * Per-match ball rolling friction multiplier. Derived from the match seed
@@ -598,6 +638,39 @@ export class World {
       team: underWay ? this.kickingOffTeam : null,
       countdown: this.countdownSeconds,
     };
+  }
+
+  /**
+   * Whether the ball is on the field at all. False while a person is carrying
+   * it to a neutral point, or while a practice field has it switched off:
+   * nothing can touch it, no rule about it can fire, and no robot senses it.
+   */
+  get ballInPlay(): boolean {
+    return this.ballAway === null;
+  }
+
+  /** Why the ball is off the field, or null while it is on it. */
+  get ballAwayReason(): BallAway['kind'] | null {
+    return this.ballAway?.kind ?? null;
+  }
+
+  /**
+   * Take the ball off the field, or put it back.
+   *
+   * For a practice field that wants to see what its robots do with no ball.
+   * Off survives restarts and restages; nothing but this brings it back. On
+   * puts it down where `at` says, as a placement by hand does.
+   */
+  setBallOnField(on: boolean, at: Point = { x: 0, z: 0 }): void {
+    if (!on) {
+      this.ballAway = { kind: 'off' };
+      this.ball.vx = 0;
+      this.ball.vz = 0;
+      return;
+    }
+    if (this.ballAway?.kind !== 'off') return;
+    this.ballAway = null;
+    this.placeBall(at);
   }
 
   /** Whether a kick-off has been placed but the whistle has not blown. */
@@ -822,23 +895,11 @@ export class World {
     this.restartCount++;
     this.lastBallTouch = null;
     this.lastTouchByTeam = { violet: null, lime: null };
-    // A robot still serving a 5.7 stand-down does not get a free pass just
-    // because some restart repositions everyone else - only returnRobot()
-    // (5.7.4) brings it back, automatically or by a referee's hand. Without
-    // this, any kick-off - including a referee's own, at the top of a half -
-    // would silently reinstate a robot mid-penalty.
-    const stillRemoved = new Map(
-      this.robots
-        .filter((r) => r.removed)
-        .map((r) => [
-          r.id,
-          {
-            penaltyRemaining: r.penaltyRemaining,
-            removalRule: r.removalRule,
-            removalReason: r.removalReason,
-          },
-        ]),
-    );
+    // A restart puts every robot in the arrangement back on the field,
+    // including one still serving a 5.7 stand-down: the damage call ends at
+    // the next kick-off, and the robot takes its kick-off position like the
+    // rest rather than sitting out the remainder beside the pitch. Reusing
+    // `existing` below and clearing its removal is the whole of that.
     const existingRobots = new Map(this.robots.map((r) => [r.id, r]));
     const mass = robotMass(this.config.league);
 
@@ -877,15 +938,10 @@ export class World {
     // arrangement can put any pair on top of each other, and gets the same
     // treatment rather than a different one.
     separateAtRestart(this.robots);
-    for (const robot of this.robots) {
-      const was = stillRemoved.get(robot.id);
-      if (!was) continue;
-      robot.removed = true;
-      robot.penaltyRemaining = was.penaltyRemaining;
-      robot.removalRule = was.removalRule;
-      robot.removalReason = was.removalReason;
-    }
 
+    // A restart puts the ball on its spot, so nobody is still carrying it.
+    // Switched off stays off: a practice field with no ball restages with none.
+    if (this.ballAway?.kind === 'hand') this.ballAway = null;
     this.ball.x = arrangement.ball.x;
     this.ball.z = arrangement.ball.z;
     this.ball.vx = arrangement.ball.vx ?? 0;
@@ -947,9 +1003,12 @@ export class World {
       robot.wheelSpeeds = stepDrive(robot, robot.drive, robot.motors, dt).wheelSpeeds;
     }
 
+    this.stepBallAway(dt);
+    const ballLive = this.ballInPlay;
+
     const ballX0 = this.ball.x;
     const ballZ0 = this.ball.z;
-    stepBall(this.ball, dt, this.ballFriction);
+    if (ballLive) stepBall(this.ball, dt, this.ballFriction);
 
     this.activeRobotsBuffer.length = 0;
     for (let i = 0; i < this.robots.length; i++) {
@@ -959,7 +1018,7 @@ export class World {
     const actives = this.activeRobotsBuffer;
 
     let sweptHit: ReturnType<typeof sweptBallCollision> = null;
-    if (Math.hypot(this.ball.vx, this.ball.vz) > 1000) {
+    if (ballLive && Math.hypot(this.ball.vx, this.ball.vz) > 1000) {
       const goalBound = Math.abs(this.ball.z) <= HALF_GOAL_WIDTH - this.ball.radius * 0.5;
       sweptHit = sweptBallCollision(
         this.ball,
@@ -999,7 +1058,7 @@ export class World {
     let ballDZ = 0;
     let ballDVX = 0;
     let ballDVZ = 0;
-    for (let i = 0; i < actives.length; i++) {
+    for (let i = 0; ballLive && i < actives.length; i++) {
       const robot = actives[i]!;
       const recess = dribblerRecess(robot, this.scratchBallBefore, this.config.league);
       this.scratchBallTrial.x = this.scratchBallBefore.x;
@@ -1064,7 +1123,7 @@ export class World {
       for (let i = 0; i < robotPairOrder.length; i++) {
         const robot = robotPairOrder[i]!;
         const recess = dribblerRecess(robot, this.ball, this.config.league);
-        if (separateBodies(robot, this.ball, recess)) anyMoved = true;
+        if (ballLive && separateBodies(robot, this.ball, recess)) anyMoved = true;
         if (collideWithPerimeter(robot, false)) anyMoved = true;
       }
       if (pass === 0 && contacts >= 2) {
@@ -1087,7 +1146,7 @@ export class World {
         for (let i = 0; i < robotPairOrder.length; i++) {
           const robot = robotPairOrder[i]!;
           const recess = dribblerRecess(robot, this.ball, this.config.league);
-          if (separateBodies(robot, this.ball, recess)) subMoved = true;
+          if (ballLive && separateBodies(robot, this.ball, recess)) subMoved = true;
           if (collideWithPerimeter(robot, false)) subMoved = true;
         }
         if (!subMoved) break;
@@ -1097,15 +1156,20 @@ export class World {
     // Allow entry with the physics' own margin (half a radius), not the full
     // post plane: only a ball that could actually get inside the goal opens
     // the mouth.
-    const goalBound = Math.abs(this.ball.z) <= HALF_GOAL_WIDTH - this.ball.radius * 0.5;
-    const hit = collideWithPerimeter(this.ball, goalBound, this.ballBounce);
-
-    this.detectGoal(sweptHit?.hit === 'goal-back' || hit === 'goal-back');
-    this.detectUnreachable(dt);
-    this.detectBallOutOfPlay();
-    this.detectIllegalKickOff();
-    this.detectStall(dt);
-    this.detectForcing(dt);
+    //
+    // Every rule about the ball asks again whether there is one: a detector
+    // earlier in the list can send it off in somebody's hand, and the ones
+    // after it must not go on judging a ball nobody can play.
+    if (ballLive) {
+      const goalBound = Math.abs(this.ball.z) <= HALF_GOAL_WIDTH - this.ball.radius * 0.5;
+      const hit = collideWithPerimeter(this.ball, goalBound, this.ballBounce);
+      this.detectGoal(sweptHit?.hit === 'goal-back' || hit === 'goal-back');
+    }
+    if (this.ballInPlay) this.detectUnreachable(dt);
+    if (this.ballInPlay) this.detectBallOutOfPlay();
+    if (this.ballInPlay) this.detectIllegalKickOff();
+    if (this.ballInPlay) this.detectStall(dt);
+    if (this.ballInPlay) this.detectForcing(dt);
     this.detectRobotStates(dt);
   }
 
@@ -1236,8 +1300,7 @@ export class World {
       return;
     }
 
-    const target = nearestNeutralPoint({ x: b.x, z: b.z }, this.occupiedNeutralPoints());
-    this.placeBall(target);
+    this.liftBall(false);
     this.emit({
       kind: 'ball-out-of-play',
       rule: '5.9.2',
@@ -1726,7 +1789,7 @@ export class World {
       // Rule 5.8.2 / 5.8.3: Goalie must respond forward to intercept the ball.
       if (robot.isGoalie) {
         const own = this.defendingGoal(robot.team);
-        const ballInBox = inPenaltyBox(this.ball, own);
+        const ballInBox = this.ballInPlay && inPenaltyBox(this.ball, own);
         const ballSlow = Math.hypot(this.ball.vx, this.ball.vz) < 40;
         // On its line, measured off the goal mouth rather than off the
         // playing area: the mouth is what physically stops the robot, so this
@@ -1811,8 +1874,10 @@ export class World {
       if (defenders.length > 1) {
         // Rule 5.11.1: Must "substantially affect the game". If the ball is
         // in the opponent's half, defenders in the box do not affect active play.
+        // No ball on the field is no active play for them to affect either.
         const ballInDefendingHalf =
-          this.defendingGoal(team) === 'cyan' ? this.ball.x <= 150 : this.ball.x >= -150;
+          this.ballInPlay &&
+          (this.defendingGoal(team) === 'cyan' ? this.ball.x <= 150 : this.ball.x >= -150);
         if (!ballInDefendingHalf) {
           this.multipleDefenceDwell[team] = 0;
           continue;
@@ -1996,6 +2061,9 @@ export class World {
   }
 
   placeBall(p: Point): void {
+    // A ball put down by anyone is no longer on its way anywhere. Switched
+    // off is different: only `setBallOnField` brings that one back.
+    if (this.ballAway?.kind === 'hand') this.ballAway = null;
     this.ball.x = p.x;
     this.ball.z = p.z;
     // Wherever it has been put, it is not a goal that has already been given.
@@ -2011,6 +2079,53 @@ export class World {
     this.resetProgressClocks();
   }
 
+  /**
+   * 5.6.2 and 5.9.2: somebody picks the ball up to put it on a neutral point.
+   *
+   * Where it goes is decided when it is put down (`stepBallAway`), not here:
+   * the rule asks for an unoccupied point, and which points are unoccupied is
+   * a question about the moment the ball arrives. A second call while it is
+   * already in hand keeps a centre placement a centre placement.
+   */
+  private liftBall(toCentre: boolean): void {
+    if (this.ballAway?.kind === 'off') return;
+    const range = this.config.ballPlacementSeconds ?? BALL_PLACEMENT_SECONDS;
+    const from = { x: this.ball.x, z: this.ball.z };
+    if (range.max <= 0) {
+      this.putBallDown(from, toCentre);
+      return;
+    }
+    const min = Math.max(0, Math.min(range.min, range.max));
+    const u =
+      this.config.placementSeed === undefined
+        ? 0.5
+        : (placementJitter(this.config.placementSeed, this.liftCount, BALL_PLACEMENT_KEY) + 1) / 2;
+    this.liftCount++;
+    const already = this.ballAway?.kind === 'hand' ? this.ballAway : null;
+    this.ballAway = {
+      kind: 'hand',
+      remaining: min + u * (range.max - min),
+      from: already?.from ?? from,
+      toCentre: toCentre || (already?.toCentre ?? false),
+    };
+    this.ball.vx = 0;
+    this.ball.vz = 0;
+  }
+
+  /** The hand's clock. A person's walk does not stop because the game clock has. */
+  private stepBallAway(dt: number): void {
+    const away = this.ballAway;
+    if (away?.kind !== 'hand') return;
+    away.remaining -= dt;
+    if (away.remaining > 0) return;
+    this.ballAway = null;
+    this.putBallDown(away.from, away.toCentre);
+  }
+
+  private putBallDown(from: Point, toCentre: boolean): void {
+    this.placeBall(toCentre ? { x: 0, z: 0 } : nearestNeutralPoint(from, this.occupiedNeutralPoints()));
+  }
+
   /** Rule 5.6.2: first call to the nearest neutral point, thereafter the centre. */
   /**
    * @param because  Why it was called, as the rule that was actually broken
@@ -2021,10 +2136,7 @@ export class World {
   callLackOfProgress(because?: { rule: string; reason: string }): void {
     this.lackOfProgressCount += 1;
     const again = this.lackOfProgressCount > 1;
-    const target = again
-      ? { x: 0, z: 0 }
-      : nearestNeutralPoint({ x: this.ball.x, z: this.ball.z }, this.occupiedNeutralPoints());
-    this.placeBall(target);
+    this.liftBall(again);
     const moved = again
       ? 'Ball moved to the centre of the field.'
       : 'Ball moved to the nearest neutral point.';
@@ -2102,6 +2214,7 @@ export class World {
   }
 
   kickOff(team: TeamId): void {
+    this.kickOffs++;
     this.resetRobots(team);
     this.countdownSeconds = this.config.kickoffCountdown ?? 0;
     this.paused = false;

@@ -27,6 +27,11 @@ function run(w: World, seconds: number, dt = 1 / 120): void {
   for (let t = 0; t < seconds; t += dt) w.step(dt);
 }
 
+/** Until whoever is carrying the ball to a neutral point has put it down. */
+function untilPlaced(w: World, dt = 1 / 120): void {
+  for (let t = 0; !w.ballInPlay && t < 5; t += dt) w.step(dt);
+}
+
 describe('scoring (5.5.1)', () => {
   it('awards a goal when the ball strikes the back wall of the goal', () => {
     const w = world('open');
@@ -69,7 +74,8 @@ describe('ball out of play (5.9.1)', () => {
     w.ball.x = 0;
     w.ball.z = HALF_WIDTH - 20;
     w.ball.vz = 900;
-    run(w, 1);
+    // Long enough for somebody to walk the ball to its neutral point.
+    run(w, 3);
 
     expect(w.events.some((e) => e.kind === 'ball-out-of-play')).toBe(true);
     // 5.9.2: moved to the nearest neutral point, which is on the halfway line.
@@ -157,7 +163,7 @@ describe('ball out of play (5.9.1)', () => {
     w.ball.x = 600;
     w.ball.z = 300;
     w.ball.vx = 1800;
-    run(w, 1);
+    run(w, 3);
 
     expect(w.events.some((e) => e.kind === 'ball-out-of-play')).toBe(true);
     // 5.9.2: moved to the nearest neutral point.
@@ -896,12 +902,14 @@ describe('lack of progress (5.6)', () => {
     w.ball.z = 250;
 
     w.callLackOfProgress();
+    untilPlaced(w);
     const first = { x: w.ball.x, z: w.ball.z };
     expect(Math.abs(first.z)).toBe(300);
 
     w.ball.x = 500;
     w.ball.z = 250;
     w.callLackOfProgress();
+    untilPlaced(w);
     expect(w.ball.x).toBe(0);
     expect(w.ball.z).toBe(0);
   });
@@ -982,10 +990,10 @@ describe('damaged robots (5.7)', () => {
     expect(robot.removalReason).toBeUndefined();
   });
 
-  it('stays off across a kick-off, rather than a restart quietly reinstating it', () => {
-    // Found live: a referee's kick-off for the next half calls resetRobots,
-    // which used to build every robot fresh with removed: false — silently
-    // undoing a stand-down `returnRobot` (5.7.4) was never asked to end.
+  it('comes back on at a kick-off, even mid stand-down', () => {
+    // A restart puts every robot back on the field: the damage call ends at
+    // the next kick-off rather than the robot sitting out the rest of its
+    // thirty seconds while play restarts without it.
     const w = new World({
       league: getLeague('open'),
       halfLengthSeconds: 300,
@@ -995,15 +1003,16 @@ describe('damaged robots (5.7)', () => {
     const robot = w.robots[0]!;
     w.removeRobot(robot.id, '5.7.1.1', 'Not responding to the ball.');
     run(w, 5);
-    const remainingBefore = robot.penaltyRemaining;
+    expect(robot.penaltyRemaining).toBeGreaterThan(0);
 
     w.kickOff('lime');
 
     const same = w.robots.find((r) => r.id === robot.id)!;
-    expect(same.removed).toBe(true);
-    expect(same.removalRule).toBe('5.7.1.1');
-    expect(same.penaltyRemaining).toBe(remainingBefore);
-    expect(w.returnRobot(same.id)).toBe(false);
+    expect(same.removed).toBe(false);
+    expect(same.penaltyRemaining).toBe(0);
+    expect(same.removalRule).toBeUndefined();
+    expect(same.removalReason).toBeUndefined();
+    expect(w.active().some((r) => r.id === robot.id)).toBe(true);
   });
 });
 

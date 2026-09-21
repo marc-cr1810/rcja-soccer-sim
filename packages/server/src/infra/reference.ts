@@ -20,6 +20,7 @@ import { HALF_LENGTH, HALF_WIDTH, PENALTY_DEPTH, PENALTY_WIDTH, WALL_X, WALL_Z }
 import { IR_REFERENCE_RANGE } from '../sim/sensors';
 import type { ActuatorFrame, Blob, SensorFrame, TeamMessage } from '../match/protocol';
 import type { Agent } from '../match/agent';
+import { RestartWatch } from '../match/restart';
 import { GoalFrame } from '../sim/frame';
 import { botRoster } from '../match/bots';
 import type { MatchAgents } from '../match/match';
@@ -377,6 +378,9 @@ export class ReferenceAgent implements Agent {
   private sinceCamera = Infinity;
   /** How many consecutive ticks the ball has been held in the gate. */
   private heldTicks = 0;
+  private readonly restart = new RestartWatch();
+  /** The gate has closed on the ball since our kick-off began. */
+  private kickoffTouched = false;
 
   constructor(opts: ReferenceOptions) {
     this.drive = opts.drive ?? openDrive();
@@ -394,6 +398,8 @@ export class ReferenceAgent implements Agent {
     this.lastCommand = { motors: [0, 0, 0, 0] };
     this.sinceCamera = Infinity;
     this.heldTicks = 0;
+    this.restart.reset();
+    this.kickoffTouched = false;
   }
 
   /**
@@ -445,8 +451,10 @@ export class ReferenceAgent implements Agent {
 
   tick(frame: SensorFrame): ActuatorFrame {
     this.goalFrame.update(frame);
-    const dt = Math.max(1e-3, frame.clock - this.lastClock);
-    this.lastClock = frame.clock;
+    const dt = Math.max(1e-3, frame.time - this.lastClock);
+    this.lastClock = frame.time;
+    this.restart.update(frame);
+    if (this.restart.justStarted) this.kickoffTouched = false;
     this.ball.update(frame, dt);
     this.sinceCamera = frame.camera?.fresh ? 0 : this.sinceCamera + dt;
     this.yawRate = this.yaw.update(frame.encoders, dt);
@@ -488,15 +496,9 @@ export class ReferenceAgent implements Agent {
 
   private decide(frame: SensorFrame): ActuatorFrame {
 
-    if (!frame.playing) return { motors: [0, 0, 0, 0] };
-
-    // A kick-off countdown is "placed but not live": the ball is on the spot
-    // but the whistle has not blown, so nothing must move. In the rare case
-    // the clock is still running (a post-goal restart under autoResolve), this
-    // is what keeps the striker from racing the ball before the whistle fires.
-    if (frame.kickoff.countdown > 0) {
-      return { motors: [0, 0, 0, 0] };
-    }
+    // The button is up at a stoppage and through a kick-off countdown: the
+    // ball may be on the spot, but nobody has pressed start.
+    if (!frame.start) return { motors: [0, 0, 0, 0] };
 
     /*
      * Rule 5.4.7: a kick-off has to be a strike, not a carry.
@@ -518,12 +520,20 @@ export class ReferenceAgent implements Agent {
      * has carried the ball off the spot and given the kick-off away before the
      * solenoid is ready. Standing still is legal for the three seconds the
      * rule allows; carrying is not.
+     *
+     * Whether it is our kick-off is where we were put down (`RestartWatch`),
+     * and it is over when the gate we closed on the ball opens again: nobody
+     * tells a robot the kick-off has been judged.
      */
-    if (frame.kickoff.pending && frame.kickoff.ours) {
+    if (this.restart.ours) {
       if (frame.ballGate?.held) {
+        this.kickoffTouched = true;
         return { motors: [0, 0, 0, 0], dribbler: 1, kicker: true };
       }
-      if (frame.ball) {
+      if (this.kickoffTouched) {
+        this.restart.finish();
+        this.kickoffTouched = false;
+      } else if (frame.ball) {
         return {
           motors: mixOmni(this.drive, frame.ball.bearing, 0.55, 0),
           dribbler: 1,

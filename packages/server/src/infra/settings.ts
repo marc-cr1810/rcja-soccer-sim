@@ -26,7 +26,7 @@ import { isLeagueId, type LeagueId } from '@rcja/shared/leagues';
 import { DEFAULT_HALF_TIME_SECONDS, DEFAULT_MERCY_MARGIN } from '../match/match';
 // The simulator's own default, imported rather than restated. Two constants
 // that have to agree is the thing this file keeps refusing.
-import { HELD_BALL_SECONDS } from '../sim/world';
+import { BALL_PLACEMENT_SECONDS, HELD_BALL_SECONDS } from '../sim/world';
 
 /** Per-seat grants, from `src/lineup.ts` where they were constants. */
 export const DEFAULT_SEAT_CPU_PERCENT = 50;
@@ -166,6 +166,17 @@ export interface RuleSettings {
    * robot could sit on the ball for a whole match with nobody saying anything.
    */
   heldBallSeconds: number;
+  /**
+   * How long a person takes to put the ball on a neutral point after 5.6.2 or
+   * 5.9.2 moves it, drawn fresh for each placement from between these two.
+   * While it is in their hand the ball is off the field: no robot can see it,
+   * touch it or be called over it. A max of 0 puts it down instantly.
+   *
+   * A setting because how quick the hands are is the venue's: a referee
+   * standing at the table and one walking the field are both right.
+   */
+  ballPlacementMinSeconds: number;
+  ballPlacementMaxSeconds: number;
 }
 
 /**
@@ -267,6 +278,8 @@ export function defaultSettings(): LeagueSettings {
       mercyMargin: DEFAULT_MERCY_MARGIN,
       halfTimeSeconds: DEFAULT_HALF_TIME_SECONDS,
       heldBallSeconds: HELD_BALL_SECONDS,
+      ballPlacementMinSeconds: BALL_PLACEMENT_SECONDS.min,
+      ballPlacementMaxSeconds: BALL_PLACEMENT_SECONDS.max,
     },
     demo: { on: false, bots: 'reference', teams: ['Violet', 'Lime'], home: 'Violet', away: 'Lime', halfSeconds: 300, league: null, gapSeconds: 10, randomSides: false },
     pushes: { keep: 10 },
@@ -489,6 +502,33 @@ export function loadSettings(dataDir: string, overrides: Partial<Flags> = {}): L
   settings.rules.heldBallSeconds = Math.round(heldBall.value);
   set('rules.heldBallSeconds', heldBall.used);
 
+  // Ball placement. A ceiling of five seconds, because past that the hand is
+  // not slow any more, it is a stoppage the rules do not have.
+  const placeMin = readNumber(
+    rules.ballPlacementMinSeconds,
+    'rules.ballPlacementMinSeconds',
+    BALL_PLACEMENT_SECONDS.min,
+    { min: 0, max: 5 },
+    complaints,
+  );
+  const placeMax = readNumber(
+    rules.ballPlacementMaxSeconds,
+    'rules.ballPlacementMaxSeconds',
+    BALL_PLACEMENT_SECONDS.max,
+    { min: 0, max: 5 },
+    complaints,
+  );
+  if (placeMax.value > 0 && placeMin.value > placeMax.value) {
+    complaints.push(
+      `rules.ballPlacementMinSeconds is more than rules.ballPlacementMaxSeconds; using ${placeMax.value}-${placeMin.value}`,
+    );
+    [placeMin.value, placeMax.value] = [placeMax.value, placeMin.value];
+  }
+  settings.rules.ballPlacementMinSeconds = placeMin.value;
+  settings.rules.ballPlacementMaxSeconds = placeMax.value;
+  set('rules.ballPlacementMinSeconds', placeMin.used);
+  set('rules.ballPlacementMaxSeconds', placeMax.used);
+
   // Demo arena — a single, always-on, never-scored child that plays
   // back-to-back matches for the hall screen.
   if (typeof demo.on === 'boolean') {
@@ -655,6 +695,8 @@ export interface Flags {
   mercyMargin: number | null;
   halfTimeSeconds: number;
   heldBallSeconds: number;
+  ballPlacementMinSeconds: number;
+  ballPlacementMaxSeconds: number;
   demoOn: boolean;
   demoBots: string;
   demoTeams: DemoTeamConfig[];
@@ -692,6 +734,8 @@ function applyFlags(
   take(flags.mercyMargin, 'rules.mercyMargin', (v) => (settings.rules.mercyMargin = v));
   take(flags.halfTimeSeconds, 'rules.halfTimeSeconds', (v) => (settings.rules.halfTimeSeconds = v));
   take(flags.heldBallSeconds, 'rules.heldBallSeconds', (v) => (settings.rules.heldBallSeconds = v));
+  take(flags.ballPlacementMinSeconds, 'rules.ballPlacementMinSeconds', (v) => (settings.rules.ballPlacementMinSeconds = v));
+  take(flags.ballPlacementMaxSeconds, 'rules.ballPlacementMaxSeconds', (v) => (settings.rules.ballPlacementMaxSeconds = v));
   take(flags.demoOn, 'demo.on', (v) => (settings.demo.on = v));
   take(flags.demoBots, 'demo.bots', (v) => (settings.demo.bots = v));
   take(flags.demoTeams, 'demo.teams', (v) => {

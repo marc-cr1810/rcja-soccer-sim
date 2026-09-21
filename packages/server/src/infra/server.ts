@@ -47,6 +47,7 @@ import {
   ResolveBodySchema,
   ReturnRobotBodySchema,
   RosterBodySchema,
+  BallBodySchema,
   SeatActionBodySchema,
   SeatBodySchema,
 } from '../api/schemas';
@@ -564,6 +565,9 @@ export class MatchServer {
         x: snapshot.ball.x,
         z: snapshot.ball.z,
         ...(snapshot.ball.y !== last.ball.y ? { y: snapshot.ball.y } : {}),
+        ...((snapshot.ball.absent ?? false) !== (last.ball.absent ?? false)
+          ? { absent: snapshot.ball.absent ?? false }
+          : {}),
       },
       robots: deltaRobots,
       ...(snapshot.commsActivity.violet !== last.commsActivity.violet ||
@@ -1275,6 +1279,12 @@ export class MatchServer {
         if (!validated.ok) return validated.response;
         const { target, x, z, heading, vx, vz } = validated.value;
         session.place(target, { x, z, heading, vx, vz });
+        break;
+      }
+      case 'ball': {
+        const validated = validateBody(body.payload, BallBodySchema, 'boolean "onField" is required');
+        if (!validated.ok) return validated.response;
+        session.setBall(validated.value.onField);
         break;
       }
       case 'roster': {

@@ -87,10 +87,12 @@ neither is this one:
 - **That the kick-off is over.** Nothing sends an all-clear. The ball leaving
   the spot is the signal, and `examples/striker.py` shows one way to read it.
 
-`rcja_soccer.simulator.frame()` hands you the match server's own frame, these
-fields included. It is named so that nobody mistakes it for hardware: it is for
-working out why your locator disagrees with the field, not for building a
-season on.
+Nor is the match clock, or the score. And not "hidden behind the pins" but
+never sent: the frame the server sends a robot is its start button, the
+switches a person sets, its own clock and its sensors, and nothing else.
+`rcja_soccer.simulator.frame()` hands you that frame as numbers rather than
+pins - useful for working out why your locator disagrees with the field, and no
+advantage, because there is nothing in it a board could not have.
 
 ## The optional library
 
@@ -140,10 +142,9 @@ That host-time component is deliberate: counting whole frames alone would
 leave the loop above spinning forever, because nothing in it sleeps. The
 consequence is that `ticks_ms()` is not identical between two runs of the same
 headless match — it can differ by up to one frame's worth. If you need a clock
-that is exactly reproducible, use `rcja_soccer.simulator.frame().clock`, which
-is match time in seconds — and is the simulator's own, not something a board
-has. `ticks_ms()` is the clock a board has, and it never stops; match time
-pauses at every stoppage and half-time.
+that is exactly reproducible, `rcja_soccer.simulator.frame().time` is the same
+robot clock counted in whole frames. Neither is match time, which no board has:
+both keep running through stoppages and half-time.
 
 ## The virtual board
 

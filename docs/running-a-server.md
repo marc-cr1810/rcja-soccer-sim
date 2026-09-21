@@ -164,6 +164,11 @@ restart waits with the clock stopped, so a match cannot be started early by
 clicking Resume instead of Kick Off; a restart after a goal keeps playing
 because the clock was already running.
 
+Robots are not told any of this. What they see is their start button: up
+through the countdown, and up for a moment at every kick-off, as if somebody
+had lifted the robot onto its mark and pressed start again - which is all a
+real robot ever learns about a restart.
+
 `--kickoff-countdown N` changes the wait for that server (headless matches
 always get `0`, so `bench`, `ladder` and the `match` command are unchanged).
 On the referee console, the **Kick off now** button skips the wait being

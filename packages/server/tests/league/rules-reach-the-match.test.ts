@@ -61,3 +61,51 @@ describe('rules.heldBallSeconds reaches the match', () => {
     expect(windowOf(matchWith(undefined))).toBeUndefined();
   });
 });
+
+describe('rules.ballPlacement{Min,Max}Seconds reach the match', () => {
+  function rangeOf(m: Match): { min: number; max: number } | undefined {
+    return (m.world as World & { config: { ballPlacementSeconds?: { min: number; max: number } } }).config
+      .ballPlacementSeconds;
+  }
+
+  function matchPlacing(range: { min: number; max: number } | undefined): Match {
+    return new Match({
+      agents: { ...referenceTeam('violet'), ...referenceTeam('lime') } as never,
+      halfSeconds: 20,
+      seed: 1,
+      ballPlacementSeconds: range,
+    });
+  }
+
+  it('carries the range a venue wrote all the way to the World', () => {
+    const { settings, sources } = venueWith(
+      '{ "rules": { "ballPlacementMinSeconds": 1, "ballPlacementMaxSeconds": 3 } }',
+    );
+    expect(sources['rules.ballPlacementMinSeconds']).toBe('file');
+    expect(sources['rules.ballPlacementMaxSeconds']).toBe('file');
+    const r = settings.rules;
+    expect(rangeOf(matchPlacing({ min: r.ballPlacementMinSeconds, max: r.ballPlacementMaxSeconds }))).toEqual({
+      min: 1,
+      max: 3,
+    });
+  });
+
+  it('defaults to half a second to two, and swaps a range written backwards', () => {
+    const quiet = venueWith('{ "arenas": { "max": 2 } }');
+    expect(quiet.settings.rules.ballPlacementMinSeconds).toBe(0.5);
+    expect(quiet.settings.rules.ballPlacementMaxSeconds).toBe(2);
+
+    const backwards = venueWith('{ "rules": { "ballPlacementMinSeconds": 3, "ballPlacementMaxSeconds": 1 } }');
+    expect(backwards.settings.rules.ballPlacementMinSeconds).toBe(1);
+    expect(backwards.settings.rules.ballPlacementMaxSeconds).toBe(3);
+    expect(backwards.complaints.some((c) => c.includes('ballPlacementMinSeconds'))).toBe(true);
+  });
+
+  it('clamps past five seconds, and lets a venue turn it off with a max of 0', () => {
+    const slow = venueWith('{ "rules": { "ballPlacementMaxSeconds": 30 } }');
+    expect(slow.settings.rules.ballPlacementMaxSeconds).toBe(5);
+
+    const off = venueWith('{ "rules": { "ballPlacementMaxSeconds": 0 } }');
+    expect(off.settings.rules.ballPlacementMaxSeconds).toBe(0);
+  });
+});

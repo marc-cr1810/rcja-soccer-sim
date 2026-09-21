@@ -27,6 +27,16 @@ import {
   PENALTY_WIDTH,
 } from '@rcja/shared/field';
 import type { ActuatorFrame, SensorFrame } from '../match/protocol';
+
+/**
+ * A restart as the robot can know it: inside the window after its start
+ * button went down, and whether it was put down against the ball. Worked out
+ * by `ChampionAgent` from its own button and sensors - see `RestartWatch`.
+ */
+export interface KickoffView {
+  pending: boolean;
+  ours: boolean;
+}
 import {
   BALL_RADIUS,
   CONTACT_RANGE,
@@ -185,8 +195,12 @@ export class ChampionBrain {
     this.handbackTicks = 0;
   }
 
+  /** This tick's view of the restart in progress. Set by `decide`. */
+  private ko: KickoffView = { pending: false, ours: false };
+
   decide(
     frame: SensorFrame,
+    ko: KickoffView,
     goalFrame: GoalFrame,
     me: FramedPose,
     ball: FramedBall,
@@ -195,8 +209,8 @@ export class ChampionBrain {
     effort: WheelEffort,
     mateMsg: ChampionRadioMessage | null,
   ): ActuatorFrame {
-    if (!frame.playing) return { motors: [0, 0, 0, 0] };
-    if (frame.kickoff.countdown > 0) return { motors: [0, 0, 0, 0] };
+    this.ko = ko;
+    if (!frame.start) return { motors: [0, 0, 0, 0] };
 
     const holding = Boolean(frame.ballGate?.held);
 
@@ -209,7 +223,7 @@ export class ChampionBrain {
     // the keeper never swaps the other way. During a pending kickoff
     // `liveRole` returns nominal roles, keeping the kicking robot on the spot
     // and the keeper on its line (5.4.6, 5.4.7).
-    const live = this.liveRole(frame, me, ball, mateMsg, holding);
+    const live = this.liveRole(me, ball, mateMsg, holding);
 
     if (live === 'goalie') {
       const viaWing = this.params.role === 'striker';
@@ -244,13 +258,12 @@ export class ChampionBrain {
    * carrying, and never double-occupied after it returns (5.11).
    */
   private liveRole(
-    frame: SensorFrame,
     me: FramedPose,
     ball: FramedBall,
     mateMsg: ChampionRadioMessage | null,
     holding: boolean,
   ): ChampionRole {
-    if (frame.kickoff.pending) return this.params.role;
+    if (this.ko.pending) return this.params.role;
 
     if (this.params.role === 'goalie') {
       if (!holding) return 'goalie';
@@ -265,7 +278,7 @@ export class ChampionBrain {
 
     // Nominal striker: the fold first (keeper silent, ball deep - see
     // `foldedRole`), then the audible swap.
-    if (this.foldedRole(frame, ball, mateMsg) === 'goalie') return 'goalie';
+    if (this.foldedRole(ball, mateMsg) === 'goalie') return 'goalie';
 
     if (mateMsg && mateMsg.role === 'goalie') {
       const homeLimit = OWN_LINE + PENALTY_DEPTH + 150;
@@ -306,8 +319,8 @@ export class ChampionBrain {
     const attackingBlobs = goalFrame.blobs(frame).attacking;
 
     // 1. Rule 5.4.7: Legal Kick-off Strike
-    if (frame.kickoff.pending) {
-      if (!frame.kickoff.ours) {
+    if (this.ko.pending) {
+      if (!this.ko.ours) {
         return { motors: [0, 0, 0, 0], dribbler: 0 };
       }
       // Aim the strike at the widest opening the camera can see rather than
@@ -556,7 +569,7 @@ export class ChampionBrain {
     }
 
     // 11. Anti-Stall / Scrum Breakout
-    this.updateTracking(frame.clock, meX, meZ);
+    this.updateTracking(frame.time, meX, meZ);
     const isStalled = this.checkStall(effort.value);
     if (isStalled) {
       this.breakoutTicks = 16;
@@ -606,7 +619,7 @@ export class ChampionBrain {
     const squareSpin = spinTowards(wrapAngle(-heading), yawRate);
 
     // 1. Kickoff Stance
-    if (frame.kickoff.pending) {
+    if (this.ko.pending) {
       return this.hold(meX, meZ, guardX, 0, squareSpin, heading, 'KICKOFF', me.confidence);
     }
 
@@ -844,7 +857,6 @@ export class ChampionBrain {
    * window to close, so the folded branch never fires in a recording.
    */
   private foldedRole(
-    frame: SensorFrame,
     ball: FramedBall,
     mateMsg: ChampionRadioMessage | null,
   ): ChampionRole {
@@ -853,7 +865,7 @@ export class ChampionBrain {
       this.silentTicks = 0;
       return 'striker';
     }
-    if (frame.kickoff.pending) {
+    if (this.ko.pending) {
       this.silentTicks = 0;
       return 'striker';
     }

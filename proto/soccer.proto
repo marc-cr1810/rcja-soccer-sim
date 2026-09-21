@@ -66,26 +66,24 @@ message BallGateReading {
   bool held = 1;
 }
 
-message KickoffReading {
-  bool pending = 1;
-  bool ours = 2;
-  float countdown = 3;
-}
-
 message TeamMessage {
   int32 from = 1;
   string body_json = 2;
   float age = 3;
 }
 
+// Only what a robot on a real field could know: its own clock, the start
+// button, the switches a person sets, and its sensors. Protocol 5 and earlier
+// also sent the referee's clock, play state and kick-off block; those numbers
+// are reserved so nothing can ever decode them as something else.
 message SensorFrame {
-  double clock = 1;
+  reserved 1, 5, 6, 7;
+  reserved "clock", "playing", "returned", "kickoff";
+  double time = 17;
+  bool start = 18;
   int32 robot = 2;
   string team = 3;
   int32 attack_direction = 4;
-  bool playing = 5;
-  bool returned = 6;
-  KickoffReading kickoff = 7;
   optional BallReading ball = 8;
   CompassReading compass = 9;
   GyroReading gyro = 10;
@@ -105,9 +103,10 @@ message ActuatorFrame {
 }
 
 message DisabledMessage {
+  reserved 3;
+  reserved "returns_in";
   string rule = 1;
   string reason = 2;
-  float returns_in = 3;
 }
 
 message ServerMessage {

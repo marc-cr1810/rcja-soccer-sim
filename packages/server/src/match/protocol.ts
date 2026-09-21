@@ -14,7 +14,7 @@
  */
 
 /** Protocol version. Bumped when a frame changes shape; the server refuses a mismatch. */
-export const PROTOCOL_VERSION = 5;
+export const PROTOCOL_VERSION = 6;
 
 /** What the infrared ring can see of the ball. Null when nothing is detected. */
 export interface BallReading {
@@ -154,36 +154,31 @@ export interface TeamMessage {
 }
 
 /**
- * The restart the referee is part way through, if any.
+ * Everything in a frame is something a robot on a real field could know.
  *
- * Rule 5.4.7 requires the kicking-off robot to strike the ball at least 50 mm
- * clear rather than carrying it away, so a robot has to know a kick-off is in
- * progress to play one legally. A real team is told by the referee; so is this
- * one. Leaving it out was not a simplification, it was withholding something
- * the rules assume the robot knows - and every agent written against the first
- * version of this protocol committed an illegal kick-off at every restart.
+ * Nothing the referee knows is in here: not the match clock, not the score,
+ * not whether a kick-off is still live under 5.4.7, not whose kick-off it is.
+ * A real robot learns about a restart the way a real team tells it - somebody
+ * puts it down where the kick-off wants it and presses start - so that is all
+ * this says: a button (`start`), the switches a person sets before a half
+ * (`team`, `robot`, `attackDirection`), the robot's own clock (`time`), and its
+ * sensors. Whose kick-off it is is where you were put; how long 5.4.7 lasts is
+ * the rulebook's three seconds on your own clock.
+ *
+ * Versions up to 5 also carried `clock`, `playing`, `returned` and a `kickoff`
+ * block straight from the referee. Anything that read them could see what no
+ * robot can, and so could anything that reached past a board's pins to the
+ * frame underneath; the only way to make that impossible was to stop sending
+ * it. `what-a-robot-knows.test.ts` pins the field list so it cannot creep back.
  */
-export interface KickoffReading {
-  /** A kick-off is under way and 5.4.7 is live. */
-  pending: boolean;
-  /** Whether it is ours to take. */
-  ours: boolean;
-  /**
-   * Seconds left before the whistle makes the kick-off live.
-   *
-   * The ball is placed and play is not live ("not live" is also what
-   * `pending: false` says, but `pending` is false while the countdown runs and
-   * true after it) - a restart the referee has not yet whistled. Non-zero only
-   * when the host runs a countdown; headless matches see 0 and only ever see
-   * `pending` turn true. `pending` and `countdown` are never both live: the
-   * countdown reaching zero IS the whistle that arms the 5.4.7 strike window.
-   */
-  countdown: number;
-}
-
 export interface SensorFrame {
-  /** Seconds since the match started. */
-  clock: number;
+  /**
+   * The robot's own clock, seconds since it was switched on for this match.
+   *
+   * A board's `millis()`, not match time: it keeps running through stoppages,
+   * because the robot does not stop existing when the referee blows a whistle.
+   */
+  time: number;
   /** Which robot this is, 1 or 2. */
   robot: number;
   /**
@@ -198,28 +193,20 @@ export interface SensorFrame {
   /**
    * Rule 1.4/5.4: which goal this robot is currently attacking, independent
    * of `team`. +1 means the yellow goal (+x); -1 means the cyan goal (-x).
-   * Fixed for the current half, and flips at half-time.
+   * Fixed for the current half, and flips at half-time. A switch somebody
+   * sets, like `team` and `robot`.
    */
   attackDirection: 1 | -1;
-  /** True when the referee has the game running; false at a kick-off or stoppage. */
-  playing: boolean;
   /**
-   * True on the first frame after this robot was put back on the field.
+   * The start button: down while the robot is meant to be playing.
    *
-   * Rule 5.7.4 replaces a returning robot at a corner of its own penalty box,
-   * so whatever it was chasing is no longer where it left it — and its program
-   * never stopped, so it still believes otherwise.
-   *
-   * The library does **not** clear your memory when this arrives, because the
-   * two habits real teams have are both legal and the simulator should not
-   * pick one. A team that switches the robot off and on again restarts its
-   * software from scratch; a team with a start/stop button leaves it running
-   * and it carries on with what it knew. A program here is the second kind by
-   * construction — it was never stopped — so if you want the first, clear your
-   * own memory when you see this.
+   * A person presses it at the whistle and lets go when play stops, so it is
+   * up through a stoppage and through the wait before a kick-off. Its going
+   * down is every restart there is - a kick-off, the start of a half, being
+   * put back after a removal - and from here they look the same, because on a
+   * field they are the same: somebody put the robot down and pressed start.
    */
-  returned: boolean;
-  kickoff: KickoffReading;
+  start: boolean;
 
   ball: BallReading | null;
   compass: CompassReading;
@@ -258,8 +245,6 @@ export interface DisabledMessage {
   rule: string;
   /** Said so a person can read it. */
   reason: string;
-  /** Seconds of stand-down left, or 0 once it is waiting on the referee. */
-  returnsIn: number;
 }
 
 export interface ActuatorFrame {

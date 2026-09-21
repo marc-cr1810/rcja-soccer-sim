@@ -707,7 +707,7 @@ export class CameraState {
 
   read(
     pose: Pose,
-    ball: { x: number; z: number },
+    ball: { x: number; z: number } | null,
     blockers: readonly { x: number; z: number }[],
     noise: Noise,
     fresh: boolean,
@@ -810,7 +810,8 @@ export class CameraState {
     this.last = {
       goals: { cyan: seeGoal('cyan'), yellow: seeGoal('yellow') },
       goalBlobs: { cyan: seeGoalBlobs('cyan'), yellow: seeGoalBlobs('yellow') },
-      ball: see(ball.x, ball.z, true),
+      // No ball on the field, nothing to see: the same as a ball out of sight.
+      ball: ball ? see(ball.x, ball.z, true) : null,
       fresh: true,
     };
     return this.last;

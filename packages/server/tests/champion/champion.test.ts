@@ -21,13 +21,11 @@ import type { SensorFrame } from '../../src/match/protocol';
 
 function makeFrame(overrides: Partial<SensorFrame> = {}): SensorFrame {
   return {
-    clock: 0,
+    time: 0,
     robot: 1,
     team: 'violet',
     attackDirection: 1,
-    playing: true,
-    returned: false,
-    kickoff: { pending: false, ours: false, countdown: 0 },
+    start: true,
     ball: null,
     compass: { heading: 0 },
     gyro: { rate: 0 },
@@ -75,7 +73,7 @@ describe('Champion AI Estimator', () => {
 
     // Now an obstacle (opponent robot) stands 300 mm in front of this robot
     const f2 = makeFrame({
-      clock: 0.02,
+      time: 0.02,
       camera: {
         goals: {
           cyan: null,
@@ -104,7 +102,7 @@ describe('Champion AI Estimator', () => {
   it('BallEstimator computes velocity and predicts future trajectory under drag', () => {
     const ball = new BallEstimator();
     const f1 = makeFrame({
-      clock: 0.0,
+      time: 0.0,
       ball: { bearing: 0, strength: 0.5 },
     });
     ball.update(f1, 0, 0, 0);
@@ -112,7 +110,7 @@ describe('Champion AI Estimator', () => {
 
     // Ball moves forward 20 mm in 0.02s -> velocity ~ 1000 mm/s
     const f2 = makeFrame({
-      clock: 0.02,
+      time: 0.02,
       camera: {
         goals: { cyan: null, yellow: null },
         goalBlobs: { cyan: [], yellow: [] },

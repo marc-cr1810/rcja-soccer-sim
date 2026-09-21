@@ -268,6 +268,7 @@ export class PracticeSession {
     this.arrangement = readArrangement(opts.fieldStatePath) ?? this.capture();
     // `stage` sets what a restart goes back to as well as putting it out now.
     this.match.stage(this.arrangement);
+    if (readBallOnField(opts.fieldStatePath) === false) this.match.world.setBallOnField(false);
     for (const id of SEAT_IDS) this.seats.set(id, { fill: { kind: 'built-in' } });
   }
 
@@ -343,6 +344,7 @@ export class PracticeSession {
     return {
       running: this.match.world.running,
       resolve: this.mode,
+      ballOnField: this.match.world.ballAwayReason !== 'off',
       clock: this.match.world.clock,
       score: { ...this.match.world.score },
       arrangement: this.arrangement,
@@ -369,8 +371,11 @@ export class PracticeSession {
    */
   place(target: 'ball' | SeatId, at: { x: number; z: number; heading?: number; vx?: number; vz?: number }): void {
     if (target === 'ball') {
-      this.match.world.ball.x = at.x;
-      this.match.world.ball.z = at.z;
+      // Switched off means off: there is nothing on the field to drag.
+      if (this.match.world.ballAwayReason === 'off') return;
+      // Through `placeBall`, so a drag also takes the ball out of the hand
+      // of anybody who was carrying it to a neutral point.
+      this.match.world.placeBall(at);
       this.match.world.ball.vx = at.vx ?? 0;
       this.match.world.ball.vz = at.vz ?? 0;
       this.arrangement = { ...this.arrangement, ball: { x: at.x, z: at.z, vx: at.vx, vz: at.vz } };
@@ -431,7 +436,8 @@ export class PracticeSession {
       // The team folder may not exist yet: a team can be given a field before
       // they have ever opened the editor.
       await mkdir(dirname(path), { recursive: true });
-      await Bun.write(path, `${JSON.stringify({ arrangement: this.arrangement }, null, 2)}\n`);
+      const ballOnField = this.match.world.ballAwayReason !== 'off';
+      await Bun.write(path, `${JSON.stringify({ arrangement: this.arrangement, ballOnField }, null, 2)}\n`);
     } catch (err) {
       // A field that cannot save its arrangement is still a field. Said once,
       // to the venue's log, rather than thrown at the person dragging a robot.
@@ -452,6 +458,18 @@ export class PracticeSession {
     }
     const known = this.arrangement.robots.find((r) => r.id === id);
     this.place(id, known ?? defaultSpot(id));
+  }
+
+  /**
+   * Take the ball off the field, or put it back where the situation has it.
+   *
+   * For seeing what a team's robots do with no ball to chase: whether they
+   * search, hold their places or wander off. Off stays off through every
+   * restage and restart until somebody switches it back on.
+   */
+  setBall(onField: boolean): void {
+    this.match.world.setBallOnField(onField, this.arrangement.ball);
+    this.saveField();
   }
 
   /** Put the situation back out as it was arranged. */
@@ -747,6 +765,17 @@ export function scrub(text: string, dir: string, socketUrl: string): string {
  * defaults — never thrown, because a broken scratch file must not be the reason
  * a team cannot open a field.
  */
+/** Whether a saved field had its ball switched off. Missing, unreadable or absent all mean on. */
+function readBallOnField(path: string | null | undefined): boolean {
+  if (!path || !existsSync(path)) return true;
+  try {
+    const data = JSON.parse(readFileSync(path, 'utf8')) as { ballOnField?: unknown };
+    return data.ballOnField !== false;
+  } catch {
+    return true;
+  }
+}
+
 function readArrangement(path: string | null | undefined): Arrangement | null {
   if (!path || !existsSync(path)) return null;
   try {

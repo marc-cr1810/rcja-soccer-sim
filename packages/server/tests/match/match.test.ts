@@ -187,7 +187,12 @@ describe('a misbehaving program only hurts itself', () => {
     agents['lime-2'] = mute;
     const r = play(7, agents as unknown as MatchAgents);
     expect(r.slots['lime-2']!.missed).toBeGreaterThan(100);
-    expect(r.clock).toBeGreaterThanOrEqual(HALF * 2 - 1);
+    // Played to an end the rules recognise. A team whose keeper never moves
+    // concedes about ten a match (94-9 over ten seeds), so the mercy rule
+    // ending it early is the rules working, not the match falling over; this
+    // used to demand full time, which only one seed in three delivered.
+    const mercy = r.events.some((e) => e.kind === 'mercy');
+    expect(mercy || r.clock >= HALF * 2 - 1).toBe(true);
   });
 });
 

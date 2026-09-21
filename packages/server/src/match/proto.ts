@@ -11,7 +11,6 @@ import type {
   Blob,
   CameraReading,
   DisabledMessage,
-  KickoffReading,
   LineReading,
   RangeReading,
   SensorFrame,
@@ -266,14 +265,6 @@ function encodeBallReading(writer: ProtoWriter, ball: BallReading): void {
   writer.bytes(8, sub.finish());
 }
 
-function encodeKickoffReading(writer: ProtoWriter, k: KickoffReading): void {
-  const sub = new ProtoWriter(32);
-  if (k.pending) sub.bool(1, true);
-  if (k.ours) sub.bool(2, true);
-  if (k.countdown !== 0) sub.float(3, k.countdown);
-  writer.bytes(7, sub.finish());
-}
-
 function encodeLineReading(writer: ProtoWriter, line: LineReading): void {
   const sub = new ProtoWriter(32);
   sub.float(1, line.bearing);
@@ -346,14 +337,12 @@ function encodeTeamMessage(writer: ProtoWriter, m: TeamMessage): void {
 export function encodeSensorFrame(frame: SensorFrame): Uint8Array {
   const writer = new ProtoWriter(512);
 
-  writer.double(1, frame.clock);
+  writer.double(17, frame.time);
+  if (frame.start) writer.bool(18, true);
   writer.int32(2, frame.robot);
   writer.string(3, frame.team);
   writer.int32(4, frame.attackDirection);
-  if (frame.playing) writer.bool(5, true);
-  if (frame.returned) writer.bool(6, true);
 
-  encodeKickoffReading(writer, frame.kickoff);
   if (frame.ball) encodeBallReading(writer, frame.ball);
 
   // compass
@@ -399,7 +388,6 @@ export function encodeDisabledMessage(msg: DisabledMessage): Uint8Array {
   const writer = new ProtoWriter(64);
   writer.string(1, msg.rule);
   writer.string(2, msg.reason);
-  writer.float(3, msg.returnsIn);
   return writer.finish();
 }
 
@@ -495,21 +483,6 @@ function decodeBallReading(reader: ProtoReader): BallReading {
     else reader.skip(tag.wireType);
   }
   return { bearing, strength };
-}
-
-function decodeKickoffReading(reader: ProtoReader): KickoffReading {
-  let pending = false;
-  let ours = false;
-  let countdown = 0;
-  while (reader.hasMore()) {
-    const tag = reader.nextTag();
-    if (!tag) break;
-    if (tag.fieldNumber === 1) pending = reader.bool();
-    else if (tag.fieldNumber === 2) ours = reader.bool();
-    else if (tag.fieldNumber === 3) countdown = reader.float();
-    else reader.skip(tag.wireType);
-  }
-  return { pending, ours, countdown };
 }
 
 function decodeLineReading(reader: ProtoReader): LineReading {
@@ -645,13 +618,11 @@ function decodeTeamMessage(reader: ProtoReader): TeamMessage {
 export function decodeSensorFrame(buffer: Uint8Array): SensorFrame {
   const reader = new ProtoReader(buffer);
   const out: SensorFrame = {
-    clock: 0,
+    time: 0,
+    start: false,
     robot: 1,
     team: 'violet',
     attackDirection: 1,
-    playing: false,
-    returned: false,
-    kickoff: { pending: false, ours: false, countdown: 0 },
     ball: null,
     compass: { heading: 0 },
     gyro: { rate: 0 },
@@ -667,8 +638,11 @@ export function decodeSensorFrame(buffer: Uint8Array): SensorFrame {
     const tag = reader.nextTag();
     if (!tag) break;
     switch (tag.fieldNumber) {
-      case 1:
-        out.clock = reader.double();
+      case 17:
+        out.time = reader.double();
+        break;
+      case 18:
+        out.start = reader.bool();
         break;
       case 2:
         out.robot = reader.int32();
@@ -678,15 +652,6 @@ export function decodeSensorFrame(buffer: Uint8Array): SensorFrame {
         break;
       case 4:
         out.attackDirection = reader.int32() as 1 | -1;
-        break;
-      case 5:
-        out.playing = reader.bool();
-        break;
-      case 6:
-        out.returned = reader.bool();
-        break;
-      case 7:
-        out.kickoff = decodeKickoffReading(reader.subReader());
         break;
       case 8:
         out.ball = decodeBallReading(reader.subReader());
@@ -757,14 +722,12 @@ export function decodeDisabledMessage(buffer: Uint8Array): DisabledMessage {
     type: 'disabled',
     rule: '',
     reason: '',
-    returnsIn: 0,
   };
   while (reader.hasMore()) {
     const tag = reader.nextTag();
     if (!tag) break;
     if (tag.fieldNumber === 1) out.rule = reader.string();
     else if (tag.fieldNumber === 2) out.reason = reader.string();
-    else if (tag.fieldNumber === 3) out.returnsIn = reader.float();
     else reader.skip(tag.wireType);
   }
   return out;

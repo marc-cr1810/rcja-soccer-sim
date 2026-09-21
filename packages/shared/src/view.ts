@@ -171,6 +171,11 @@ export interface ViewBall {
   /** Height above the carpet, for a chip kick under 4.7. */
   y?: number;
   radius: number;
+  /**
+   * The ball is not on the field: somebody is carrying it to a neutral
+   * point, or a practice field has it switched off. Draw nothing.
+   */
+  absent?: boolean;
 }
 
 /** A referee call, as the overlay shows it. */
@@ -280,7 +285,8 @@ export interface ViewDeltaRobot {
 
 export interface ViewDeltaFrame {
   clock: number;
-  ball: { x: number; z: number; y?: number };
+  /** `absent` only when it changed; a missing key keeps the last one. */
+  ball: { x: number; z: number; y?: number; absent?: boolean };
   robots: ViewDeltaRobot[];
   commsActivity?: { violet: number; lime: number };
   score?: { violet: number; lime: number };
@@ -329,6 +335,7 @@ export function applyViewDelta(current: ViewFrame, d: ViewDeltaFrame): ViewFrame
       x: d.ball.x,
       z: d.ball.z,
       y: d.ball.y !== undefined ? d.ball.y : current.ball.y,
+      absent: d.ball.absent !== undefined ? d.ball.absent : current.ball.absent,
     },
     robots,
     commsActivity: d.commsActivity ?? current.commsActivity,

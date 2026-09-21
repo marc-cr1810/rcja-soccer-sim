@@ -91,6 +91,25 @@ class TestEncoders(unittest.TestCase):
         self.assertIn(a.value(), (0, 1))
         self.assertIn(b.value(), (0, 1))
 
+    def test_a_new_match_is_a_fresh_baseline_not_a_wheel_spinning_back(self) -> None:
+        # The server's totals restart at zero with each match. Read as motion,
+        # that is the whole last match replayed backwards - one callback per
+        # edge, all in one frame - and a robot busy with those answers nothing.
+        frames = spinning(0.0, 50 * TURN, 50 * TURN)
+        frames.append(sensor_frame(0.01, encoders=[0.0, 0.0, 0.0, 0.0])["frame"])
+        frames.append(sensor_frame(0.03, encoders=[TURN, 0.0, 0.0, 0.0])["frame"])
+        rt, _ = connected_singleton(frames)
+        decoder = Decoder(43, 44)
+        for _ in range(2):
+            time.sleep_ms(20)
+        before = decoder.count
+
+        time.sleep_ms(20)
+        self.assertEqual(decoder.count, before)
+
+        time.sleep_ms(20)
+        self.assertEqual(decoder.count - before, DEFAULT_ENCODER_CPR // 2)
+
     def test_no_handler_means_no_work(self) -> None:
         # Several hundred callbacks a second for a program that never asked is
         # pure cost, and most programs never ask.

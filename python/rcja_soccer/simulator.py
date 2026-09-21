@@ -14,12 +14,12 @@ build a season on.
     from rcja_soccer import simulator
 
     truth = simulator.frame()
-    print(truth.camera.goals.cyan, truth.encoders, truth.kickoff.ours)
+    print(truth.camera.goals.cyan, truth.encoders, truth.start)
 
-Two things live here that a robot genuinely cannot know, and they are the
-honest reason to reach for this while debugging: `kickoff.ours`, because the
-button on a real robot says a restart happened and not whose it is, and
-`kickoff.countdown`, because on a real field the whistle is the countdown.
+What it does *not* have is anything a robot could not know. The frame the
+server sends is only the button, the switches, the robot's own clock and its
+sensors - no match clock, no score, no word from the referee about kick-offs -
+so reaching past your pins here buys convenience, never an advantage.
 """
 
 from __future__ import annotations
@@ -34,9 +34,8 @@ from .reading import Reading
 def frame() -> Reading:
     """Everything the server sent this tick, not just the pin-shaped part.
 
-    Camera blobs, team radio, wheel encoders, attack direction, whose kick-off
-    it is - all of it, as the match server knows it rather than as a sensor
-    would report it.
+    Camera blobs, team radio, wheel encoders, the switches and the start
+    button - all of it as numbers rather than as pins.
     """
     return Reading(Runtime.get().raw_frame())
 

@@ -23,7 +23,7 @@ import {
   type Pose,
 } from './sensors';
 import { streamSeed, toSeed, type SeedInput } from './rand';
-import type { BallReading, KickoffReading, LineReading, RangeReading, SensorFrame, TeamMessage } from '../match/protocol';
+import type { BallReading, LineReading, RangeReading, SensorFrame, TeamMessage } from '../match/protocol';
 
 export interface SensedRobot extends Pose {
   /** Stable id, e.g. 'c1'. */
@@ -38,7 +38,8 @@ export interface MatchView {
   clock: number;
   /** False at a kick-off, a stoppage, or before the whistle. */
   playing: boolean;
-  ball: { x: number; z: number };
+  /** Null while the ball is off the field: in somebody's hand, or switched off. */
+  ball: { x: number; z: number } | null;
   robots: readonly SensedRobot[];
   /** Which team, if any, has a kick-off under way, and how long until it is live. */
   kickoff: { pending: boolean; team: string | null; countdown: number };
@@ -58,13 +59,13 @@ export interface SenseInput {
   /** Rule 1.4/5.4: which goal this robot currently attacks. See protocol.ts. */
   attackDirection: 1 | -1;
   dt: number;
-  /** True on the one frame after this robot was put back on. See protocol.ts. */
-  returned?: boolean;
+  /** The start button is being held up for a restart. See `BUTTON_UP_FRAMES` in match.ts. */
+  lifted?: boolean;
   /**
    * Whether play is stopped, so the sensors' *error* must not move.
    *
    * A robot on the field during a stoppage is still read — it can see, and the
-   * protocol has always had `playing: false` to tell it not to expect to move.
+   * start button is up to tell it not to expect to move.
    * But compass drift and gyro bias are random walks stepped on every read, and
    * a robot polled through a five-minute wait for a referee would arrive at
    * kick-off carrying a half's worth of drift. Worse, the match's result would
@@ -107,6 +108,8 @@ export class Senses {
   private readonly camera: CameraState;
   private readonly encoders: EncoderState;
   private readonly gyro = new GyroState();
+  /** The robot's own clock. See `SensorFrame.time`. */
+  private time = 0;
   readonly idealSensors: boolean;
 
   /**
@@ -134,6 +137,11 @@ export class Senses {
   private readonly ballBuffer: BallReading = { bearing: 0, strength: 0 };
   private readonly rangeBuffer: RangeReading = { front: null, left: 0, right: 0, back: 0 };
 
+  /** A frame's worth of time passing with nothing read, e.g. off the field. */
+  idle(dt: number): void {
+    this.time += dt;
+  }
+
   read(input: SenseInput): SensorFrame {
     const { view, self, wheelSpeeds, omega, held, messages, attackDirection, dt } = input;
     const ideal = this.idealSensors;
@@ -156,22 +164,17 @@ export class Senses {
     }
     const blockers = this.blockersBuffer;
 
+    this.time += dt;
     return {
-      clock: view.clock,
+      time: this.time,
+      // A person presses start at the whistle, not when the ball is placed:
+      // the button stays up through a kick-off countdown. Without that every
+      // robot on the field would encroach at every restart.
+      start: view.playing && view.kickoff.countdown <= 0 && !input.lifted,
       robot: self.number,
       team: self.team,
       attackDirection,
-      playing: view.playing,
-      returned: input.returned === true,
-      kickoff: {
-        pending: view.kickoff.pending,
-        // The countdown belongs to whoever the restart belongs to: a robot that
-        // must not approach the ball until the whistle needs `ours` to say true
-        // for the whole wait, not just the live part.
-        ours: (view.kickoff.pending || view.kickoff.countdown > 0) && view.kickoff.team === self.team,
-        countdown: view.kickoff.countdown,
-      } satisfies KickoffReading,
-      ball: readIr(self, view.ball, { blockers, ideal }, this.ir, this.ballBuffer),
+      ball: view.ball ? readIr(self, view.ball, { blockers, ideal }, this.ir, this.ballBuffer) : null,
       compass: { heading: this.compass.read(self.heading, this.compassNoise, ideal) },
       gyro: { rate: this.gyro.read(omega, this.gyroNoise, ideal) },
       lines: readLines(self, this.lineNoise, ideal, this.linesBuffer),

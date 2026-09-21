@@ -103,7 +103,9 @@ all.
 
 ## Being taken off, and coming back
 
-Rule 5.7 takes a damaged robot off the field for thirty seconds. While you are
+Rule 5.7 takes a damaged robot off the field for thirty seconds, or until the
+next kick-off if that comes first. A kick-off puts every robot back on its mark,
+including one still serving its time. While you are
 off, **your program keeps running but stops being asked anything**: no sensor
 frames arrive, the start button goes up — because somebody has picked the robot
 up — and the server tells you why about once a second. You will see it on your

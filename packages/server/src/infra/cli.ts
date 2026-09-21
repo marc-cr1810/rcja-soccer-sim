@@ -2433,6 +2433,10 @@ async function league(flags: Map<string, string>): Promise<void> {
         // none at all, which is what a laptop wants and a venue does not.
         halfTimeSeconds: settings.rules.halfTimeSeconds,
         heldBallSeconds: settings.rules.heldBallSeconds,
+        ballPlacementSeconds: {
+          min: settings.rules.ballPlacementMinSeconds,
+          max: settings.rules.ballPlacementMaxSeconds,
+        },
         // Only on the leg that went through pre-game. A second leg starts level
         // — the late team was late once, and charging them again for the same
         // twenty minutes would be charging them twice.
@@ -2637,6 +2641,20 @@ function budgetFlags(
   }
   if (flags.has('held-ball')) {
     out.heldBallSeconds = flags.get('held-ball') === 'off' ? 0 : num(flags, 'held-ball', 0);
+  }
+  // `0.5-2` for a range, one number for a fixed time, `off` to put it down
+  // instantly. Checked against the same bounds as the file, by the same code.
+  if (flags.has('ball-placement')) {
+    const raw = flags.get('ball-placement')!;
+    const [lo, hi = lo] = raw === 'off' ? ['0', '0'] : raw.split('-');
+    const min = Number(lo);
+    const max = Number(hi);
+    if (!Number.isFinite(min) || !Number.isFinite(max)) {
+      console.error(`\n  --ball-placement wants seconds like "0.5-2", "1" or "off", not "${raw}"\n`);
+      process.exit(1);
+    }
+    out.ballPlacementMinSeconds = min;
+    out.ballPlacementMaxSeconds = max;
   }
   if (flags.has('demo-gap')) out.demoGap = num(flags, 'demo-gap', 0);
   if (flags.has('demo-random-sides')) out.demoRandomSides = flags.get('demo-random-sides') !== 'false';

@@ -8,6 +8,7 @@
 import { openDrive, type DriveSpec } from '../sim/drive';
 import { GoalFrame } from '../sim/frame';
 import type { Agent } from '../match/agent';
+import { RestartWatch } from '../match/restart';
 import type { ActuatorFrame, SensorFrame, TeamMessage } from '../match/protocol';
 import type {
   ChampionOptions,
@@ -25,6 +26,11 @@ import {
   YawEstimator,
 } from './estimator';
 import { ChampionBrain, goalieParams, strikerParams } from './brain';
+
+/** Seconds after the button before the ball estimate is trusted to say the kick-off is over. */
+const KICKOFF_SETTLE = 0.2;
+/** How far off the centre spot, mm, the ball has to be for the kick-off to be over. */
+const KICKOFF_BALL_GONE = 200;
 
 export class ChampionAgent implements Agent {
   readonly name: string;
@@ -50,7 +56,7 @@ export class ChampionAgent implements Agent {
 
   private readonly brain: ChampionBrain;
 
-  private restarted = false;
+  private readonly restart = new RestartWatch();
 
   constructor(opts: ChampionOptions) {
     this.drive = opts.drive ?? openDrive();
@@ -73,22 +79,20 @@ export class ChampionAgent implements Agent {
     this.effort.reset();
     this.brain.reset();
     this.goalFrame.reset();
-    this.restarted = false;
+    this.restart.reset();
   }
 
   tick(frame: SensorFrame): ActuatorFrame {
-    // 1. Kickoff & Teleportation Resets
-    if (frame.returned) {
-      this.reset();
-    }
-
-    if (frame.kickoff?.pending && !this.restarted) {
-      this.restarted = true;
+    // 1. Restart & Teleportation Resets
+    //
+    // The start button going down is every restart there is - a kick-off, a
+    // new half, being put back after a removal - and they look the same from
+    // here. Where the robot was put down is what `teleported` below is for.
+    this.restart.update(frame);
+    if (this.restart.justStarted) {
       this.ballEst.reset();
       this.yawEst.reset();
       this.effort.reset();
-    } else if (!frame.kickoff?.pending) {
-      this.restarted = false;
     }
 
     // 2. Heading with Goal-Sightings Calibration
@@ -110,6 +114,13 @@ export class ChampionAgent implements Agent {
 
     // 4. Ball Tracking & Kinematics
     this.ballEst.update(frame, heading, this.locator.x, this.locator.z);
+
+    // Nobody announces that a kick-off is over. Every robot on the field can
+    // see it, though: the ball leaves the centre spot.
+    const since = this.restart.since ?? 0;
+    if (this.restart.pending && since > KICKOFF_SETTLE && this.ballEst.seen && Math.hypot(this.ballEst.x, this.ballEst.z) > KICKOFF_BALL_GONE) {
+      this.restart.finish();
+    }
 
     // 5. Rates & Effort
     const yawRate = this.yawEst.update(frame);
@@ -140,6 +151,7 @@ export class ChampionAgent implements Agent {
     // were shifted by the same angle.
     return this.brain.decide(
       frame,
+      { pending: this.restart.pending, ours: this.restart.ours },
       this.goalFrame,
       pose,
       ball,

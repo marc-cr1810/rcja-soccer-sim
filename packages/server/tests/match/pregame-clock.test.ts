@@ -139,6 +139,8 @@ async function start(opts: VenueOptions = {}): Promise<Started> {
         halfTimeSeconds: 0,
         // Nor does a pre-game clock care what happens to a held ball.
         heldBallSeconds: 8,
+        ballPlacementMinSeconds: 0.5,
+        ballPlacementMaxSeconds: 2,
       },
     },
     world: { realtime: false, submissionsDir, workspacesDir, pythonLibDir: PYTHON_LIB_DIR },

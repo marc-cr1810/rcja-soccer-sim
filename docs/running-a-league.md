@@ -622,12 +622,18 @@ whole time either way.
 ```json
 {
   "pregame": { "autoStartMins": 15, "penaltyPerMin": 1 },
-  "rules": { "mercyMargin": 10, "halfTimeSeconds": 300, "heldBallSeconds": 8 }
+  "rules": {
+    "mercyMargin": 10,
+    "halfTimeSeconds": 300,
+    "heldBallSeconds": 8,
+    "ballPlacementMinSeconds": 0.5,
+    "ballPlacementMaxSeconds": 2
+  }
 }
 ```
 
 On `league`, `--auto-start 15|off`, `--penalty-per-min 1`, `--mercy 10|off`,
-`--half-time 300|off` and `--held-ball 8|off` do the same for one run without
+`--half-time 300|off`, `--held-ball 8|off` and `--ball-placement 0.5-2|off` do the same for one run without
 editing the file. (`bench` has a `--mercy` of its own, which works the other
 way round — see below.)
 
@@ -652,6 +658,26 @@ It is displacement that is measured, not speed, so a robot dribbling the ball
 up the field keeps it for as long as it is actually taking it somewhere — and a
 robot spinning on the spot with the ball against it does not, however fast the
 ball is moving.
+
+### Putting the ball back
+
+When the ball goes out of play (5.9.2) or lack of progress is called (5.6.2),
+somebody has to walk over, pick it up and put it on a neutral point. The
+simulator makes that take a person's time rather than none: each placement
+draws its own delay between `rules.ballPlacementMinSeconds` and
+`rules.ballPlacementMaxSeconds`, half a second to two unless you say otherwise.
+The draw comes from the match seed, so a replayed match puts the ball down at
+the same moments.
+
+While it is in somebody's hand the ball is off the field. No robot can see it,
+on the infrared or the camera — they read exactly what they would with the ball
+out of sight — and nothing can touch it, score with it or be called over it.
+Where it lands is decided when it is put down, so a robot that has parked on
+the nearest neutral point meanwhile sends it to the next one, as it would with
+a real referee.
+
+Set the maximum to `0` and the ball moves instantly, as it did before this
+existed. Both are capped at five seconds.
 
 ### Half-time
 

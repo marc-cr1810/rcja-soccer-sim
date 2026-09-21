@@ -21,13 +21,11 @@ describe('Cross-language Protobuf compatibility (TS <-> Python)', () => {
      * had not swapped, and attacked its own goal for the whole second half.
      */
     const minimal: SensorFrame = {
-      clock: 0,
+      time: 0,
       robot: 2,
       team: 'lime',
       attackDirection: -1,
-      playing: true,
-      returned: false,
-      kickoff: { pending: false, ours: false, countdown: 0 },
+      start: true,
       ball: null,
       compass: { heading: 0 },
       gyro: { rate: 0 },
@@ -65,13 +63,11 @@ print("OK")
 
   test('TypeScript encodes SensorFrame -> Python decodes correctly', () => {
     const frame: SensorFrame = {
-      clock: 42.125,
+      time: 42.125,
       robot: 1,
       team: 'violet',
       attackDirection: 1,
-      playing: true,
-      returned: false,
-      kickoff: { pending: true, ours: true, countdown: 2.5 },
+      start: true,
       ball: { bearing: -0.75, strength: 0.65 },
       compass: { heading: 1.57 },
       gyro: { rate: -0.25 },
@@ -108,13 +104,13 @@ msg = decode_server_message(raw)
 assert msg is not None, "Failed to decode server message"
 assert msg["type"] == "sensors"
 f = msg["frame"]
-assert abs(f["clock"] - 42.125) < 1e-4
+assert abs(f["time"] - 42.125) < 1e-4
 assert f["robot"] == 1
 assert f["team"] == "violet"
 assert f["attackDirection"] == 1
-assert f["playing"] is True
-assert f["kickoff"]["pending"] is True
-assert abs(f["kickoff"]["countdown"] - 2.5) < 1e-3
+assert f["start"] is True
+for gone in ("clock", "playing", "returned", "kickoff"):
+    assert gone not in f, gone
 assert abs(f["ball"]["bearing"] - (-0.75)) < 1e-3
 assert abs(f["ball"]["strength"] - 0.65) < 1e-3
 assert abs(f["compass"]["heading"] - 1.57) < 1e-3

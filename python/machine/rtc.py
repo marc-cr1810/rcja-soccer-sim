@@ -1,9 +1,8 @@
 """MicroPython RTC.
 
 The date comes from the host, because a match has one and the simulator is not
-going to invent a different one. The sub-second field comes from the match
-clock, so a program stamping a log line gets something that lines up with the
-match it is playing rather than with the wall.
+going to invent a different one. The sub-second field comes from the robot's
+own clock - never the match clock, which no board has.
 """
 
 from __future__ import annotations
@@ -29,7 +28,7 @@ class RTC:
             return self._offset
         lt = _time.localtime(_time.time())
         rt = Runtime.get()
-        subsecond = int((rt.clock % 1.0) * 1000.0)
+        subsecond = int((rt.robot_time % 1.0) * 1000.0)
         # MicroPython's weekday is Monday=0, matching `struct_time.tm_wday`.
         return (
             lt.tm_year,

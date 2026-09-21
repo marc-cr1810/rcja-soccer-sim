@@ -353,6 +353,7 @@ export const PracticeStateSchema = z
   .object({
     running: z.boolean(),
     resolve: z.enum(['restage', 'play-on', 'freeze']),
+    ballOnField: z.boolean().openapi({ description: 'False while the ball has been switched off on this field' }),
     clock: z.number(),
     score: ScoreSchema,
     arrangement: ArrangementSchema,
@@ -484,6 +485,10 @@ export const ViewBallSchema = z
     z: z.number(),
     y: z.number().optional().openapi({ description: 'Height above the carpet, for a chip kick' }),
     radius: z.number(),
+    absent: z
+      .boolean()
+      .optional()
+      .openapi({ description: 'Off the field: being carried to a neutral point, or switched off on a practice field' }),
   })
   .openapi('ViewBall');
 export type ViewBall = z.infer<typeof ViewBallSchema>;
@@ -752,6 +757,11 @@ export const PlaceBodySchema = z
   })
   .openapi('PlaceBody', { description: 'Body for POST /practice-api/place' });
 export type PlaceBody = z.infer<typeof PlaceBodySchema>;
+
+export const BallBodySchema = z
+  .object({ onField: z.boolean() })
+  .openapi('BallBody', { description: 'Body for POST /practice-api/ball' });
+export type BallBody = z.infer<typeof BallBodySchema>;
 
 export const RosterBodySchema = z
   .object({
@@ -1103,6 +1113,8 @@ export const SettingsBodySchema = z
         mercyMargin: z.number().nullable().optional(),
         halfTimeSeconds: z.number().optional(),
         heldBallSeconds: z.number().optional(),
+        ballPlacementMinSeconds: z.number().optional(),
+        ballPlacementMaxSeconds: z.number().optional(),
       })
       .strict()
       .optional(),

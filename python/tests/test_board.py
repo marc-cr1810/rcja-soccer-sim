@@ -131,9 +131,9 @@ class TestBoardReadings(unittest.TestCase):
     def test_the_button_is_the_whistle_and_the_restart(self) -> None:
         connected_singleton(
             [
-                sensor_frame(0.0, playing=False)["frame"],
-                sensor_frame(0.02, playing=True)["frame"],
-                sensor_frame(0.04, playing=True)["frame"],
+                sensor_frame(0.0, start=False)["frame"],
+                sensor_frame(0.02, start=True)["frame"],
+                sensor_frame(0.04, start=True)["frame"],
             ]
         )
         board = Board()

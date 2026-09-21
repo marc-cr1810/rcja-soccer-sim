@@ -36,6 +36,22 @@ function frameOf(
   });
 }
 
+/**
+ * A reference robot that has been playing for a while.
+ *
+ * A robot learns about a restart only from its start button going down, and a
+ * fresh agent's first frame is exactly that - so on its own, a single frame
+ * with the ball against the robot reads as its own kick-off, and it plays
+ * that instead of what the test is about. One earlier frame, button already
+ * down and further back than the 5.4.7 window, puts it in open play.
+ */
+function veteran(opts: ConstructorParameters<typeof ReferenceAgent>[0]): ReferenceAgent {
+  const agent = new ReferenceAgent(opts);
+  const f = frameOf(1, strikerSeat(0, 0), [], { x: 2000, z: 2000 });
+  agent.tick({ ...f, time: f.time - 4, ball: null });
+  return agent;
+}
+
 /** The commanded drive direction, as a bearing in the robot's own frame. */
 function commandedBearing(motors: number[]): number {
   const force = driveForces(openDrive(), motors, { heading: 0, vx: 0, vz: 0, omega: 0 });
@@ -73,7 +89,7 @@ const broadcast = (bearing: number, age: number): TeamMessage => ({
 
 describe('team radio', () => {
   it('the striker advertises its own position and a ball sighting in its own frame', () => {
-    const agent = new ReferenceAgent({ team: 'violet', number: 1, role: 'striker' });
+    const agent = veteran({ team: 'violet', number: 1, role: 'striker' });
     const frame = frameOf(5, strikerSeat(-300, 120), [], { x: -250, z: 120 });
     const say = agent.tick(frame).say as {
       role: string;
@@ -94,14 +110,14 @@ describe('team radio', () => {
   });
 
   it('a goalkeeper that cannot see the ball drives towards a fresh relayed sighting', () => {
-    const agent = new ReferenceAgent({ team: 'violet', number: 2, role: 'goalie' });
+    const agent = veteran({ team: 'violet', number: 2, role: 'goalie' });
     const away = frameOf(3, goalieSeat(0, 0), [], { x: 9999, z: 0 }, {
       messages: [broadcast(0, 0.02)],
     });
     const forward = agent.tick(away).motors;
     expect(Math.cos(commandedBearing(forward))).toBeGreaterThan(0.9);
 
-    const again = new ReferenceAgent({ team: 'violet', number: 2, role: 'goalie' });
+    const again = veteran({ team: 'violet', number: 2, role: 'goalie' });
     const otherWay = frameOf(3, goalieSeat(0, 0), [], { x: 9999, z: 0 }, {
       messages: [broadcast(Math.PI, 0.02)],
     });
@@ -114,13 +130,13 @@ describe('team radio', () => {
   });
 
   it('a goalkeeper ignores a relay older than the packet lifetime', () => {
-    const stale = new ReferenceAgent({ team: 'violet', number: 2, role: 'goalie' });
+    const stale = veteran({ team: 'violet', number: 2, role: 'goalie' });
     const frame = frameOf(3, goalieSeat(0, 0), [], { x: 9999, z: 0 }, {
       messages: [broadcast(0, 0.5)],
     });
     const withStale = stale.tick(frame).motors;
 
-    const none = new ReferenceAgent({ team: 'violet', number: 2, role: 'goalie' });
+    const none = veteran({ team: 'violet', number: 2, role: 'goalie' });
     const bare = frameOf(3, goalieSeat(0, 0), [], { x: 9999, z: 0 });
     const without = none.tick(bare).motors;
 
@@ -132,7 +148,7 @@ describe('team radio', () => {
 
   it('the goalkeeper clears only into a genuinely open far mouth', () => {
     const kick = (frame: SensorFrame): boolean => {
-      const agent = new ReferenceAgent({ team: 'violet', number: 2, role: 'goalie' });
+      const agent = veteran({ team: 'violet', number: 2, role: 'goalie' });
       return agent.tick(frame).kicker === true;
     };
 

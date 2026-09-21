@@ -235,6 +235,11 @@ export interface MatchOptions {
    */
   heldBallSeconds?: number;
   /**
+   * How long a person takes to carry the ball to a neutral point, as a range
+   * each placement draws from. See `MatchConfig.ballPlacementSeconds`.
+   */
+  ballPlacementSeconds?: { min: number; max: number };
+  /**
    * Called after every physics step, with the match.
    *
    * The one way to watch a match closely from outside without the watcher
@@ -269,17 +274,23 @@ interface Slot {
   command: ActuatorFrame;
   /** Whether this slot's program was reachable at the last control cycle. */
   wasConnected: boolean;
-  /**
-   * Whether this slot's robot was off the field at the last control cycle.
-   *
-   * Two jobs. It is what makes the frame after a return carry `returned`, and
-   * it is what stops a stand-down being served twice: a program that dropped
-   * while its robot was already off is re-checked once, when the robot comes
-   * back, rather than earning a fresh thirty seconds for a disconnection
-   * nobody could have answered.
-   */
-  wasRemoved: boolean;
+  /** `world.kickOffs` as of this slot's last frame. */
+  seenKickOffs: number;
+  /** Frames left with the start button up. See `BUTTON_UP_FRAMES`. */
+  buttonUp: number;
 }
+
+/**
+ * How long a restart holds the start button up, in control frames.
+ *
+ * At every kick-off a real team picks the robot up, puts it on its mark and
+ * presses start, and that press is the only way the robot learns a restart
+ * happened. A headless match restarts in zero time, so without this the
+ * button would never leave the down position and a robot could not tell a
+ * kick-off from open play. Two frames, not one, so a program pacing its loop
+ * a little slower than the frame rate still sees it.
+ */
+const BUTTON_UP_FRAMES = 2;
 
 export class Match {
   readonly world: World;
@@ -297,6 +308,16 @@ export class Match {
     string,
     { kicker: boolean; dribbler: number; kickCooldown: number; say?: unknown }
   > = {};
+  /**
+   * The clock the radio link runs on: every control cycle, stoppages included.
+   *
+   * Not the match clock, because a packet's age is what a robot is told and
+   * the match clock stops when the referee stops play. Aged on it, a message
+   * sent before a stoppage stayed the same age for as long as the stoppage
+   * lasted, which was both wrong about the radio and a way to read the match
+   * clock off it. Robots' own clocks (`SensorFrame.time`) tick the same way.
+   */
+  private linkTime = 0;
   private readonly radios: Record<TeamId, TeamRadio> = {
     violet: new TeamRadio(),
     lime: new TeamRadio(),
@@ -405,6 +426,7 @@ export class Match {
       autoDamaged: opts.autoDamaged,
       kickoffCountdown: opts.kickoffCountdown ?? 0,
       heldBallSeconds: opts.heldBallSeconds,
+      ballPlacementSeconds: opts.ballPlacementSeconds,
     });
     if (opts.arrangement) this.world.stage(opts.arrangement);
     else this.world.resetRobots('violet');
@@ -448,10 +470,11 @@ export class Match {
   }
 
   private readonly sensedRobotsBuffer: SensedRobot[] = [];
+  private readonly viewBall = { x: 0, z: 0 };
   private readonly cachedMatchView: MatchView = {
     clock: 0,
     playing: false,
-    ball: { x: 0, z: 0 },
+    ball: this.viewBall,
     robots: this.sensedRobotsBuffer,
     kickoff: { pending: false, team: null, countdown: 0 },
   };
@@ -474,8 +497,11 @@ export class Match {
     }
     this.cachedMatchView.clock = this.world.clock;
     this.cachedMatchView.playing = this.world.running;
-    this.cachedMatchView.ball.x = this.world.ball.x;
-    this.cachedMatchView.ball.z = this.world.ball.z;
+    // A ball in somebody's hand is not on the field to be sensed. The view
+    // keeps its own object and hands out null, so nothing here allocates.
+    this.viewBall.x = this.world.ball.x;
+    this.viewBall.z = this.world.ball.z;
+    this.cachedMatchView.ball = this.world.ballInPlay ? this.viewBall : null;
     this.cachedMatchView.kickoff = this.world.restart;
     return this.cachedMatchView;
   }
@@ -500,6 +526,8 @@ export class Match {
   /** Whether this robot's dribbler currently has the ball. */
   private gateHeld(robot: Robot): boolean {
     if (!this.world.config.league.dribblerAllowed) return false;
+    // Nothing to hold, kick or drag while the ball is off the field.
+    if (!this.world.ballInPlay) return false;
     const dx = this.world.ball.x - robot.x;
     const dz = this.world.ball.z - robot.z;
     const dist = Math.hypot(dx, dz);
@@ -522,6 +550,7 @@ export class Match {
    * and the ball would leap the moment the whistle went.
    */
   private control(dt: number, act: boolean): void {
+    this.linkTime += dt;
     const view = this.view();
     for (const slot of this.orderedSlots()) {
       const robot = this.robotFor(slot.id);
@@ -553,18 +582,14 @@ export class Match {
           type: 'disabled',
           rule: robot.removalRule ?? '5.7',
           reason: robot.removalReason ?? 'off the field',
-          returnsIn: Math.max(0, robot.penaltyRemaining),
         });
+        // Beside the pitch in somebody's hands, but still switched on - and
+        // when it goes back on, somebody presses start.
+        slot.senses.idle(dt);
+        slot.buttonUp = BUTTON_UP_FRAMES;
         slot.wasConnected = slot.agent.transport.connected ?? true;
-        slot.wasRemoved = true;
         continue;
       }
-
-      // The one frame that says "you have been put back". Rule 5.7.4 replaces a
-      // returning robot at a corner of its own box, so what it was chasing has
-      // moved; its program never stopped and still believes otherwise.
-      const returned = slot.wasRemoved;
-      slot.wasRemoved = false;
 
       /*
        * Rule 5.7.1: a robot that has stopped is a damaged robot.
@@ -595,6 +620,13 @@ export class Match {
       }
       slot.wasConnected = connected;
 
+      if (slot.seenKickOffs !== this.world.kickOffs) {
+        slot.seenKickOffs = this.world.kickOffs;
+        slot.buttonUp = BUTTON_UP_FRAMES;
+      }
+      const lifted = slot.buttonUp > 0;
+      if (lifted) slot.buttonUp--;
+
       const held = this.gateHeld(robot);
       const number = numberOf(robot.id);
       const frame = slot.senses.read({
@@ -603,10 +635,10 @@ export class Match {
         wheelSpeeds: robot.wheelSpeeds,
         omega: robot.omega,
         held,
-        messages: this.world.commsEnabled ? this.radios[robot.team].deliver(number, this.world.clock) : [],
+        messages: this.world.commsEnabled ? this.radios[robot.team].deliver(number, this.linkTime) : [],
         attackDirection: this.world.attackingGoal(robot.team) === 'yellow' ? 1 : -1,
         dt,
-        returned,
+        lifted,
         frozen: !act,
       });
 
@@ -622,7 +654,7 @@ export class Match {
       };
 
       if (command.say !== undefined && this.world.commsEnabled) {
-        this.radios[robot.team].send(number, command.say, this.world.clock);
+        this.radios[robot.team].send(number, command.say, this.linkTime);
       }
       if (command.kicker && held && slot.kickCooldown === 0) {
         this.fire(robot);
@@ -888,7 +920,8 @@ export class Match {
       kickCooldown: 0,
       command: { motors: [0, 0, 0, 0] },
       wasConnected: true,
-      wasRemoved: false,
+      seenKickOffs: 0,
+      buttonUp: 0,
     };
   }
 
@@ -1208,6 +1241,7 @@ export class Match {
         z: this.world.ball.z,
         y: this.world.ball.y,
         radius: this.world.ball.radius,
+        ...(this.world.ballInPlay ? {} : { absent: true }),
       },
       robots: this.world.robots.map((r) => ({
         id: r.id,

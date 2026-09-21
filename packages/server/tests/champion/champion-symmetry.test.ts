@@ -84,7 +84,10 @@ function record(): SeatRecording[] {
       'lime-2': champion(2, 'lime'),
     } as unknown as MatchAgents;
 
-    new Match({ agents, halfSeconds: HALF_SECONDS, seed }).run();
+    // The ball moved instantly, as these recordings were measured with: a
+    // ball in somebody's hand reads the same at both ends by construction, and
+    // the floor below is about which states three short matches reach.
+    new Match({ agents, halfSeconds: HALF_SECONDS, seed, ballPlacementSeconds: { min: 0, max: 0 } }).run();
     seats.forEach((seat, i) => seat.frames.push(...taped[i]!.frames));
   }
   return seats;

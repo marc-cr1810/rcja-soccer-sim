@@ -3532,6 +3532,8 @@ const SETTING_GROUPS: { title: string; note?: string; fields: Field[] }[] = [
       { path: 'rules.mercyMargin', label: 'Goal difference that ends a match', kind: 'nullable', note: 'blank = no limit' },
       { path: 'rules.halfTimeSeconds', label: 'Half-time (seconds)', kind: 'number' },
       { path: 'rules.heldBallSeconds', label: 'Sitting on the ball (seconds)', kind: 'number', note: '0 = a robot may keep it as long as it likes' },
+      { path: 'rules.ballPlacementMinSeconds', label: 'Putting the ball down, quickest (seconds)', kind: 'number' },
+      { path: 'rules.ballPlacementMaxSeconds', label: 'Putting the ball down, slowest (seconds)', kind: 'number', note: '0 = the ball is moved instantly' },
     ],
   },
   {

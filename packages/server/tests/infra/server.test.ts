@@ -826,7 +826,7 @@ describe('referee actions', () => {
     expect(final.clock).toBeLessThan(30);
   });
 
-  it('a robot removed in the first half stays off across end-half into the second', async () => {
+  it('a robot removed in the first half is back on for the second-half kick-off', async () => {
     const { server, port } = await start(TOKEN);
     const result = server.play({ agents: agents(), halfSeconds: 30, refereed: true, seed: 1 });
     await post(port, 'kickoff', TOKEN, { team: 'violet' });
@@ -838,7 +838,7 @@ describe('referee actions', () => {
 
     await post(port, 'kickoff', TOKEN, { team: 'lime' });
     const robot = server.currentMatch!.world.robots.find((r) => r.id === 'violet-1')!;
-    expect(robot.removed).toBe(true);
+    expect(robot.removed).toBe(false);
 
     await post(port, 'abandon', TOKEN, { reason: 'done' });
     await result;

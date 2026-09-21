@@ -23,16 +23,14 @@ from machine.config import PinConfig, set_config
 from machine._transport import TransportError, clear_join, use_transport
 
 
-def sensor_frame(clock: float = 0.0, **overrides: Any) -> dict[str, Any]:
-    """One frame, shaped like the server's. `overrides` replace top-level keys."""
+def sensor_frame(at: float = 0.0, **overrides: Any) -> dict[str, Any]:
+    """One frame, shaped like the server's. `at` is the robot's clock; `overrides` replace top-level keys."""
     frame: dict[str, Any] = {
-        "clock": clock,
+        "time": at,
+        "start": True,
         "team": "violet",
         "robot": 1,
         "attackDirection": 1,
-        "playing": True,
-        "returned": False,
-        "kickoff": {"pending": False, "ours": False, "countdown": 0.0},
         "ball": {"strength": 0.5, "bearing": 0.0},
         "compass": {"heading": 0.0},
         "gyro": {"rate": 0.0},

@@ -1,17 +1,17 @@
 """Write a robot for the RCJA Soccer Simulation league.
 
     import time
-    from machine import Runtime
+    from board import Board          # your wiring - see examples/board.py
     from rcja_soccer import coast, drive
 
-    rt = Runtime.get()
+    board = Board()
 
     while True:
-        s = rt.sensors()
-        if s.ball is None:
-            rt.send_command(motors=coast())
+        s = board.read()
+        if not s.playing or s.ball is None:
+            board.apply(motors=coast())
         else:
-            rt.send_command(motors=drive(bearing=s.ball.bearing, speed=0.8))
+            board.apply(motors=drive(bearing=s.ball.bearing, speed=0.8))
         time.sleep_ms(20)
 
 No dependencies of its own, on purpose: the schools this league exists to

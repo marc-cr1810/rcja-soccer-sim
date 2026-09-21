@@ -46,7 +46,7 @@ export class YawEstimator {
   private lastClock: number | null = null;
 
   update(frame: SensorFrame): number {
-    const clock = frame.clock;
+    const clock = frame.time;
     const dt = this.lastClock === null ? 0.02 : Math.max(1e-3, clock - this.lastClock);
     this.lastClock = clock;
 
@@ -85,7 +85,7 @@ export class WheelEffort {
   private lastClock: number | null = null;
 
   update(frame: SensorFrame): number {
-    const clock = frame.clock;
+    const clock = frame.time;
     const dt = this.lastClock === null ? 0.02 : Math.max(1e-3, clock - this.lastClock);
     this.lastClock = clock;
 
@@ -343,7 +343,7 @@ export class BallEstimator {
   }
 
   update(frame: SensorFrame, heading: number, meX: number, meZ: number): BallEstimate {
-    const clock = frame.clock;
+    const clock = frame.time;
     const dt = this.lastClock === null ? 0.02 : clamp(clock - this.lastClock, 1e-3, 0.5);
     this.lastClock = clock;
 

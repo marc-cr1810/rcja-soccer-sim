@@ -25,12 +25,10 @@ def _sensor_frame(clock: float = 0.0) -> dict:
     return {
         "type": "sensors",
         "frame": {
-            "clock": clock,
+            "time": clock,
+            "start": True,
             "team": "violet",
             "attackDirection": 1,
-            "playing": True,
-            "returned": False,
-            "kickoff": {"pending": False},
             "ball": {"strength": 0.5, "bearing": 0.0},
             "compass": {"heading": 0.0},
             "gyro": {"rate": 0.0},

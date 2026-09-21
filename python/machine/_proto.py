@@ -336,24 +336,6 @@ def _decode_range(reader: ProtoReader) -> dict[str, float | None]:
     return out
 
 
-def _decode_kickoff(reader: ProtoReader) -> dict[str, Any]:
-    out: dict[str, Any] = {"pending": False, "ours": False, "countdown": 0.0}
-    while reader.has_more():
-        tag = reader.next_tag()
-        if not tag:
-            break
-        fn, wt = tag
-        if fn == 1:
-            out["pending"] = reader.bool()
-        elif fn == 2:
-            out["ours"] = reader.bool()
-        elif fn == 3:
-            out["countdown"] = reader.float()
-        else:
-            reader.skip(wt)
-    return out
-
-
 def _decode_ball(reader: ProtoReader) -> dict[str, float]:
     bearing = 0.0
     strength = 0.0
@@ -398,13 +380,11 @@ def decode_sensor_frame(data: bytes | bytearray | memoryview) -> dict[str, Any]:
     """Decode Protobuf bytes into a SensorFrame dictionary."""
     reader = ProtoReader(data)
     out: dict[str, Any] = {
-        "clock": 0.0,
+        "time": 0.0,
+        "start": False,
         "robot": 1,
         "team": "violet",
         "attackDirection": 1,
-        "playing": False,
-        "returned": False,
-        "kickoff": {"pending": False, "ours": False, "countdown": 0.0},
         "ball": None,
         "compass": {"heading": 0.0},
         "gyro": {"rate": 0.0},
@@ -426,20 +406,16 @@ def decode_sensor_frame(data: bytes | bytearray | memoryview) -> dict[str, Any]:
         if not tag:
             break
         fn, wt = tag
-        if fn == 1:
-            out["clock"] = reader.double()
+        if fn == 17:
+            out["time"] = reader.double()
+        elif fn == 18:
+            out["start"] = reader.bool()
         elif fn == 2:
             out["robot"] = reader.int32()
         elif fn == 3:
             out["team"] = reader.string()
         elif fn == 4:
             out["attackDirection"] = reader.int32()
-        elif fn == 5:
-            out["playing"] = reader.bool()
-        elif fn == 6:
-            out["returned"] = reader.bool()
-        elif fn == 7:
-            out["kickoff"] = _decode_kickoff(reader.sub_reader())
         elif fn == 8:
             out["ball"] = _decode_ball(reader.sub_reader())
         elif fn == 9:
@@ -496,7 +472,7 @@ def decode_sensor_frame(data: bytes | bytearray | memoryview) -> dict[str, Any]:
 def decode_disabled_message(data: bytes | bytearray | memoryview) -> dict[str, Any]:
     """Decode Protobuf bytes into a DisabledMessage dictionary."""
     reader = ProtoReader(data)
-    out: dict[str, Any] = {"type": "disabled", "rule": "", "reason": "", "returnsIn": 0.0}
+    out: dict[str, Any] = {"type": "disabled", "rule": "", "reason": ""}
     while reader.has_more():
         tag = reader.next_tag()
         if not tag:
@@ -506,8 +482,6 @@ def decode_disabled_message(data: bytes | bytearray | memoryview) -> dict[str, A
             out["rule"] = reader.string()
         elif fn == 2:
             out["reason"] = reader.string()
-        elif fn == 3:
-            out["returnsIn"] = reader.float()
         else:
             reader.skip(wt)
     return out
