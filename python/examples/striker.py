@@ -190,6 +190,18 @@ RECEIVE_WING = HALF_WIDTH * 0.55
 #: pulled in tighter: this is only for the spot losing the ball is worst.
 BACKPASS_DEPTH = HALF_LENGTH * 0.3
 
+#: The approach. The spot the robot heads for sits APPROACH_STANDOFF behind the
+#: ball on the line to the target - clear of contact (131 mm), so it arrives
+#: *behind* the ball rather than into it. From the wrong side it goes round at
+#: ORBIT_RADIUS, walking the waypoint ORBIT_STEP radians ahead of itself.
+APPROACH_STANDOFF = 175.0
+ORBIT_RADIUS = 240.0
+ORBIT_STEP = 0.9
+#: What the spin budget assumes the drive does: roughly its straight-line speed
+#: in mm/s, and its turn rate on the spot in rad/s (518 deg/s, measured).
+APPROACH_SPEED = 700.0
+TURN_RATE = 9.0
+
 yaw = GyroRate()
 effort = WheelEffort()
 locator = Locator(TEAM)
@@ -456,21 +468,46 @@ def think(s, me):
     # rather than orbiting forever, and there is always some component round
     # it, so it never arrives from the wrong side. Wider arcs close in, where
     # there is no room left to correct.
-    gain = clamp(0.6 + 120.0 / max(range_to_ball, 100.0), 0.6, 1.4)
-    travel_field = wrap_angle(to_ball + clamp(swing * gain, -1.9, 1.9))
-
     aligned = abs(swing) < 0.35
     if holding:
         travel_field = to_ball
         state = "CARRY"
+        speed = 1.0
     elif aligned:
+        # On the line: drive through it, trimming whatever is left of the swing.
+        gain = clamp(0.6 + 120.0 / max(range_to_ball, 100.0), 0.6, 1.4)
+        travel_field = wrap_angle(to_ball + swing * gain)
         state = "STRIKE"
+        # On the line but not yet facing along it: ease in so the turn is
+        # finished before the ball is, or it gets struck with the shoulder.
+        facing = abs(wrap_angle(push - heading))
+        speed = clamp(1.0 - (facing - 0.3) * 1.2, 0.45, 1.0)
     else:
+        # Off the line: head straight for a waypoint, not round a spiral.
+        #
+        # `swing` is also where the robot stands round the ball, measured from
+        # the spot behind it - so the waypoint is that spot, walked round the
+        # ball towards it by at most ORBIT_STEP at a time, at a radius that
+        # grows the further round the robot is. From roughly behind, that is
+        # the spot itself and the path is a straight line; from the wrong side
+        # it is a fixed arc that keeps the chassis clear of the ball, rather
+        # than a circle whose size depends on the angle error.
+        rest = max(abs(swing) - ORBIT_STEP, 0.0)
+        behind = push + math.pi + math.copysign(rest, swing)
+        radius = APPROACH_STANDOFF + (ORBIT_RADIUS - APPROACH_STANDOFF) * clamp(
+            abs(swing) / (math.pi / 2), 0.0, 1.0
+        )
+        way_x = bx + math.cos(behind) * radius
+        way_z = bz + math.sin(behind) * radius
+        travel_field = math.atan2(way_z - me_z, way_x - me_x)
         state = "ROUND"
-
-    # Full power down the line, a little less while swinging round, so the
-    # robot does not arrive at the ball still travelling sideways.
-    speed = 1.0 if (holding or aligned) else clamp(1.15 - abs(swing) * 0.35, 0.6, 1.0)
+        speed = 1.0
+        # Turn as we go, but only as fast as arriving square needs. Full spin
+        # halves the drive (both come out of the same four motors), and a
+        # robot that saves the whole turn for the ball stops dead beside it.
+        arrive = max(math.hypot(way_x - me_x, way_z - me_z), 50.0) / APPROACH_SPEED
+        cap = clamp(1.5 * abs(wrap_angle(push - heading)) / (arrive * TURN_RATE), 0.3, 1.0)
+        spin = clamp(spin, -cap, cap)
 
     # The edges, as a force. Zero in open play, decisive on the line.
     #
