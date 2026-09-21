@@ -48,6 +48,7 @@ from .field import (
     HALF_LENGTH,
     HALF_WIDTH,
     MOUNT_RADIUS,
+    NEUTRAL_POINTS,
     ROBOT_RADIUS,
     WALL_X,
     WALL_Z,
@@ -557,6 +558,19 @@ def teleported(
 # ---------------------------------------------------------------- where is it
 
 
+def left_play(x: float, z: float, margin: float = 30.0) -> bool:
+    """Whether a ball at this field position has gone out of play (5.9.1).
+
+    ``margin`` past the playing area, so a ball sitting on the line is not
+    called out on the strength of a noisy estimate. A ball in the goal mouth
+    is not out: that is a goal.
+    """
+    past_end = abs(x) > HALF_LENGTH + margin
+    if past_end and abs(z) < HALF_GOAL_WIDTH:
+        return False
+    return past_end or abs(z) > HALF_WIDTH + margin
+
+
 class BallTracker:
     """Where the ball is and where it is going, in field coordinates.
 
@@ -578,11 +592,18 @@ class BallTracker:
     #: enough that acting on the last sighting is worse than admitting it.
     MEMORY = 1.2
 
+    #: How far past the playing area the estimate has to be before the ball
+    #: counts as having left play, rather than sitting on the line.
+    OUT_MARGIN = 30.0
+
     def __init__(self) -> None:
         self.x = 0.0
         self.z = 0.0
         self.vx = 0.0
         self.vz = 0.0
+        #: Where the ball was last actually measured, not carried forward.
+        self.seen_x = 0.0
+        self.seen_z = 0.0
         self.age = 99.0
         self._clock: float | None = None
         self._have = False
@@ -599,6 +620,42 @@ class BallTracker:
     def fresh(self) -> bool:
         """Whether the ball was actually measured within the last few ticks."""
         return self._have and self.age < 0.12
+
+    @property
+    def gone_out(self) -> bool:
+        """Whether the last thing known about the ball is that it left play.
+
+        A ball that goes out comes back on a neutral point (rule 5.9.2), and
+        somebody has to walk it there: for those seconds there is nothing on
+        the field to sense. An estimate still sliding away past the line is
+        not a ball worth chasing - it is the ball on its way to a referee's
+        hand, and a robot that follows it drives itself out of bounds.
+
+        A ball in the goal mouth is not out. That one is a goal.
+        """
+        if not self._have or self.fresh:
+            return False
+        return left_play(self.x, self.z, self.OUT_MARGIN)
+
+    @property
+    def in_play(self) -> bool:
+        """Recent enough to act on, and not a ball that has already left play."""
+        return self.seen and not self.gone_out
+
+    def likely_return(self) -> tuple[float, float]:
+        """The neutral point the ball will most likely be put back on.
+
+        Rules 5.6.2 and 5.9.2 both send it to the neutral point nearest where
+        it was, so the last real sighting is the best guess going - and the
+        centre spot when there has not been one. It can be wrong: a repeated
+        lack of progress goes to the centre, and an occupied point is skipped.
+        """
+        if not self._have:
+            return 0.0, 0.0
+        return min(
+            NEUTRAL_POINTS,
+            key=lambda p: math.hypot(p[0] - self.seen_x, p[1] - self.seen_z),
+        )
 
     def update(self, s, heading: float, me_x: float, me_z: float) -> None:
         clock = s.clock
@@ -641,6 +698,7 @@ class BallTracker:
         mx = me_x + math.cos(bearing) * distance
         mz = me_z + math.sin(bearing) * distance
 
+        self.seen_x, self.seen_z = mx, mz
         if not self._have:
             self.x, self.z, self.vx, self.vz = mx, mz, 0.0, 0.0
             self._have = True

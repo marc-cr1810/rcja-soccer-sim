@@ -9,7 +9,9 @@
     "./field": "./src/field.ts",
     "./view": "./src/view.ts",
     "./renderer": "./src/renderer.ts",
-    "./robot-model": "./src/robot-model.ts"
+    "./robot-model": "./src/robot-model.ts",
+    "./playout": "./src/playout.ts",
+    "./follow-camera": "./src/follow-camera.ts"
   },
   "dependencies": {
     "three": "^0.169.0"

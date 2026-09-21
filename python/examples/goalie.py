@@ -21,13 +21,15 @@ about as often as it clears it. The kick is gated on where the ball would
 actually end up, and the clearance is aimed at the wing with more room in it
 rather than straight back down the middle at the striker who just shot.
 
-**A clearance is a pass, when the striker is somewhere worth passing to.**
-Rule 4.2.5 gives every robot a radio, and the striker's own position is on it
-just as much as the ball is - so before falling back to "whichever wing has
-room", the keeper checks whether the striker has called in from further up
-the field with a clean line to it. Finding the ball again from a random point
-on a wing costs a striker several seconds it does not lose when the clearance
-lands at its feet.
+**A clearance is not a pass.** This keeper used to hold the ball until the
+striker called in open, then aim at it. Measured, it was worth nothing: over
+50 matches against the identical keeper that only ever clears, 95-96 in
+goals, the sign flipping with the ends. The striker was rarely ready in time,
+the kick has to land within 140 mm of it from most of a metre away, and every
+tick spent waiting is a tick an opponent spends closing in. Nor did the
+gentler version pay - clearing at once and radioing where, so the striker
+could stand beside the line and let the ball run past it towards their goal
+(85-93, noise). Neither can: the keeper has the ball for about 0.3% of a match.
 
 **Knowing when it has been picked up.** A 5.7.1.6 return or a 5.11 reposition
 teleports the robot without a word of warning in the protocol - one tick it
@@ -55,12 +57,9 @@ from rcja_soccer import (
     clamp,
     coast,
     drive,
-    pass_is_open,
     relay_ball,
     relay_position,
     teammate_ball,
-    teammate_position,
-    teammate_says,
     teleported,
     wrap_angle,
 )
@@ -145,12 +144,6 @@ KICKOFF_SETTLE = 0.35
 #: three seconds `board.py` uses for the start button, kept here because a
 #: restart this robot noticed for itself has to be timed by the same clock.
 KICKOFF_WINDOW = 3.0
-
-#: How long the keeper will hold the ball waiting for the striker to get open,
-#: in ticks of a 50 Hz loop. About a second and a half: long enough for a
-#: striker most of the way across its own half to arrive and turn, short enough
-#: that the scrum clock in 5.6.1.2 rarely gets started.
-PASS_PATIENCE = 75
 
 #: How far off the goal line to guard. Far enough forward to cut the angle down
 #: and to keep clear of rule 5.7.1.2's goal area, which starts at 915 mm; close
@@ -275,7 +268,9 @@ def think(s, me):
             dribbler=0.0,
         )
 
-    if not ball.seen:
+    # A ball last seen leaving the field is on its way to a neutral point in
+    # somebody's hand, not a ball to go and clear.
+    if not ball.in_play:
         # The team mate can often still see it - the commonest way this
         # keeper loses the ball is the striker standing between it and the
         # ring. Shadow the side of the goal it reported rather than sitting
@@ -302,38 +297,12 @@ def think(s, me):
     # ball out over a touchline — with nobody at home. Stay on the guard line
     # and let the kicker do the travelling.
     if holding:
-        # An outlet is worth aiming at only if it is a genuine advance - a
-        # sideways or backward "pass" just hands the striker's own problem
-        # back to it - and `pass_is_open` re-checks the current heading every
-        # tick the same way the wing clearance's `safe` does below.
-        outlet = teammate_position(s)
-        passing = outlet is not None and frame.depth(*outlet) > frame.depth(me_x, me_z) + 250.0
-
-        # A pass wants a RECEIVER, not merely a team mate who happens to be up
-        # the field. The striker says `ready` once it is both somewhere useful
-        # and facing this way, and until it does the ball is held.
-        #
-        # Not indefinitely. Holding the ball is not itself a lack-of-progress
-        # call - rule 5.6.1.1 wants the nearest robot 400 mm away and a keeper
-        # with the ball is at zero, and 5.6.1.2 wants robots from BOTH teams on
-        # it. That second one is the way this bites: a keeper sitting on the
-        # ball invites an opponent over, and the moment one is touching it too
-        # the four-second scrum clock starts. Measured, waiting costs about 0.2
-        # extra calls a match. So when the patience runs out this goes back to
-        # being an ordinary clearance.
-        mate_ready = bool(teammate_says(s, "ready", False))
-        waited = me.get("pass_wait", 0) + 1 if passing else 0
-        me.pass_wait = waited
-        if passing and not mate_ready and waited > PASS_PATIENCE:
-            passing = False
-
-        if passing:
-            aim = math.atan2(outlet[1] - me_z, outlet[0] - me_x)
-            safe = pass_is_open(s, heading, me_x, me_z, *outlet) and mate_ready
-        else:
-            aim = clearance_heading(me_x, me_z, frame.up_x, frame.up_z)
-            blocker = obstacle_range(s, heading, me_x, me_z)
-            safe = clear_is_safe(bx, bz, heading) and (blocker is None or blocker > 380.0)
+        # Fire the moment the heading is safe, and turn towards the wing
+        # until it is. There is no waiting for the striker - see the module
+        # docstring for what that was measured to be worth.
+        aim = clearance_heading(me_x, me_z, frame.up_x, frame.up_z)
+        blocker = obstacle_range(s, heading, me_x, me_z)
+        safe = clear_is_safe(bx, bz, heading) and (blocker is None or blocker > 380.0)
         error = wrap_angle(aim - heading)
 
         # Drift back towards the guard spot while turning, so a clearance that
@@ -355,10 +324,7 @@ def think(s, me):
             heading=heading,
             attack_x=frame.up_x,
         )
-        if passing:
-            state = "PASS" if safe else "TURN_TO_PASS"
-        else:
-            state = "CLEAR" if safe else "TURN_TO_CLEAR"
+        state = "CLEAR" if safe else "TURN_TO_CLEAR"
         say(me, state)
         return motors(
             drive(
@@ -443,7 +409,7 @@ def report(
         "role": "goalie",
         "ball": (
             relay_ball(ball.x, ball.z, locator.confidence)
-            if ball.seen
+            if ball.in_play
             else None
         ),
         "pos": relay_position(me_x, me_z, locator.confidence),

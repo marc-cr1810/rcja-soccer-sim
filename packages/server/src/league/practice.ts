@@ -118,6 +118,8 @@ export interface SeatState {
 export interface PracticeState {
   running: boolean;
   resolve: ResolveMode;
+  /** False while the ball has been taken off this field. See `setBall`. */
+  ballOnField: boolean;
   clock: number;
   score: Record<TeamId, number>;
   arrangement: Arrangement;

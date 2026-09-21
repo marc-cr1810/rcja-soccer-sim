@@ -627,8 +627,8 @@ export function loadSettings(dataDir: string, overrides: Partial<Flags> = {}): L
     if (parsedTeams.length > 0) {
       settings.demo.teams = parsedTeams;
       set('demo.teams', true);
-      const first = parsedTeams[0];
-      const second = parsedTeams.length > 1 ? parsedTeams[1] : first;
+      const first = parsedTeams[0]!;
+      const second = parsedTeams[1] ?? first;
       settings.demo.home = typeof first === 'string' ? first : (first.name ?? 'Violet');
       if (typeof first === 'object' && first.bots) settings.demo.homeBots = first.bots;
       settings.demo.away = typeof second === 'string' ? second : (second.name ?? 'Lime');
@@ -741,8 +741,8 @@ function applyFlags(
   take(flags.demoTeams, 'demo.teams', (v) => {
     settings.demo.teams = v;
     if (v.length > 0) {
-      const first = v[0];
-      const second = v.length > 1 ? v[1] : first;
+      const first = v[0]!;
+      const second = v[1] ?? first;
       settings.demo.home = typeof first === 'string' ? first : (first.name ?? 'Violet');
       if (typeof first === 'object' && first.bots) settings.demo.homeBots = first.bots;
       settings.demo.away = typeof second === 'string' ? second : (second.name ?? 'Lime');

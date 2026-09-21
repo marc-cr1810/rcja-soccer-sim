@@ -856,8 +856,8 @@ export class DemoArena {
 
     if (this.teamPool) {
       const submissionsDir = opts.submissionsDir ?? server.submissionsDirectory;
-      const t0 = this.normalizeTeam(this.teamPool[0], submissionsDir);
-      const t1 = this.teamPool.length > 1 ? this.normalizeTeam(this.teamPool[1], submissionsDir) : t0;
+      const t0 = this.normalizeTeam(this.teamPool[0]!, submissionsDir);
+      const t1 = this.teamPool.length > 1 ? this.normalizeTeam(this.teamPool[1]!, submissionsDir) : t0;
       this.currentTeams = {
         violet: t0.name ?? 'Violet',
         lime: t1.name ?? (this.teamPool.length > 1 ? 'Lime' : (t0.name ?? 'Violet')),
@@ -1057,7 +1057,7 @@ export class DemoArena {
 
         if (this.teamPool.length === 1) {
           // If it's just one team it would just vs itself
-          const only = this.normalizeTeam(this.teamPool[0], submissionsDir);
+          const only = this.normalizeTeam(this.teamPool[0]!, submissionsDir);
           teamViolet = only;
           teamLime = only;
         } else {
@@ -1065,8 +1065,8 @@ export class DemoArena {
           const i = Math.floor(Math.random() * this.teamPool.length);
           let j = Math.floor(Math.random() * (this.teamPool.length - 1));
           if (j >= i) j++;
-          teamViolet = this.normalizeTeam(this.teamPool[i], submissionsDir);
-          teamLime = this.normalizeTeam(this.teamPool[j], submissionsDir);
+          teamViolet = this.normalizeTeam(this.teamPool[i]!, submissionsDir);
+          teamLime = this.normalizeTeam(this.teamPool[j]!, submissionsDir);
         }
 
         if (this.opts.randomSides && Math.random() < 0.5) {

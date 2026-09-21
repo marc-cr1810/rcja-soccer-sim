@@ -603,10 +603,11 @@ async function demoArena(flags: Map<string, string>): Promise<void> {
   });
 
   const port = await server.listen();
-  if (teamList && teamList.length > 0) {
+  const onlyTeam = teamList?.[0];
+  if (teamList && onlyTeam !== undefined) {
     const listDesc =
       teamList.length === 1
-        ? `${typeof teamList[0] === 'string' ? teamList[0] : (teamList[0].name ?? 'Violet')} vs itself`
+        ? `${typeof onlyTeam === 'string' ? onlyTeam : (onlyTeam.name ?? 'Violet')} vs itself`
         : `${teamList.length} teams`;
     console.log(`\n  demo arena playing ${listDesc} forever`);
   } else {
@@ -2593,10 +2594,8 @@ async function arenasCommand(flags: Map<string, string>, args: string[]): Promis
 }
 
 /** Budget and demo settings given on the command line, for this run only. */
-function budgetFlags(
-  flags: Map<string, string>,
-): Record<string, number | string | boolean | null> {
-  const out: Record<string, number | string | boolean | null> = {};
+function budgetFlags(flags: Map<string, string>): Partial<import('./settings').Flags> {
+  const out: Partial<import('./settings').Flags> = {};
   if (flags.has('arenas-max')) out.arenasMax = num(flags, 'arenas-max', 0);
   if (flags.has('concurrent-fixtures')) out.concurrentFixtures = num(flags, 'concurrent-fixtures', 0);
   if (flags.has('seat-cpu')) out.seatCpuPercent = num(flags, 'seat-cpu', 0);

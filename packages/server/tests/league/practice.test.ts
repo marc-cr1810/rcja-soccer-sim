@@ -315,3 +315,54 @@ describe('a field that is given back', () => {
     }
   }, 20_000);
 });
+
+describe('a field with the ball taken away', () => {
+  it('has no ball through every restage until it is put back where the situation has it', async () => {
+    const session = await field();
+    session.place('ball', { x: 250, z: -80 });
+    session.setBall(false);
+    expect(session.state().ballOnField).toBe(false);
+    expect(session.match.snapshot().ball.absent).toBe(true);
+
+    session.restage();
+    run(session, 1);
+    expect(session.match.world.ballInPlay).toBe(false);
+    // Nothing on the field to drag.
+    session.place('ball', { x: 0, z: 0 });
+    expect(session.match.world.ballInPlay).toBe(false);
+
+    session.setBall(true);
+    expect(session.state().ballOnField).toBe(true);
+    expect(session.match.world.ball.x).toBe(250);
+    expect(session.match.world.ball.z).toBe(-80);
+  });
+
+  it('is remembered in the field file, and a file without the key has a ball', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'rcja-field-'));
+    const path = join(dir, 'field.json');
+    try {
+      const server = new MatchServer({ port: 0 });
+      servers.push(server);
+      await server.listen();
+
+      const session = new PracticeSession(server, { submissionsDir: 'submissions', fieldStatePath: path });
+      session.setBall(false);
+      await new Promise((done) => setTimeout(done, 2_400));
+      const saved = JSON.parse(await readFile(path, 'utf8')) as { ballOnField?: boolean };
+      expect(saved.ballOnField).toBe(false);
+
+      const reopened = new PracticeSession(server, { submissionsDir: 'submissions', fieldStatePath: path });
+      expect(reopened.state().ballOnField).toBe(false);
+      reopened.close();
+      session.close();
+
+      // Every field saved before the toggle existed.
+      await writeFile(path, JSON.stringify({ arrangement: saved as unknown as object }));
+      const older = new PracticeSession(server, { submissionsDir: 'submissions', fieldStatePath: path });
+      expect(older.state().ballOnField).toBe(true);
+      older.close();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+});

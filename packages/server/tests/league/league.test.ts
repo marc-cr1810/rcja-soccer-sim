@@ -450,7 +450,7 @@ describe('a demo arena on a league server', () => {
       tournamentsDir: join(dataDir, 'tournaments'),
       world: { realtime: false, submissionsDir, workspacesDir, pythonLibDir: PYTHON_LIB_DIR },
       settings: {
-        demo: { on: true, bots: 'reference', home: 'Violet', away: 'Lime', halfSeconds: 2, league: null, gapSeconds: 0 },
+        demo: { on: true, bots: 'reference', teams: ['Violet', 'Lime'], home: 'Violet', away: 'Lime', halfSeconds: 2, league: null, gapSeconds: 0 },
       },
     });
     servers.push(server);

@@ -19,6 +19,7 @@
 import { FieldRenderer } from '@rcja/shared/renderer';
 import type { League } from '@rcja/shared/leagues';
 import { applyViewDelta, type ViewFrame, type ViewMessage } from '@rcja/shared/view';
+import { Playout } from '@rcja/shared/playout';
 
 const TOKEN_KEY = 'rcja-referee-token';
 
@@ -69,42 +70,15 @@ let renderer: FieldRenderer | null = null;
 let league: League | null = null;
 let halfSeconds = 300;
 
-/** Same interpolation as the spectator viewer. Kept as a small, separate copy — see the header note. */
-let previous: ViewFrame | null = null;
+/**
+ * Every frame from the stream goes into the playout buffer, which draws them
+ * back smoothly a moment behind (see @rcja/shared/playout). `latest` is the
+ * newest frame as received, for everything that is not the field itself.
+ */
+const playout = new Playout();
 let latest: ViewFrame | null = null;
-let previousAt = 0;
-let latestAt = 0;
-
-function lerp(a: number, b: number, t: number): number {
-  return a + (b - a) * t;
-}
-
-function lerpAngle(a: number, b: number, t: number): number {
-  let d = b - a;
-  while (d > Math.PI) d -= 2 * Math.PI;
-  while (d < -Math.PI) d += 2 * Math.PI;
-  return a + d * t;
-}
-
-function blend(from: ViewFrame, to: ViewFrame, t: number): ViewFrame {
-  const byId = new Map(from.robots.map((r) => [r.id, r]));
-  return {
-    ...to,
-    ball: {
-      ...to.ball,
-      // A ball that has just been put down arrives where it was put, rather
-      // than gliding there from wherever it was picked up.
-      x: from.ball.absent ? to.ball.x : lerp(from.ball.x, to.ball.x, t),
-      z: from.ball.absent ? to.ball.z : lerp(from.ball.z, to.ball.z, t),
-      y: to.ball.y === undefined ? undefined : lerp(from.ball.y ?? 0, to.ball.y, t),
-    },
-    robots: to.robots.map((r) => {
-      const was = byId.get(r.id);
-      if (!was) return r;
-      return { ...r, x: lerp(was.x, r.x, t), z: lerp(was.z, r.z, t), heading: lerpAngle(was.heading, r.heading, t) };
-    }),
-  };
-}
+/** When the last screen frame was drawn, so the renderer is told the real time between them. */
+let lastDrawAt: number | null = null;
 
 function formatClock(seconds: number, half: number): string {
   const into = Math.max(0, seconds - (half - 1) * halfSeconds);
@@ -341,13 +315,10 @@ function draw(): void {
   requestAnimationFrame(draw);
   if (!renderer || !latest) return;
 
-  let frame = latest;
-  if (previous && latestAt > previousAt) {
-    const span = latestAt - previousAt;
-    const t = Math.min(1, (performance.now() - latestAt) / span);
-    frame = blend(previous, latest, t);
-  }
-  renderer.render(frame, 1 / 60);
+  const now = performance.now() / 1000;
+  const dt = lastDrawAt === null ? 1 / 60 : now - lastDrawAt;
+  lastDrawAt = now;
+  renderer.render(playout.sample(now) ?? latest, dt);
   updateBoard(latest);
   updateStandDown(latest);
   updateKickoff(latest);
@@ -371,16 +342,12 @@ function receive(message: ViewMessage): void {
     return;
   }
   if (message.type === 'frame') {
-    previous = latest;
-    previousAt = latestAt;
     latest = message.frame;
-    latestAt = performance.now();
+    playout.push(latest);
   } else if (message.type === 'delta') {
     if (!latest) return;
-    previous = latest;
-    previousAt = latestAt;
     latest = applyViewDelta(latest, message.delta);
-    latestAt = performance.now();
+    playout.push(latest);
   }
 }
 

@@ -63,6 +63,15 @@ takes the field as it stands right now to be that situation instead.
 
 **Start** and **Stop** run and freeze play.
 
+**Take the ball away** removes the ball from the field, to see what your robots
+do with nothing to chase: whether they search, hold their places, or wander
+off the field. Nothing on the field can sense it. It stays away through every
+**Put it back** and every restart until you press **Put the ball back**, which
+returns it to where your situation has it, and the field remembers the setting
+if you leave and come back. It is also the fastest way to rehearse what
+happens during a match when the ball has gone out and somebody is still
+walking it to a neutral point.
+
 **When a goal goes in** decides what happens once the situation resolves
 itself — a goal, or the ball leaving the field:
 

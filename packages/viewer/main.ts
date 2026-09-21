@@ -14,6 +14,7 @@
 import { FieldRenderer } from '@rcja/shared/renderer';
 import type { League } from '@rcja/shared/leagues';
 import { applyViewDelta, type ViewFrame, type ViewMessage } from '@rcja/shared/view';
+import { Playout } from '@rcja/shared/playout';
 import type { MatchResult } from '@rcja/server/src/match/match';
 
 const canvas = document.getElementById('field') as HTMLCanvasElement;
@@ -75,54 +76,14 @@ let league: League | null = null;
 let halfSeconds = 300;
 
 /**
- * The most recent frame, and the one before it.
- *
- * Frames arrive 30 times a second and the screen draws 60, so drawing the
- * latest frame twice makes the robots stutter. Interpolating between the last
- * two costs one frame of latency, which nobody watching can perceive, and is
- * the difference between looking like a match and looking like a slideshow.
+ * Every frame from the stream goes into the playout buffer, which draws them
+ * back smoothly a moment behind (see @rcja/shared/playout). `latest` is the
+ * newest frame as received, for everything that is not the field itself.
  */
-let previous: ViewFrame | null = null;
+const playout = new Playout();
 let latest: ViewFrame | null = null;
-let previousAt = 0;
-let latestAt = 0;
-
-function lerp(a: number, b: number, t: number): number {
-  return a + (b - a) * t;
-}
-
-/** Shortest way round the circle, so a robot crossing pi does not spin back. */
-function lerpAngle(a: number, b: number, t: number): number {
-  let d = b - a;
-  while (d > Math.PI) d -= 2 * Math.PI;
-  while (d < -Math.PI) d += 2 * Math.PI;
-  return a + d * t;
-}
-
-function blend(from: ViewFrame, to: ViewFrame, t: number): ViewFrame {
-  const byId = new Map(from.robots.map((r) => [r.id, r]));
-  return {
-    ...to,
-    ball: {
-      ...to.ball,
-      // A ball that has just been put down arrives where it was put, rather
-      // than gliding there from wherever it was picked up.
-      x: from.ball.absent ? to.ball.x : lerp(from.ball.x, to.ball.x, t),
-      z: from.ball.absent ? to.ball.z : lerp(from.ball.z, to.ball.z, t),
-      y: to.ball.y === undefined ? undefined : lerp(from.ball.y ?? 0, to.ball.y, t),
-    },
-    robots: to.robots.map((r) => {
-      const was = byId.get(r.id);
-      if (!was) return r;
-      return {
-        ...r,
-        x: lerp(was.x, r.x, t),
-        z: lerp(was.z, r.z, t),
-        heading: lerpAngle(was.heading, r.heading, t),
-      };
-    }),
-  };
-}
+/** When the last screen frame was drawn, so the renderer is told the real time between them. */
+let lastDrawAt: number | null = null;
 
 function formatClock(seconds: number, half: number): string {
   // Count up within the half, the way a scoreboard in a hall does.
@@ -270,15 +231,10 @@ function draw(): void {
   requestAnimationFrame(draw);
   if (!renderer || !latest) return;
 
-  let frame = latest;
-  if (previous && latestAt > previousAt) {
-    const span = latestAt - previousAt;
-    // Clamped, so a stalled connection freezes the picture rather than
-    // extrapolating robots off the field.
-    const t = Math.min(1, (performance.now() - latestAt) / span);
-    frame = blend(previous, latest, t);
-  }
-  renderer.render(frame, 1 / 60);
+  const now = performance.now() / 1000;
+  const dt = lastDrawAt === null ? 1 / 60 : now - lastDrawAt;
+  lastDrawAt = now;
+  renderer.render(playout.sample(now) ?? latest, dt);
   updateBoard(latest);
   updateStandDown(latest);
   updateKickoff(latest);
@@ -339,15 +295,13 @@ function receive(message: ViewMessage): void {
   }
 
   if (message.type === 'frame' || message.type === 'delta') {
-    previous = latest;
-    previousAt = latestAt;
     if (message.type === 'frame') {
       latest = message.frame;
     } else {
       if (!latest) return;
       latest = applyViewDelta(latest, message.delta);
     }
-    latestAt = performance.now();
+    playout.push(latest);
 
     // If a new match has started (or pre-match of half 1), ensure summary modal is hidden
     if (!summaryModal.hidden && latest.half === 1 && (latest.running || latest.clock < 1)) {

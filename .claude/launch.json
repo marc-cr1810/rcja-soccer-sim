@@ -4,8 +4,29 @@
     {
       "name": "workspace",
       "runtimeExecutable": "bun",
-      "runtimeArgs": ["run", "dev:workspace", "--", "--port", "5180", "--strictPort"],
+      "runtimeArgs": [
+        "run",
+        "dev:workspace",
+        "--",
+        "--port",
+        "5180",
+        "--strictPort"
+      ],
       "port": 5180
+    },
+    {
+      "name": "practice-field",
+      "runtimeExecutable": "bun",
+      "runtimeArgs": [
+        "packages/server/src/infra/cli.ts",
+        "practice",
+        "--port",
+        "8091",
+        "--field-state",
+        "/tmp/claude-1000/-home-marc-programming-typescript-rcja-soccer-sim/cd6c3628-b9e8-4463-9513-ad2277ae68f7/scratchpad/field.json"
+      ],
+      "port": 8091,
+      "url": "http://localhost:8091"
     }
   ]
 }

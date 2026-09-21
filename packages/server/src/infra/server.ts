@@ -505,7 +505,7 @@ export class MatchServer {
         teams: this.current.teams,
         halfSeconds: this.current.halfLength,
       });
-      this.sendToViewer(ws, { type: 'frame', frame: this.current.snapshot() });
+      this.sendToViewer(ws, { type: 'frame', frame: { ...this.current.snapshot(), t: this.lastViewStamp } });
       if (this.lastResult) {
         this.sendToViewer(ws, { type: 'summary', result: this.lastResult, nextMatchIn: this.lastNextMatchIn });
       }
@@ -534,10 +534,23 @@ export class MatchServer {
 
   private lastBroadcastSnapshot: ViewFrame | null = null;
   private broadcastTickCount = 0;
+  /** The stamp on the last frame sent, so a viewer joining mid-stream starts in step with it. */
+  private lastViewStamp = performance.now() / 1000;
 
-  private broadcastFrame(match: Match): void {
+  /**
+   * Send the world as it stands to every viewer.
+   *
+   * `owed` is the wall-clock time the loop has banked but not yet stepped:
+   * the world is that far behind now, so that is what the frame is stamped
+   * with. It is what lets a viewer undo the loop's lumpiness - three physics
+   * steps one tick, four the next - rather than drawing it.
+   */
+  private broadcastFrame(match: Match, owed = 0): void {
+    // Stamped even with nobody watching, so the first viewer to join starts
+    // from a time the next frame will follow.
+    this.lastViewStamp = Math.max(this.lastViewStamp, performance.now() / 1000 - owed);
     if (this.viewers.size === 0) return;
-    const snapshot = match.snapshot();
+    const snapshot: ViewFrame = { ...match.snapshot(), t: this.lastViewStamp };
     this.broadcastTickCount++;
 
     if (!this.lastBroadcastSnapshot || this.broadcastTickCount % 30 === 0) {
@@ -560,6 +573,7 @@ export class MatchServer {
     });
 
     const delta: ViewDeltaFrame = {
+      t: snapshot.t,
       clock: snapshot.clock,
       ball: {
         x: snapshot.ball.x,
@@ -927,7 +941,7 @@ export class MatchServer {
         // to stand still, and counting it would read as the machine falling
         // behind when it is doing exactly what it was told.
         if (match.world.running) this.fidelity.advance(match.world.clock - was, wall);
-        this.broadcastFrame(match);
+        this.broadcastFrame(match, owed);
       }
       match.world.running = false;
       this.broadcastFrame(match);
@@ -1056,7 +1070,7 @@ export class MatchServer {
         if (this.realtime && match.world.running) {
           this.fidelity.advance(match.world.clock - was, refereedWall);
         }
-        this.broadcastFrame(match);
+        this.broadcastFrame(match, owed);
       }
       match.world.running = false;
       this.broadcastFrame(match);
@@ -1235,7 +1249,7 @@ export class MatchServer {
         session.match.poll(Math.min(owed, wall));
         owed = 0;
       }
-      this.broadcastFrame(session.match);
+      this.broadcastFrame(session.match, owed);
     }
   }
 

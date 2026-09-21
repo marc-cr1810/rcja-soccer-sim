@@ -231,6 +231,17 @@ export interface HalfTime {
  * to be bad.
  */
 export interface ViewFrame {
+  /**
+   * When this picture of the world was true, in the server's own seconds.
+   *
+   * Not the match clock, which stops at every whistle, and not when the frame
+   * was sent: the server steps its physics in whole steps per timer tick, so
+   * two frames 33 ms apart on the wire can be 30 or 40 ms apart on the field.
+   * A viewer that plays frames back against this, rather than against when
+   * they happened to arrive, moves things at the speed they actually moved.
+   * Monotonic within one server process; absent from an older server.
+   */
+  t?: number;
   /** Seconds into the match. */
   clock: number;
   half: 1 | 2;
@@ -284,6 +295,7 @@ export interface ViewDeltaRobot {
 }
 
 export interface ViewDeltaFrame {
+  t?: number;
   clock: number;
   /** `absent` only when it changed; a missing key keeps the last one. */
   ball: { x: number; z: number; y?: number; absent?: boolean };
@@ -329,6 +341,7 @@ export function applyViewDelta(current: ViewFrame, d: ViewDeltaFrame): ViewFrame
   });
   return {
     ...current,
+    ...(d.t === undefined ? {} : { t: d.t }),
     clock: d.clock,
     ball: {
       ...current.ball,

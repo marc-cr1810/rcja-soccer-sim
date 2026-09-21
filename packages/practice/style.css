@@ -181,6 +181,14 @@ html, body {
   background: rgba(111, 211, 154, 0.12);
 }
 
+/* The ball switched off is a state the field is in, not a button to press once:
+   it has to be obvious from across the room that there is no ball on purpose. */
+#ball-toggle.on {
+  border-color: var(--bad);
+  color: var(--bad);
+  background: rgba(226, 84, 74, 0.12);
+}
+
 .seats { display: flex; flex-direction: column; gap: 0.55rem; }
 .seat {
   display: flex;

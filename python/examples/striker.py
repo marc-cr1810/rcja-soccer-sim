@@ -90,6 +90,7 @@ from rcja_soccer.sense import (
     Locator,
     WheelEffort,
     back_inside,
+    left_play,
     obstacle_range,
     spin_towards,
     steer_ball_inside,
@@ -175,15 +176,6 @@ AIM_POST = 155.0
 #: it is screening an empty net. The posts are at 225 mm, so anything wider is
 #: a robot watching the shot go past it rather than standing in the way.
 POST_SCREEN = 190.0
-
-#: Where a striker stands to take a pass from its own keeper.
-#:
-#: Far enough up the field that the keeper will actually play it - the keeper
-#: refuses any outlet that is not a genuine advance - clear of our own penalty
-#: box so rule 5.11 never enters into it, and out on a wing, because a ball
-#: played up the middle is played through everybody.
-RECEIVE_DEPTH = PENALTY_DEPTH + 520.0
-RECEIVE_WING = HALF_WIDTH * 0.55
 
 #: How far up the field counts as "deep in our own end" for a backpass - the
 #: same scale `choose_aim` uses for "too central to have a wing of its own",
@@ -358,31 +350,40 @@ def think(s, me):
             dribbler=1.0,
         )
 
-    # -- our keeper wants to pass -------------------------------------------
-    # It announces the pass on the radio and nothing was listening, so the
-    # keeper aimed at a robot busy orbiting the ball the keeper was holding.
-    if (
-        not holding
-        and teammate_is_keeping(s)
-        and teammate_says(s, "held", False)
-        and teammate_says(s, "intent") in ("PASS", "TURN_TO_PASS")
-    ):
-        return receive(s, me, me_x, me_z, heading, yaw, frame)
-
     # -- no ball ------------------------------------------------------------
-    if not ball.seen:
+    # Not seen, or last seen leaving the field - which is the same thing, a
+    # moment early. A ball that has gone out, or been called for lack of
+    # progress, is in a referee's hand on its way to a neutral point (5.6.2,
+    # 5.9.2): chasing the last estimate of it drives the robot out of bounds
+    # after something that is no longer there.
+    if not ball.in_play:
         told = teammate_ball(s)
+        if told is not None and left_play(*told):
+            # The team mate is still remembering the same ball leaving.
+            told = None
         if told is None:
-            # Fall back towards the middle of our own half, facing up the
-            # field, which is where the ball will most likely reappear and
-            # where being wrong costs least.
-            home_x, home_z = frame.from_our_goal(HALF_LENGTH * 0.65)
+            # Wait where the ball is most likely to come back, on our side of
+            # it, facing up the field: behind the neutral point nearest where
+            # it was last seen. When it is put down this robot is already on
+            # the line through it to their goal, which is the spot the approach
+            # would have spent the next second driving to.
+            spot_x, spot_z = ball.likely_return()
+            _, lateral = frame.to_frame(spot_x, spot_z)
+            home_x, home_z = frame.from_frame(-APPROACH_STANDOFF, lateral)
+            gap = math.hypot(home_x - me_x, home_z - me_z)
             travel = wrap_angle(math.atan2(home_z - me_z, home_x - me_x) - heading)
-            say(me, "SEARCH")
+            say(me, "WAIT_FOR_BALL")
             return motors(
-                drive(bearing=travel, speed=0.55, spin=spin_towards(wrap_angle(frame.up_angle() - heading), yaw)),
+                drive(
+                    bearing=travel,
+                    # Ease in rather than overshoot onto the point itself: a
+                    # robot standing on a neutral point sends the ball to
+                    # another one.
+                    speed=clamp(gap / 300.0, 0.0, 0.6),
+                    spin=spin_towards(wrap_angle(frame.up_angle() - heading), yaw),
+                ),
                 dribbler=1.0,
-                say=report("SEARCH", me_x, me_z, held=False),
+                say=report("WAIT_FOR_BALL", me_x, me_z, held=False),
             )
         bx, bz = told
     else:
@@ -633,7 +634,6 @@ def report(
     me_z: float,
     held: bool,
     claim: float | None = None,
-    ready: bool = False,
 ) -> dict:
     """What this robot puts on the radio (rule 4.2.5).
 
@@ -643,8 +643,9 @@ def report(
     - **What it can see.** The ball - only first-hand sightings, because
       relaying back what the other robot just told us would turn one stale
       reading into a loop of them.
-    - **Where it is.** For aiming a pass at the robot rather than at its last
-      ball sighting.
+    - **Where it is.** Nothing on this team reads it any more - the keeper
+      stopped passing - but it is the one fact a team mate cannot get any
+      other way, so it stays on the wire.
     - **What it is doing.** `intent` and `claim` - the state it is in and how
       far it is from the ball. Position says where a robot is; those two say
       what it is about to do about it, which is the thing the other robot cannot
@@ -654,69 +655,14 @@ def report(
         "role": "striker",
         "ball": (
             relay_ball(ball.x, ball.z, locator.confidence)
-            if ball.seen
+            if ball.in_play
             else None
         ),
         "pos": relay_position(me_x, me_z, locator.confidence),
         "held": held,
         "intent": intent,
         "claim": round(claim) if claim is not None else None,
-        "ready": ready,
     }
-
-
-def receive(s, me, me_x, me_z, heading, yaw, frame):
-    """Get open for the keeper's pass, and say so once we are.
-
-    The keeper aims its outlet at wherever this robot happens to be standing.
-    Until now that was usually a robot orbiting the very ball the keeper was
-    holding, so the pass went into the keeper's own feet or straight to an
-    opponent. A pass nobody is waiting for is a giveaway with extra steps.
-
-    Two things have to be true before it is worth playing, and the keeper can
-    see neither for itself: this robot has to be somewhere useful, and it has
-    to be *facing* the keeper, because a dribbler only catches what arrives in
-    front of it. `ready` says both, and the keeper holds until it hears it.
-    """
-    keeper = teammate_position(s)
-
-    # Up the field from our own goal, out on the wing this robot is already
-    # nearer. The tie-break comes from the frame rather than a fixed sign, so
-    # the two ends of the field stay the same game.
-    # `back_inside` and not `keep_inside`: the two sit next to each other and
-    # take the same arguments, but one returns a point and the other returns a
-    # *push vector* that is zero anywhere but the edge. This wanted the point,
-    # took the push, and got (0, 0) every time the spot was comfortably inside
-    # the field - which is every time. The receiver drove to the centre circle
-    # instead of the wing, took seconds to get there, and the keeper's patience
-    # ran out first.
-    cx, cz = frame.from_our_goal(RECEIVE_DEPTH)
-    wing = math.copysign(RECEIVE_WING, me_z if abs(me_z) > 60 else frame.up_x)
-    spot_x, spot_z = back_inside(cx - frame.up_z * wing, cz + frame.up_x * wing, 200.0)
-
-    gap = math.hypot(spot_x - me_x, spot_z - me_z)
-    travel = math.atan2(spot_z - me_z, spot_x - me_x)
-
-    # Face the keeper, not the spot being driven to: the ball arrives from the
-    # keeper, and a dribbler pointing anywhere else will not take it.
-    face = (
-        math.atan2(keeper[1] - me_z, keeper[0] - me_x)
-        if keeper is not None
-        else wrap_angle(frame.up_angle() + math.pi)
-    )
-    error = wrap_angle(face - heading)
-    ready = gap < 150.0 and abs(error) < 0.35
-
-    say(me, "RECEIVE")
-    return motors(
-        drive(
-            bearing=wrap_angle(travel - heading),
-            speed=0.0 if gap < 70.0 else clamp(gap / 260.0, 0.3, 1.0),
-            spin=spin_towards(error, yaw),
-        ),
-        dribbler=1.0,
-        say=report("RECEIVE", me_x, me_z, held=False, ready=ready),
-    )
 
 
 def leave_room_for_the_keeper(
