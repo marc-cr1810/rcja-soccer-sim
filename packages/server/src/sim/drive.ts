@@ -35,9 +35,27 @@ export interface MotorSpec {
   /**
    * Surface speed at full power under no load, mm/s. A motor at speed makes
    * less force; at free speed it makes none. This is what stops a robot
-   * accelerating forever, and it is the only braking in the model.
+   * accelerating forever, and the main braking in the model.
    */
   freeSpeed: number;
+  /**
+   * Friction in the gearbox, as a force at the wheel, g·mm/s².
+   *
+   * This is what lets a robot stand its ground. Back-EMF brakes in proportion
+   * to speed, so on its own any knock at all moves the robot, and a small one
+   * leaves it creeping for a hand's width. A geared motor does not do that:
+   * it will not back-drive until pushed past a threshold.
+   *
+   * The same friction is also a deadband, because the motor has to overcome
+   * it before the robot moves: below gearFriction / (stallForce +
+   * gearFriction) power a robot at rest stays at rest. Real teams meet this
+   * the first time they try to creep up on the ball.
+   *
+   * `stallForce` and `freeSpeed` stay what they would be on a test bench, net
+   * of this friction, so adding it changes neither top speed nor the pull from
+   * a standstill.
+   */
+  gearFriction: number;
 }
 
 export interface DriveSpec {
@@ -51,6 +69,14 @@ export interface DriveSpec {
    * harder to spin up and stop.
    */
   inertia: number;
+  /**
+   * Coefficient of friction between the wheels and the carpet.
+   *
+   * No wheel can push harder than grip × its share of the robot's weight,
+   * whatever the motor behind it can do. Past that it spins, and the encoder
+   * reads the spinning wheel rather than the ground going past.
+   */
+  grip: number;
 }
 
 /**
@@ -62,9 +88,8 @@ export const MOUNT_RADIUS = 90;
 /**
  * Sizing, for a 2.5 kg Open robot (rule 4.1.1) on four omni wheels.
  *
- * Both numbers are chosen so this drive reproduces the top speed and
- * acceleration the lab's AI was tuned to, which keeps matches feeling the same
- * and lets the lab's reference play be ported without retuning:
+ * The motors were first sized to reproduce the top speed and acceleration the
+ * lab's AI was tuned to:
  *
  *   Peak forward force is 4·S·cos45° = 2.83·S, so for the lab's 9200 mm/s²
  *   at 2500 g:  S = 9200 × 2500 / 2.83 ≈ 8.13e6 g·mm/s².
@@ -72,26 +97,70 @@ export const MOUNT_RADIUS = 90;
  *   Forward motion turns each wheel at v·cos45°, so top speed is √2 × free
  *   speed. For the lab's 1150 mm/s:  freeSpeed = 1150 / √2 ≈ 813 mm/s.
  *
- * There is a pleasing check on this. With the motors idle, back-EMF alone
- * damps the robot at 2·S/(freeSpeed·m) = 2 × 8.13e6 / (813 × 2500) ≈ 8.0 per
- * second — which is exactly the ROBOT_DAMPING the lab arrived at by hand, and
- * for four wheels at 90° spacing it comes out the same in every direction. The
- * artificial damping constant was standing in for a motor all along.
+ * With the motors idle, back-EMF alone damps the robot at 2·S/(freeSpeed·m) =
+ * 2 × 8.13e6 / (813 × 2500) ≈ 8.0 per second — exactly the ROBOT_DAMPING the
+ * lab arrived at by hand, and for four wheels at 90° spacing the same in every
+ * direction. The artificial damping constant was standing in for a motor.
+ *
+ * The 9200 mm/s² is what the motors can do, not what the robot does. Pulling
+ * 0.94 g forward through wheels at 45° needs a grip of 1.33 along each wheel
+ * axis, and omni rollers on carpet manage about half that. So the carpet, not
+ * the motor, sets the launch: see CARPET_GRIP. Top speed is the motor's alone
+ * and stays 1150 mm/s.
  */
 const OPEN_STALL_FORCE = 8.13e6;
 const OPEN_FREE_SPEED = 813;
 
 /**
- * There is deliberately no separate carpet-friction term.
+ * Gearbox friction, sized for a 10% deadband: S/9 makes
+ * gearFriction / (stallForce + gearFriction) exactly a tenth.
  *
- * The first draft had one, and it was double-counting: back-EMF already brakes
- * an unpowered robot at 8 per second, which is the entire damping the lab used
- * for everything. Adding rolling resistance on top only pulled the top speed
- * 5% below the figure this drive is sized to hit. Rolling resistance on carpet
- * is real but it is small next to a geared motor being back-driven, and the
- * model is more honest without a constant standing in for it.
+ * An idle robot bumped to 400 mm/s slides about 30 mm on this instead of the
+ * 49 mm it slid on back-EMF alone, and a gentle nudge barely moves it.
  *
- * Below these thresholds the robot is treated as stopped, matching physics.ts.
+ * This is not the carpet-friction term an earlier draft had and dropped. That
+ * one was rolling resistance added on top of the motor, and it pulled the top
+ * speed 5% under the figure the drive is sized to hit. This one is inside the
+ * motor: stallForce and freeSpeed are the bench figures net of it, so at full
+ * power it changes nothing, and it only shows where a real gearbox shows —
+ * being back-driven, and at low power.
+ */
+const OPEN_GEAR_FRICTION = OPEN_STALL_FORCE / 9;
+
+/**
+ * Rubber omni rollers on RCJ carpet.
+ *
+ * Each wheel carries a quarter of the weight, so at 0.7 no wheel pushes harder
+ * than 0.7 × m·g / 4. The forward launch that allows is
+ * 4 × 0.7 × (m·g/4) × cos45° / m ≈ 4860 mm/s², the same for every weight class
+ * — which a Lightweight robot on Open motors needed, since it used to launch
+ * at 16 m/s² — and a pushing contest is now won with grip and weight rather
+ * than with whichever robot the solver shoved first.
+ */
+export const CARPET_GRIP = 0.7;
+
+/** mm/s². */
+const GRAVITY = 9810;
+
+/**
+ * Below this wheel speed the gearbox is sticking rather than sliding, mm/s.
+ *
+ * Coulomb friction is a step at zero, and a stepped simulation never lands on
+ * zero exactly, so "stopped" has to be a band. Inside it friction balances the
+ * motor instead of opposing the motion. It sits under REST_SPEED × cos45°:
+ * a robot moving faster than REST_SPEED always has at least two wheels outside
+ * the band, so a robot cannot coast along on held wheels.
+ */
+const STICTION_SPEED = 8;
+
+/**
+ * Below these thresholds a braking robot is treated as stopped, matching
+ * physics.ts.
+ *
+ * Only a braking one. Snapping every slow robot to rest also snapped away the
+ * first step of every gentle start: at 100 Hz any power that could not reach
+ * 12 mm/s in one tick never moved the robot at all, a second deadband of about
+ * 13% that nobody chose, which would have sat on top of the gearbox's own.
  */
 const REST_SPEED = 12;
 const REST_YAW = 0.05;
@@ -114,9 +183,10 @@ export function openDrive(): DriveSpec {
       axis,
       stallForce: OPEN_STALL_FORCE,
       freeSpeed: OPEN_FREE_SPEED,
+      gearFriction: OPEN_GEAR_FRICTION,
     });
   }
-  return { motors, inertia: inertiaFor(2500) };
+  return { motors, inertia: inertiaFor(2500), grip: CARPET_GRIP };
 }
 
 /**
@@ -148,6 +218,8 @@ export interface DriveMotion {
   vz: number;
   /** Yaw rate, rad/s, positive turning +x towards +z. */
   omega: number;
+  /** Grams. The wheels grip in proportion to the weight on them. */
+  mass: number;
 }
 
 /**
@@ -156,7 +228,8 @@ export interface DriveMotion {
  * Each wheel is a linear DC motor: the force it makes falls off with how fast
  * its own contact point is already moving along its drive axis, reaching zero
  * at free speed. Drive against the motion and it brakes; that falls out of the
- * same expression rather than needing a separate case.
+ * same expression rather than needing a separate case. Gearbox friction takes
+ * its share off whatever the motor makes, and the carpet caps what is left.
  *
  * Powers outside −1..1 are clamped rather than rejected. A program that asks
  * for 5 gets 1, the same as a motor driver would give it.
@@ -166,7 +239,10 @@ export function driveForces(
   powers: readonly number[],
   motion: DriveMotion,
 ): DriveResult {
-  const { heading, vx, vz, omega } = motion;
+  const { heading, vx, vz, omega, mass } = motion;
+
+  // The most any one wheel can push before it spins or skids.
+  const traction = (spec.grip * mass * GRAVITY) / spec.motors.length;
 
   // Field velocity into the robot frame.
   const cos = Math.cos(heading);
@@ -191,15 +267,26 @@ export function driveForces(
     const ax = Math.cos(m.axis);
     const az = Math.sin(m.axis);
 
-    // How fast the wheel is already rolling along the direction it drives.
+    // How fast the carpet under the wheel is moving along the direction it
+    // drives. While the wheel grips, the wheel turns at exactly this speed.
     const u = px * ax + pz * az;
-    wheelSpeeds.push(u);
 
-    const force = clamp(
-      m.stallForce * (power - u / m.freeSpeed),
-      -m.stallForce,
-      m.stallForce,
-    );
+    // The motor proper, before its own gearbox takes a share. The electrical
+    // stall force is S + friction and the electrical free speed is scaled to
+    // match, which is what keeps the net figures the bench numbers.
+    const peak = m.stallForce + m.gearFriction;
+    const motor = clamp(peak * power - (m.stallForce * u) / m.freeSpeed, -peak, peak);
+    // A wheel that is all but still is held: the gearbox meets the motor
+    // force-for-force up to its limit, so a robot under the deadband stays put
+    // rather than creeping. Once turning, friction is a steady drag.
+    const drag =
+      Math.abs(u) < STICTION_SPEED
+        ? clamp(motor, -m.gearFriction, m.gearFriction)
+        : m.gearFriction * Math.sign(u);
+    const demand = motor - drag;
+
+    const force = clamp(demand, -traction, traction);
+    wheelSpeeds.push(force === demand ? u : slippingWheelSpeed(m, power, force));
 
     const fx = force * ax;
     const fz = force * az;
@@ -216,11 +303,34 @@ export function driveForces(
   };
 }
 
+/**
+ * How fast a wheel turns while it slides on the carpet, mm/s.
+ *
+ * A slipping wheel has come loose from the ground, so its speed is whatever
+ * the motor turns it at against the one force the carpet can still give it:
+ * the speed w where motor(w) − friction(w) equals `force`. A wheel spun up
+ * from a standstill turns faster than the robot moves; a robot shoved harder
+ * than its wheels can hold drags them round slower than it slides. Either way
+ * the encoder is off from the ground, which is the odometry drift teams
+ * actually fight.
+ *
+ * The motor side falls as w rises, so there is at most one answer: try it
+ * turning forwards, then backwards, and if neither is consistent the gearbox
+ * is holding the wheel still while the robot skids over it.
+ */
+function slippingWheelSpeed(m: MotorSpec, power: number, force: number): number {
+  const drive = (m.stallForce + m.gearFriction) * power - force;
+  const forwards = (m.freeSpeed * (drive - m.gearFriction)) / m.stallForce;
+  if (forwards > 0) return forwards;
+  const backwards = (m.freeSpeed * (drive + m.gearFriction)) / m.stallForce;
+  if (backwards < 0) return backwards;
+  return 0;
+}
+
 /** A body the drive can move. Matches the shape of physics.ts's `Body`. */
 export interface DrivenBody extends DriveMotion {
   x: number;
   z: number;
-  mass: number;
 }
 
 /**
@@ -253,11 +363,11 @@ export function stepDrive(
   body.vz += (result.fz / body.mass) * dt;
   body.omega += (result.torque / spec.inertia) * dt;
 
-  if (Math.hypot(body.vx, body.vz) < REST_SPEED) {
+  if (Math.hypot(body.vx, body.vz) < REST_SPEED && result.fx * body.vx + result.fz * body.vz <= 0) {
     body.vx = 0;
     body.vz = 0;
   }
-  if (Math.abs(body.omega) < REST_YAW) body.omega = 0;
+  if (Math.abs(body.omega) < REST_YAW && result.torque * body.omega <= 0) body.omega = 0;
 
   body.heading = wrapAngle(body.heading + body.omega * dt);
 

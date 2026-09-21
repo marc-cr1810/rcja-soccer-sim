@@ -27,6 +27,21 @@
       ],
       "port": 8091,
       "url": "http://localhost:8091"
+    },
+    {
+      "name": "physics-watch",
+      "runtimeExecutable": "bun",
+      "runtimeArgs": [
+        "packages/server/src/infra/cli.ts",
+        "serve",
+        "--port",
+        "8093",
+        "--opponent",
+        "champion",
+        "--seed",
+        "3"
+      ],
+      "port": 8093
     }
   ]
 }

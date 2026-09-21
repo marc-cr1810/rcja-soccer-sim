@@ -6,6 +6,7 @@
  */
 
 import {
+  CARPET_GRIP,
   driveForces,
   inertiaFor,
   mixOmni,
@@ -22,6 +23,15 @@ function body(over: Partial<DrivenBody> = {}): DrivenBody {
   return { x: 0, z: 0, vx: 0, vz: 0, heading: 0, omega: 0, mass: OPEN_MASS, ...over };
 }
 
+/** The same drive with no gearbox friction and a carpet that never lets go. */
+function motorOnly(spec: DriveSpec): DriveSpec {
+  return {
+    ...spec,
+    grip: Infinity,
+    motors: spec.motors.map((m) => ({ ...m, gearFriction: 0 })),
+  };
+}
+
 /** Run a drive to steady state and report where it ended up. */
 function settle(spec: DriveSpec, powers: number[], seconds = 8, b = body()) {
   const steps = Math.round(seconds / DT);
@@ -36,21 +46,50 @@ describe('sizing matches what the comments claim', () => {
     expect(Math.hypot(b.vx, b.vz)).toBeCloseTo(1150, -2);
   });
 
-  it('accelerates from rest at about 9200 mm/s^2', () => {
+  it('launches at about 4860 mm/s^2, which is the carpet and not the motors', () => {
+    // The motors could pull 9200 mm/s^2; grip 0.7 on a quarter of the weight
+    // per wheel allows 4 × 0.7 × g/4 × cos45° of it.
     const spec = openDrive();
     const r = driveForces(spec, mixOmni(spec, 0, 1, 0), {
       heading: 0,
       vx: 0,
       vz: 0,
       omega: 0,
+      mass: OPEN_MASS,
+    });
+    const accel = Math.hypot(r.fx, r.fz) / OPEN_MASS;
+    expect(accel).toBeGreaterThan(4700);
+    expect(accel).toBeLessThan(5000);
+  });
+
+  it('launches a Lightweight robot no harder than an Open one', () => {
+    // Same motors, 1.4 kg instead of 2.5. Without a grip limit this was 16 m/s^2.
+    const spec = openDrive();
+    const launch = (mass: number) => {
+      const r = driveForces(spec, mixOmni(spec, 0, 1, 0), { heading: 0, vx: 0, vz: 0, omega: 0, mass });
+      return Math.hypot(r.fx, r.fz) / mass;
+    };
+    expect(launch(1400)).toBeCloseTo(launch(OPEN_MASS), 0);
+  });
+
+  it('would launch at about 9200 mm/s^2 on a carpet that never let go', () => {
+    const spec = { ...openDrive(), grip: Infinity };
+    const r = driveForces(spec, mixOmni(spec, 0, 1, 0), {
+      heading: 0,
+      vx: 0,
+      vz: 0,
+      omega: 0,
+      mass: OPEN_MASS,
     });
     const accel = Math.hypot(r.fx, r.fz) / OPEN_MASS;
     expect(accel).toBeGreaterThan(8800);
-    expect(accel).toBeLessThan(9600);
+    expect(accel).toBeLessThan(10300);
   });
 
   it('damps at 8 per second on back-EMF alone, in every direction', () => {
-    const spec = openDrive();
+    // Back-EMF with the gearbox and the carpet taken out, which is the figure
+    // the motor sizing is built on.
+    const spec = motorOnly(openDrive());
     // 400 mm/s keeps every wheel well inside its free speed, so this measures
     // the linear part of the motor curve rather than the clamp.
     const speed = 400;
@@ -60,6 +99,7 @@ describe('sizing matches what the comments claim', () => {
         vx: Math.cos(bearing) * speed,
         vz: Math.sin(bearing) * speed,
         omega: 0,
+        mass: OPEN_MASS,
       });
       const rate = Math.hypot(r.fx, r.fz) / OPEN_MASS / speed;
       expect(rate).toBeCloseTo(8, 1);
@@ -67,7 +107,7 @@ describe('sizing matches what the comments claim', () => {
   });
 
   it('cannot brake harder than the motors can pull, once a wheel saturates', () => {
-    const spec = openDrive();
+    const spec = motorOnly(openDrive());
     // Travelling straight down a wheel axis at 1000 mm/s, that wheel is past
     // its free speed of 813 and its force is pinned at stall. Braking is
     // weaker than the linear 8 per second as a result, which is what a real
@@ -78,6 +118,7 @@ describe('sizing matches what the comments claim', () => {
       vx: Math.cos(bearing) * 1000,
       vz: Math.sin(bearing) * 1000,
       omega: 0,
+      mass: OPEN_MASS,
     });
     const rate = Math.hypot(r.fx, r.fz) / OPEN_MASS / 1000;
     expect(rate).toBeLessThan(8);
@@ -91,8 +132,85 @@ describe('sizing matches what the comments claim', () => {
       vx: 800,
       vz: 0,
       omega: 0,
+      mass: OPEN_MASS,
     });
     expect(r.fx).toBeLessThan(0);
+  });
+});
+
+describe('the gearbox and the carpet hold the robot', () => {
+  /** Distance an idle robot slides after being knocked to `speed`, mm. */
+  function slide(speed: number, bearing = Math.PI / 2): number {
+    const b = body({ vx: Math.cos(bearing) * speed, vz: Math.sin(bearing) * speed });
+    settle(openDrive(), [0, 0, 0, 0], 2, b);
+    return Math.hypot(b.x, b.z);
+  }
+
+  it('stops a robot knocked to 400 mm/s inside a hand width', () => {
+    // 49 mm on back-EMF alone; a geared robot barely gives.
+    for (const bearing of [0, Math.PI / 4, Math.PI / 2, 2.2]) {
+      expect(slide(400, bearing)).toBeLessThan(35);
+    }
+  });
+
+  it('barely moves for a nudge', () => {
+    expect(slide(50)).toBeLessThan(2);
+  });
+
+  it('will not move from rest below the deadband', () => {
+    const spec = openDrive();
+    const b = settle(spec, mixOmni(spec, 0, 0.08, 0), 1);
+    expect(b.x).toBe(0);
+    expect(b.vx).toBe(0);
+  });
+
+  it('moves from rest just above it', () => {
+    // Nor may the rest snap eat a gentle start: power 0.15 cannot reach
+    // 12 mm/s in one tick, and used to be thrown away every tick.
+    const spec = openDrive();
+    const b = settle(spec, mixOmni(spec, 0, 0.15, 0), 1);
+    expect(b.x).toBeGreaterThan(20);
+  });
+
+  it('still tops out at full speed, so the friction is not a speed limit', () => {
+    const spec = openDrive();
+    const withFriction = settle(spec, mixOmni(spec, 0, 1, 0));
+    const without = settle(motorOnly(spec), mixOmni(spec, 0, 1, 0));
+    expect(Math.hypot(withFriction.vx, withFriction.vz)).toBeCloseTo(Math.hypot(without.vx, without.vz), 0);
+  });
+
+  it('spins its wheels on a full-power launch, and the encoders see it', () => {
+    const spec = openDrive();
+    const r = driveForces(spec, mixOmni(spec, 0, 1, 0), { heading: 0, vx: 0, vz: 0, omega: 0, mass: OPEN_MASS });
+    // The robot is standing still; every wheel is turning.
+    for (const w of r.wheelSpeeds) expect(Math.abs(w)).toBeGreaterThan(100);
+  });
+
+  it('reads the ground, not a spinning wheel, when the wheels grip', () => {
+    const spec = openDrive();
+    const r = driveForces(spec, mixOmni(spec, 0, 0.3, 0), { heading: 0, vx: 500, vz: 0, omega: 0, mass: OPEN_MASS });
+    for (const w of r.wheelSpeeds) expect(Math.abs(w)).toBeCloseTo(500 * Math.SQRT1_2, 3);
+  });
+
+  it('skids when shoved harder than its wheels can hold, at exactly the grip limit', () => {
+    // Knocked down a wheel axis at 900 mm/s: that wheel's motor would brake at
+    // full stall, far past what 0.7 of its quarter-weight allows.
+    const spec = openDrive();
+    const bearing = Math.PI / 4;
+    const r = driveForces(spec, [0, 0, 0, 0], {
+      heading: 0,
+      vx: Math.cos(bearing) * 900,
+      vz: Math.sin(bearing) * 900,
+      omega: 0,
+      mass: OPEN_MASS,
+    });
+    const limit = (CARPET_GRIP * OPEN_MASS * 9810) / 4;
+    // Two wheels run along the shove and both skid; the other two roll free.
+    expect(Math.hypot(r.fx, r.fz)).toBeCloseTo(2 * limit, -3);
+    // A skidding wheel is dragged round slower than the ground goes past.
+    const along = r.wheelSpeeds.filter((w) => Math.abs(w) > 1);
+    expect(along).toHaveLength(2);
+    for (const w of along) expect(Math.abs(w)).toBeLessThan(900);
   });
 });
 
@@ -104,6 +222,7 @@ describe('a symmetric drive behaves symmetrically', () => {
       vx: 0,
       vz: 0,
       omega: 0,
+      mass: OPEN_MASS,
     });
     expect(r.fx).toBeGreaterThan(0);
     expect(Math.abs(r.fz)).toBeLessThan(1);
@@ -117,6 +236,7 @@ describe('a symmetric drive behaves symmetrically', () => {
       vx: 0,
       vz: 0,
       omega: 0,
+      mass: OPEN_MASS,
     });
     expect(r.torque).toBeGreaterThan(0);
     expect(Math.hypot(r.fx, r.fz)).toBeLessThan(1);
@@ -164,10 +284,11 @@ describe('the model actually constrains the robot', () => {
   function differential(): DriveSpec {
     return {
       motors: [
-        { mountX: 0, mountZ: 90, axis: 0, stallForce: 8.13e6, freeSpeed: 813 },
-        { mountX: 0, mountZ: -90, axis: 0, stallForce: 8.13e6, freeSpeed: 813 },
+        { mountX: 0, mountZ: 90, axis: 0, stallForce: 8.13e6, freeSpeed: 813, gearFriction: 0 },
+        { mountX: 0, mountZ: -90, axis: 0, stallForce: 8.13e6, freeSpeed: 813, gearFriction: 0 },
       ],
       inertia: inertiaFor(1000),
+      grip: CARPET_GRIP,
     };
   }
 
@@ -177,7 +298,7 @@ describe('the model actually constrains the robot', () => {
     // Ask both motors for everything, in every combination. None of it
     // produces lateral motion, because no wheel points that way.
     for (const powers of [[1, 1], [1, -1], [-1, 1], [-1, -1], [0.5, -0.5]]) {
-      const r = driveForces(spec, powers, { heading: 0, vx: 0, vz: 0, omega: 0 });
+      const r = driveForces(spec, powers, { heading: 0, vx: 0, vz: 0, omega: 0, mass: OPEN_MASS });
       expect(Math.abs(r.fz)).toBeLessThan(1e-6);
     }
     expect(b.vz).toBe(0);
@@ -185,7 +306,7 @@ describe('the model actually constrains the robot', () => {
 
   it('turns a differential drive by driving its wheels apart', () => {
     const spec = differential();
-    const r = driveForces(spec, [1, -1], { heading: 0, vx: 0, vz: 0, omega: 0 });
+    const r = driveForces(spec, [1, -1], { heading: 0, vx: 0, vz: 0, omega: 0, mass: OPEN_MASS });
     expect(Math.abs(r.torque)).toBeGreaterThan(0);
     expect(Math.abs(r.fx)).toBeLessThan(1e-6);
   });
@@ -197,6 +318,7 @@ describe('the model actually constrains the robot', () => {
       vx: 0,
       vz: 0,
       omega: 0,
+      mass: OPEN_MASS,
     });
     expect(r.fz).toBeGreaterThan(0);
     expect(Math.abs(r.fx)).toBeLessThan(1);
@@ -204,8 +326,8 @@ describe('the model actually constrains the robot', () => {
 
   it('clamps a program that asks for more power than exists', () => {
     const spec = openDrive();
-    const honest = driveForces(spec, [1, -1, -1, 1], { heading: 0, vx: 0, vz: 0, omega: 0 });
-    const greedy = driveForces(spec, [9, -9, -9, 9], { heading: 0, vx: 0, vz: 0, omega: 0 });
+    const honest = driveForces(spec, [1, -1, -1, 1], { heading: 0, vx: 0, vz: 0, omega: 0, mass: OPEN_MASS });
+    const greedy = driveForces(spec, [9, -9, -9, 9], { heading: 0, vx: 0, vz: 0, omega: 0, mass: OPEN_MASS });
     expect(greedy.fx).toBeCloseTo(honest.fx, 6);
   });
 });
@@ -218,6 +340,7 @@ describe('encoders measure the wheel, not the robot', () => {
       vx: 0,
       vz: 0,
       omega: 4,
+      mass: OPEN_MASS,
     });
     // The robot's centre is going nowhere, but every wheel is turning.
     for (const u of r.wheelSpeeds) expect(Math.abs(u)).toBeGreaterThan(100);
@@ -227,10 +350,11 @@ describe('encoders measure the wheel, not the robot', () => {
     // A single wheel driving along +x, shoved sideways: the roller takes it and
     // the encoder never sees it. This is why odometry drifts when robots touch.
     const spec: DriveSpec = {
-      motors: [{ mountX: 0, mountZ: 0, axis: 0, stallForce: 8.13e6, freeSpeed: 813 }],
+      motors: [{ mountX: 0, mountZ: 0, axis: 0, stallForce: 8.13e6, freeSpeed: 813, gearFriction: 0 }],
       inertia: inertiaFor(2500),
+      grip: CARPET_GRIP,
     };
-    const r = driveForces(spec, [0], { heading: 0, vx: 0, vz: 600, omega: 0 });
+    const r = driveForces(spec, [0], { heading: 0, vx: 0, vz: 600, omega: 0, mass: OPEN_MASS });
     expect(Math.abs(r.wheelSpeeds[0]!)).toBeLessThan(1e-6);
   });
 });
@@ -248,18 +372,23 @@ describe('mixOmni', () => {
   });
 
   it('keeps the direction when it has to scale back for spin', () => {
-    const spec = openDrive();
+    // The mixer's promise, so measured on motors alone. On carpet the wheels
+    // doing most of the spinning hit their grip first and the launch does
+    // bend: that is wheelspin, and compensating for it is the team's job.
+    const spec = motorOnly(openDrive());
     const straight = driveForces(spec, mixOmni(spec, 0.6, 1, 0), {
       heading: 0,
       vx: 0,
       vz: 0,
       omega: 0,
+      mass: OPEN_MASS,
     });
     const spinning = driveForces(spec, mixOmni(spec, 0.6, 1, 0.8), {
       heading: 0,
       vx: 0,
       vz: 0,
       omega: 0,
+      mass: OPEN_MASS,
     });
     const a = Math.atan2(straight.fz, straight.fx);
     const b = Math.atan2(spinning.fz, spinning.fx);

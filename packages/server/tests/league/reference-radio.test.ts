@@ -54,7 +54,7 @@ function veteran(opts: ConstructorParameters<typeof ReferenceAgent>[0]): Referen
 
 /** The commanded drive direction, as a bearing in the robot's own frame. */
 function commandedBearing(motors: number[]): number {
-  const force = driveForces(openDrive(), motors, { heading: 0, vx: 0, vz: 0, omega: 0 });
+  const force = driveForces(openDrive(), motors, { heading: 0, vx: 0, vz: 0, omega: 0, mass: 2500 });
   return Math.atan2(force.fz, force.fx);
 }
 
@@ -125,7 +125,7 @@ describe('team radio', () => {
     expect(Math.cos(commandedBearing(backward))).toBeLessThan(-0.9);
     // The mirrored sighting is mirrored command, not noise: swapping the
     // broadcast flips exactly the translation, spin and all.
-    const spinOf = (m: number[]) => driveForces(openDrive(), m, { heading: 0, vx: 0, vz: 0, omega: 0 }).torque;
+    const spinOf = (m: number[]) => driveForces(openDrive(), m, { heading: 0, vx: 0, vz: 0, omega: 0, mass: 2500 }).torque;
     expect(spinOf(forward)).toBeCloseTo(spinOf(backward), 6);
   });
 

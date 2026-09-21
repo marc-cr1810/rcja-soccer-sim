@@ -667,11 +667,16 @@ describe('staged matches (Phase 4)', () => {
       ],
       ball: { x: 0, z: 0 },
     });
+    // The furthest it got, not where it ended: a goal inside the window sends
+    // everyone back to their kick-off spots, and lime-1's is where it started.
     const before = { x: 800, z: 0 };
-    for (let i = 0; i < 600; i++) m.step(dt);
-
-    const lime = m.world.robots.find((r) => r.id === 'lime-1')!;
-    expect(Math.hypot(lime.x - before.x, lime.z - before.z)).toBeGreaterThan(100);
+    let furthest = 0;
+    for (let i = 0; i < 600; i++) {
+      m.step(dt);
+      const lime = m.world.robots.find((r) => r.id === 'lime-1')!;
+      furthest = Math.max(furthest, Math.hypot(lime.x - before.x, lime.z - before.z));
+    }
+    expect(furthest).toBeGreaterThan(100);
   });
 
   it('tracks robot performance stats (goals, saves, shots, penalties) per robot', () => {
