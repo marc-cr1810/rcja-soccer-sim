@@ -18,7 +18,7 @@ none started. Slice 1 is cut below.
 
 ## Decided before any of it was built
 
-Settled over the scoping conversation of 20 September 2026. Recorded here so
+Settled over the scoping conversations of 20–21 September 2026. Recorded here so
 they are not re-argued from scratch.
 
 1. **Four nouns, one verb.** project (0..n per team) · `lib/` (team-level, lands
@@ -73,6 +73,36 @@ they are not re-argued from scratch.
 13. **Venue TLS is its own Phase 15**, not part of this. Credentials have
     crossed hall networks in the clear since Phase 6; the device code is
     single-use and short-lived but it is not encryption, and the plan says so.
+14. **"Push to the competition" is deleted, not renamed** (settled 21 September
+    2026). A team flashes boards; check-in snapshots what is on them. Broken
+    code is already covered — *what plays is the last check-in that passed*.
+    The case that is not covered is code that passes but is worse, flashed
+    without anyone deciding it is the entry. That is how hardware works too,
+    so the answer is visibility, not a new act: **the Boards panel says what
+    check-in will take**, in words — *"Robot 1 — flashed 9:14 pm from
+    `experiment`, passes. Check-in will take this."* A separate "mark as entry"
+    act was considered and not taken.
+15. **Two students in one project merge rather than overwrite** (settled 21
+    September 2026, slice 2). Today's save is last-write-wins, which the
+    one-project layout turns into silent lost work. Three layers, in order of
+    necessity:
+    - **A version check on save** — every save names the version it started
+      from, and a stale one is refused. This is the part that closes the
+      data-loss gap and is not negotiable.
+    - **A three-way merge in the browser** on refusal. It already holds the
+      base (what it loaded) and its own edits, and the refusal carries the
+      other student's version, so it runs `diff3` itself and resaves. Changes
+      on different lines merge and **say so**, with the other student's lines
+      highlighted — never silently.
+    - **`@codemirror/merge` for a real conflict**, side by side, chosen per
+      chunk. **Conflict markers are never written into a student's file.**
+    Not git: commits, branches and `<<<<<<<` are exactly the nouns this phase
+    removes, and a laptop team that wants git has it already, because a
+    project there is a directory. A clean merge can still be wrong code (a
+    rename on one side, a use of the old name on the other); editing is not
+    flashing, so it lands in the project and not on the robot, and validation
+    runs at flash. If slice 2 runs long, the merge and the merge view split
+    off — the version check does not.
 
 ## The slices
 
@@ -242,6 +272,5 @@ rewrites the first two properly; slice 1 only has to stop them lying.
 
 ### Open before starting
 
-- **Slice 2 deletes "Push to the competition" rather than renaming it.**
-  It does not block slice 1, but it is the one change that alters how *entering
-  a competition* feels, and it is cheaper to confirm now than to unpick later.
+Nothing. The one item that was open — slice 2 deleting "Push to the
+competition" — is now decision 14.

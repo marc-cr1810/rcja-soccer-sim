@@ -740,8 +740,10 @@ entry path, given a `.pth` in `data-files` [silently does not work](micropython-
 
 - **Two students can now collide** in a browser workspace, if they choose the
   one-project layout. They could not before, because the folders were separate.
-  The two-project layout is there precisely for them, but the default has to be
-  explained rather than assumed.
+  Slice 2 answers it with a version check on save, a three-way merge in the
+  browser when the check fails, and `@codemirror/merge` when the merge
+  conflicts — never conflict markers in a student's file, and not git
+  ([PHASE-13.md](../../PHASE-13.md), decision 15).
 - **`workspaces/<team>/<robot>/` is baked into paths, types and tests.**
   `RobotNumber` threading through `seed(team, robot)`, the workspace API and the
   store becomes project-and-board. This is the largest mechanical change in the
@@ -767,7 +769,9 @@ Slices, each verified live before the next.
    lineup-lock wording. The browser editor's robot switcher splits into a
    project picker and a Boards panel, and **"Push to the competition" is
    deleted rather than renamed** — a team flashes boards, and check-in takes
-   what is on them.
+   what is on them, and the Boards panel says in words what that will be.
+   Saves carry a version, and two students in one project merge rather than
+   overwrite.
 3. **`rcja` CLI, and the device flow with it.** `/auth/device` plus its poll
    and the `/device` approval page, then `login`, `whoami`, `logout`, `new`,
    `ls`, `diff`, `push`, `rm`, `run`, `logs`. `submit.py` and `join.py` are
