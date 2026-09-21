@@ -1113,7 +1113,33 @@ export class DemoArena {
       );
       this.currentTeams = matchTeams;
 
-      // 3. Spawn submission processes if any resolved
+      // 3. Seat (or stop) the example robots first. Stopping them closes the
+      //    seats they held, and a submission taking one of those seats has to
+      //    join *after* that: spawned first, it is refused ("already
+      //    connected"), `waitForSeats` sees the examples' live transport in
+      //    the seat and passes, and the match is handed a transport that
+      //    `stopProducers` closes a moment later. Gemini then stood on its
+      //    marks for the whole match whenever it drew the side the examples
+      //    had just played.
+      const violetExample = violetBot === 'example' || violetBot === 'examples';
+      const limeExample = limeBot === 'example' || limeBot === 'examples';
+      let exampleTransports: Partial<Record<string, Transport>> = {};
+
+      if (violetExample && limeExample) {
+        exampleTransports = await this.seatExamples(
+          ['violet-1', 'violet-2', 'lime-1', 'lime-2'],
+          'both',
+          matchTeams,
+        );
+      } else if (violetExample) {
+        exampleTransports = await this.seatExamples(['violet-1', 'violet-2'], 'violet', matchTeams);
+      } else if (limeExample) {
+        exampleTransports = await this.seatExamples(['lime-1', 'lime-2'], 'lime', matchTeams);
+      } else {
+        this.stopProducers();
+      }
+
+      // 4. Spawn submission processes if any resolved
       let submissionTransports: Partial<Record<string, Transport>> = {};
       if (Object.keys(resolvedLineup).length > 0) {
         try {
@@ -1136,25 +1162,6 @@ export class DemoArena {
         }
       }
 
-      // 4. Spawn / seat example robots if needed
-      const violetExample = violetBot === 'example' || violetBot === 'examples';
-      const limeExample = limeBot === 'example' || limeBot === 'examples';
-      let exampleTransports: Partial<Record<string, Transport>> = {};
-
-      if (violetExample && limeExample) {
-        exampleTransports = await this.seatExamples(
-          ['violet-1', 'violet-2', 'lime-1', 'lime-2'],
-          'both',
-          matchTeams,
-        );
-      } else if (violetExample) {
-        exampleTransports = await this.seatExamples(['violet-1', 'violet-2'], 'violet', matchTeams);
-      } else if (limeExample) {
-        exampleTransports = await this.seatExamples(['lime-1', 'lime-2'], 'lime', matchTeams);
-      } else {
-        this.stopProducers();
-      }
-
       if (this.stopping) {
         this.lineup?.stop();
         this.lineup = null;
@@ -1170,8 +1177,14 @@ export class DemoArena {
       } finally {
         this.lineup?.stop();
         this.lineup = null;
+        // Free the seats as well as the token, for the reason `stopProducers`
+        // does: a killed program's socket closes when it gets round to it, and
+        // until then the seat reads as live. Whoever draws this side next -
+        // the example robots, say - is refused it, `waitForSeats` passes on
+        // the dying transport, and the match plays with nobody on the end.
         for (const id of Object.keys(resolvedLineup)) {
           this.server.agents.clearToken(id);
+          this.server.agents.close(id);
         }
       }
     }
