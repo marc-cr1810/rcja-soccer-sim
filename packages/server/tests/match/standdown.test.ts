@@ -25,6 +25,7 @@ import { describe, expect, it } from 'bun:test';
 
 import { Match } from '../../src/match/match';
 import { referenceTeam } from '../../src/infra/reference';
+import { statue } from '../../src/match/bots';
 import type { Transport } from '../../src/match/agent';
 import type { ActuatorFrame, DisabledMessage, SensorFrame } from '../../src/match/protocol';
 
@@ -72,10 +73,18 @@ class SocketLike implements Transport {
   }
 }
 
-function playing(): { match: Match; socket: SocketLike } {
+/**
+ * A match with the socket robot in it. `quiet` puts statues in every other
+ * seat, so nobody scores: a goal's kick-off puts every robot back on the
+ * field, which ends a stand-down early.
+ */
+function playing(quiet = false): { match: Match; socket: SocketLike } {
   const socket = new SocketLike();
+  const others = quiet
+    ? { 'violet-2': statue, 'lime-1': statue, 'lime-2': statue }
+    : { ...referenceTeam('violet'), ...referenceTeam('lime') };
   const match = new Match({
-    agents: { ...referenceTeam('violet'), ...referenceTeam('lime') },
+    agents: { 'violet-1': referenceTeam('violet')['violet-1'], ...others },
     transports: { 'violet-1': socket },
     // Not 600: a half of ten minutes or more doubles the stand-down to sixty
     // seconds (rule 5.7.2 as `World` reads it), and these tests are about what
@@ -131,7 +140,7 @@ describe('a robot taken off for damage', () => {
   });
 
   it('sends no sensors while it is off', () => {
-    const { match, socket } = playing();
+    const { match, socket } = playing(true);
     run(match, 1);
 
     match.removeRobot('violet-1', '5.7.1', 'damaged');
@@ -140,6 +149,7 @@ describe('a robot taken off for damage', () => {
 
     // No sensors, no tick, nothing to decide: a robot in a student's hands
     // beside the pitch cannot see the field.
+    expect(match.world.robots.find((r) => r.id === 'violet-1')?.removed).toBe(true);
     expect(socket.frames.length).toBe(atRemoval);
   });
 

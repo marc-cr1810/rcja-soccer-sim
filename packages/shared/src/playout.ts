@@ -65,7 +65,6 @@ export function blend(from: ViewFrame, to: ViewFrame, t: number): ViewFrame {
       // than gliding there from wherever it was picked up.
       x: from.ball.absent ? to.ball.x : lerp(from.ball.x, to.ball.x, t),
       z: from.ball.absent ? to.ball.z : lerp(from.ball.z, to.ball.z, t),
-      y: to.ball.y === undefined ? undefined : lerp(from.ball.y ?? 0, to.ball.y, t),
     },
     robots: to.robots.map((r) => {
       const was = byId.get(r.id);

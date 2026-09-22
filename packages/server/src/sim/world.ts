@@ -26,15 +26,16 @@ import {
 } from './field';
 import { ballDiameter, type League } from '@rcja/shared/leagues';
 import {
-  BALL_BOUNCE,
+  collideBallRobot,
   collideBodies,
-  BALL_ROBOT_BOUNCE,
   collideWithPerimeter,
   separateBodies,
   distance,
   speed,
   stepBall,
+  stopBall,
   sweptBallCollision,
+  type Ball,
   type Body,
 } from './physics';
 import { openDrive, stepDrive, type DriveSpec } from './drive';
@@ -413,9 +414,25 @@ function robotMass(league: League): number {
   return league.maxWeightKg * 1000;
 }
 
-function ballMass(league: League): number {
-  // Appendix A.8: 130-150 g for the IR ball. Appendix B.5: 46 g for the golf ball.
-  return league.ball === 'ir-74' ? 140 : 46;
+/**
+ * The league's ball, as the physics needs it.
+ *
+ * Mass: appendix A.8 gives 130-150 g for the IR ball, B.5 46 g for the golf
+ * ball. Inertia: the golf ball is near enough a solid sphere (0.4); the IR ball
+ * is a shell with its batteries and board near the middle, somewhere between
+ * a solid sphere and a thin shell (2/3), so 0.5. Restitution against a hard
+ * surface: a golf ball is lively, about 0.6 at these speeds; the IR ball's
+ * plastic shell rattling with electronics is deader, about 0.5. Both are
+ * estimates, not measurements.
+ */
+function ballSpec(league: League): Pick<Ball, 'mass' | 'inertia' | 'restitution'> {
+  return league.ball === 'ir-74'
+    ? { mass: 140, inertia: 0.5, restitution: 0.5 }
+    : { mass: 46, inertia: 0.4, restitution: 0.6 };
+}
+
+function blankBall(): Ball {
+  return { x: 0, z: 0, vx: 0, vz: 0, radius: 0, mass: 0, slipVx: 0, slipVz: 0, inertia: 0, restitution: 0 };
 }
 
 /** A robot as an arrangement asks for it, at rest and undamaged. */
@@ -477,7 +494,7 @@ function separateAtRestart(robots: Robot[]): void {
 
 export class World {
   readonly config: MatchConfig;
-  ball: Body;
+  ball: Ball;
   robots: Robot[] = [];
   events: MatchEvent[] = [];
 
@@ -505,8 +522,8 @@ export class World {
    * this mirrors, and `pairOrder` below.
    */
   private pairOrderFlipped = false;
-  private readonly scratchBallBefore: Body = { x: 0, z: 0, vx: 0, vz: 0, radius: 0, mass: 0 };
-  private readonly scratchBallTrial: Body = { x: 0, z: 0, vx: 0, vz: 0, radius: 0, mass: 0 };
+  private readonly scratchBallBefore: Ball = blankBall();
+  private readonly scratchBallTrial: Ball = blankBall();
   private readonly activeRobotsBuffer: Robot[] = [];
   private readonly orderedActivesBuffer: Robot[] = [];
 
@@ -617,16 +634,13 @@ export class World {
    * so the same seed always produces the same physics.
    */
   private readonly ballFriction: number;
-  /** Per-match ball-wall restitution. Separate from robot-robot bounce. */
-  private readonly ballBounce: number;
 
   constructor(config: MatchConfig) {
     this.config = config;
     this.commsEnabled = config.commsEnabled ?? config.league.commsAllowed;
     this.ballFriction = config.ballFriction ?? 1;
-    this.ballBounce = BALL_BOUNCE;
     const r = ballDiameter(config.league) / 2;
-    this.ball = { x: 0, z: 0, vx: 0, vz: 0, radius: r, mass: ballMass(config.league) };
+    this.ball = { ...blankBall(), radius: r, ...ballSpec(config.league) };
     this.resetRobots();
   }
 
@@ -664,8 +678,7 @@ export class World {
   setBallOnField(on: boolean, at: Point = { x: 0, z: 0 }): void {
     if (!on) {
       this.ballAway = { kind: 'off' };
-      this.ball.vx = 0;
-      this.ball.vz = 0;
+      stopBall(this.ball);
       return;
     }
     if (this.ballAway?.kind !== 'off') return;
@@ -944,6 +957,8 @@ export class World {
     if (this.ballAway?.kind === 'hand') this.ballAway = null;
     this.ball.x = arrangement.ball.x;
     this.ball.z = arrangement.ball.z;
+    // An arrangement's ball is rolling at the speed it was given, not skidding.
+    stopBall(this.ball);
     this.ball.vx = arrangement.ball.vx ?? 0;
     this.ball.vz = arrangement.ball.vz ?? 0;
     this.resetProgressClocks();
@@ -1028,7 +1043,6 @@ export class World {
         this.ball.z,
         actives,
         goalBound,
-        this.ballBounce,
       );
       if (sweptHit?.hit === 'robot' && sweptHit.robotId) {
         const robotId = sweptHit.robotId;
@@ -1051,13 +1065,17 @@ export class World {
     this.scratchBallBefore.vz = this.ball.vz;
     this.scratchBallBefore.radius = this.ball.radius;
     this.scratchBallBefore.mass = this.ball.mass;
-    this.scratchBallBefore.y = this.ball.y;
-    this.scratchBallBefore.vy = this.ball.vy;
+    this.scratchBallBefore.slipVx = this.ball.slipVx;
+    this.scratchBallBefore.slipVz = this.ball.slipVz;
+    this.scratchBallBefore.inertia = this.ball.inertia;
+    this.scratchBallBefore.restitution = this.ball.restitution;
 
     let ballDX = 0;
     let ballDZ = 0;
     let ballDVX = 0;
     let ballDVZ = 0;
+    let ballDSX = 0;
+    let ballDSZ = 0;
     for (let i = 0; ballLive && i < actives.length; i++) {
       const robot = actives[i]!;
       const recess = dribblerRecess(robot, this.scratchBallBefore, this.config.league);
@@ -1067,14 +1085,18 @@ export class World {
       this.scratchBallTrial.vz = this.scratchBallBefore.vz;
       this.scratchBallTrial.radius = this.scratchBallBefore.radius;
       this.scratchBallTrial.mass = this.scratchBallBefore.mass;
-      this.scratchBallTrial.y = this.scratchBallBefore.y;
-      this.scratchBallTrial.vy = this.scratchBallBefore.vy;
+      this.scratchBallTrial.slipVx = this.scratchBallBefore.slipVx;
+      this.scratchBallTrial.slipVz = this.scratchBallBefore.slipVz;
+      this.scratchBallTrial.inertia = this.scratchBallBefore.inertia;
+      this.scratchBallTrial.restitution = this.scratchBallBefore.restitution;
 
-      if (collideBodies(robot, this.scratchBallTrial, recess, BALL_ROBOT_BOUNCE)) {
+      if (collideBallRobot(robot, this.scratchBallTrial, recess)) {
         ballDX += this.scratchBallTrial.x - this.scratchBallBefore.x;
         ballDZ += this.scratchBallTrial.z - this.scratchBallBefore.z;
         ballDVX += this.scratchBallTrial.vx - this.scratchBallBefore.vx;
         ballDVZ += this.scratchBallTrial.vz - this.scratchBallBefore.vz;
+        ballDSX += this.scratchBallTrial.slipVx - this.scratchBallBefore.slipVx;
+        ballDSZ += this.scratchBallTrial.slipVz - this.scratchBallBefore.slipVz;
         this.lastBallTouch = { robotId: robot.id, team: robot.team, at: this.clock };
         this.lastTouchByTeam[robot.team] = { robotId: robot.id, at: this.clock };
       }
@@ -1083,6 +1105,8 @@ export class World {
     this.ball.z += ballDZ;
     this.ball.vx += ballDVX;
     this.ball.vz += ballDVZ;
+    this.ball.slipVx += ballDSX;
+    this.ball.slipVz += ballDSZ;
     for (let i = 0; i < actives.length; i++) actives[i]!.sinceOpponentContact += dt;
 
     this.orderedActivesBuffer.length = 0;
@@ -1162,7 +1186,7 @@ export class World {
     // after it must not go on judging a ball nobody can play.
     if (ballLive) {
       const goalBound = Math.abs(this.ball.z) <= HALF_GOAL_WIDTH - this.ball.radius * 0.5;
-      const hit = collideWithPerimeter(this.ball, goalBound, this.ballBounce);
+      const hit = collideWithPerimeter(this.ball, goalBound);
       this.detectGoal(sweptHit?.hit === 'goal-back' || hit === 'goal-back');
     }
     if (this.ballInPlay) this.detectUnreachable(dt);
@@ -2068,8 +2092,7 @@ export class World {
     this.ball.z = p.z;
     // Wherever it has been put, it is not a goal that has already been given.
     this.goalGiven = false;
-    this.ball.vx = 0;
-    this.ball.vz = 0;
+    stopBall(this.ball);
     this.kickOffPending = false;
     this.reportedOutOfPlay = false;
     // Placing the ball is a discontinuous move, not progress. Without this the
@@ -2108,8 +2131,7 @@ export class World {
       from: already?.from ?? from,
       toCentre: toCentre || (already?.toCentre ?? false),
     };
-    this.ball.vx = 0;
-    this.ball.vz = 0;
+    stopBall(this.ball);
   }
 
   /** The hand's clock. A person's walk does not stop because the game clock has. */

@@ -578,7 +578,6 @@ export class MatchServer {
       ball: {
         x: snapshot.ball.x,
         z: snapshot.ball.z,
-        ...(snapshot.ball.y !== last.ball.y ? { y: snapshot.ball.y } : {}),
         ...((snapshot.ball.absent ?? false) !== (last.ball.absent ?? false)
           ? { absent: snapshot.ball.absent ?? false }
           : {}),

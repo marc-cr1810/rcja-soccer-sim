@@ -98,7 +98,7 @@ export const MOUNT_RADIUS = 90;
  *   speed. For the lab's 1150 mm/s:  freeSpeed = 1150 / √2 ≈ 813 mm/s.
  *
  * With the motors idle, back-EMF alone damps the robot at 2·S/(freeSpeed·m) =
- * 2 × 8.13e6 / (813 × 2500) ≈ 8.0 per second — exactly the ROBOT_DAMPING the
+ * 2 × 8.13e6 / (813 × 2500) ≈ 8.0 per second — exactly the damping rate the
  * lab arrived at by hand, and for four wheels at 90° spacing the same in every
  * direction. The artificial damping constant was standing in for a motor.
  *
@@ -337,11 +337,11 @@ export interface DrivenBody extends DriveMotion {
  * Advance a driven robot by one step.
  *
  * Move first with the velocity the robot already had, then apply this step's
- * forces — the same order physics.ts uses in `integrate`, so a driven robot and
+ * forces — the same order physics.ts uses for the ball, so a driven robot and
  * the ball advance consistently and collisions land where the existing solver
  * expects them.
  *
- * This replaces `stepRobot` for robots under power. It has to do the whole job,
+ * This replaced a plain damped `stepRobot`. It has to do the whole job,
  * position included: an earlier draft applied forces and left the position to
  * the caller, which quietly froze every robot in place. The rule detectors did
  * not notice, because most of them put robots where they want them and step;

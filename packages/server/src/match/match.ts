@@ -18,6 +18,7 @@ import { Senses, TeamRadio, type MatchView, type SensedRobot } from '../sim/perc
 import { foldSeed, streamSeed, toSeed, withWord, type Seed, type SeedInput } from '../sim/rand';
 import type { ActuatorFrame } from './protocol';
 import { wrapAngle } from '../sim/drive';
+import { kickBall } from '../sim/physics';
 import {
   type HalfTime, type ViewEvent, type ViewFrame,
   type MatchResult, type RefereeAction, type ScoreCorrection,
@@ -42,8 +43,6 @@ const GATE_SLOP = 12;
 /** Half-angle of the dribbler's mouth. Outside this the roller cannot hold it. */
 const GATE_ARC = 0.6;
 
-/** Rule 4.7.1's kicker test asks for a kick that crosses the field and rebounds. */
-const KICK_SPEED = 2400;
 /** Seconds to recharge. A capacitor kicker cannot fire every tick. */
 const KICK_COOLDOWN = 1.2;
 /**
@@ -56,6 +55,15 @@ const KICK_COOLDOWN = 1.2;
 export const KICKOFF_COUNTDOWN_SECONDS = 3;
 /** How firmly the roller holds the ball against the robot. */
 const DRIBBLE_GRIP = 0.55;
+/**
+ * How hard the roller draws the ball in at full power, mm/s.
+ *
+ * A dribbler holds the ball by spinning it backwards: the carpet turns that
+ * backspin into a pull into the mouth. So the roller works on the ball's spin
+ * as well as its speed, and this is the backspin it asks for, as the speed the
+ * ball would roll towards the robot at.
+ */
+const DRIBBLE_PULL = 300;
 /**
  * Unused stream tag for the per-match ball friction draw.
  *
@@ -678,8 +686,7 @@ export class Match {
 
   /** Rule 4.7: the kicker sends the ball away along the robot's heading. */
   private fire(robot: Robot): void {
-    this.world.ball.vx = Math.cos(robot.heading) * KICK_SPEED;
-    this.world.ball.vz = Math.sin(robot.heading) * KICK_SPEED;
+    kickBall(this.world.ball, robot);
     this.world.lastBallTouch = { robotId: robot.id, team: robot.team, at: this.world.clock };
     this.world.lastTouchByTeam[robot.team] = { robotId: robot.id, at: this.world.clock };
     this.ensureStats(robot.id).shots++;
@@ -692,6 +699,11 @@ export class Match {
    * Modelled as drag towards the robot's own motion rather than as a rigid
    * attachment, so the ball can still be knocked away by an opponent — which is
    * what makes possession contestable rather than absolute.
+   *
+   * The motion is that of the point of the robot where the ball sits, not of
+   * its centre, so a robot turning with the ball carries it round. And the
+   * roller spins the ball backwards (DRIBBLE_PULL), which the carpet turns
+   * into a draw into the mouth.
    */
   private dribble(dt: number): void {
     for (const slot of this.orderedSlots()) {
@@ -700,8 +712,19 @@ export class Match {
       if (power <= 0 || !robot || robot.removed) continue;
       if (!this.gateHeld(robot)) continue;
       const grip = Math.min(1, DRIBBLE_GRIP * power * dt * PHYSICS_HZ);
-      this.world.ball.vx += (robot.vx - this.world.ball.vx) * grip;
-      this.world.ball.vz += (robot.vz - this.world.ball.vz) * grip;
+      const ball = this.world.ball;
+      const px = robot.vx - robot.omega * (ball.z - robot.z);
+      const pz = robot.vz + robot.omega * (ball.x - robot.x);
+      // Spin as the speed it would roll at, pulled towards backspin.
+      const rollX = ball.vx - ball.slipVx;
+      const rollZ = ball.vz - ball.slipVz;
+      const pull = DRIBBLE_PULL * power;
+      const spinX = rollX + (px - pull * Math.cos(robot.heading) - rollX) * grip;
+      const spinZ = rollZ + (pz - pull * Math.sin(robot.heading) - rollZ) * grip;
+      ball.vx += (px - ball.vx) * grip;
+      ball.vz += (pz - ball.vz) * grip;
+      ball.slipVx = ball.vx - spinX;
+      ball.slipVz = ball.vz - spinZ;
       this.world.lastBallTouch = { robotId: robot.id, team: robot.team, at: this.world.clock };
       this.world.lastTouchByTeam[robot.team] = { robotId: robot.id, at: this.world.clock };
     }
@@ -1239,7 +1262,6 @@ export class Match {
       ball: {
         x: this.world.ball.x,
         z: this.world.ball.z,
-        y: this.world.ball.y,
         radius: this.world.ball.radius,
         ...(this.world.ballInPlay ? {} : { absent: true }),
       },

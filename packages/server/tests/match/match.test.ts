@@ -626,10 +626,15 @@ describe('staged matches (Phase 4)', () => {
 
     expect(m.world.robots.map((r) => r.id)).toEqual(['violet-1']);
     const before = { x: m.world.robots[0]!.x, z: m.world.robots[0]!.z };
-    for (let i = 0; i < 600; i++) m.step(dt);
+    // Furthest, not final: alone on the field it scores, and every goal puts
+    // it back on its spot.
+    let moved = 0;
+    for (let i = 0; i < 600; i++) {
+      m.step(dt);
+      moved = Math.max(moved, Math.hypot(m.world.robots[0]!.x - before.x, m.world.robots[0]!.z - before.z));
+    }
 
     // It went for the ball: nothing else is on the field to push it anywhere.
-    const moved = Math.hypot(m.world.robots[0]!.x - before.x, m.world.robots[0]!.z - before.z);
     expect(moved).toBeGreaterThan(100);
   });
 

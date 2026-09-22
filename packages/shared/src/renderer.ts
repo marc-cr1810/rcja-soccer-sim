@@ -493,11 +493,7 @@ export class FieldRenderer {
   render(world: RenderView, dt: number): void {
     this.syncRobots(world);
     this.ballMesh.visible = !world.ball.absent;
-    this.ballMesh.position.set(
-      world.ball.x * MM,
-      (world.ball.y ?? world.ball.radius) * MM,
-      world.ball.z * MM,
-    );
+    this.ballMesh.position.set(world.ball.x * MM, world.ball.radius * MM, world.ball.z * MM);
     this.updateCamera(world, dt);
     this.renderer.render(this.scene, this.camera);
   }

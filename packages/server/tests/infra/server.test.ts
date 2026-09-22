@@ -12,7 +12,7 @@ import { join, resolve } from 'node:path';
 import { Match, type MatchAgents } from '../../src/match/match';
 import { PROTOCOL_VERSION } from '../../src/match/protocol';
 import { referenceTeam } from '../../src/infra/reference';
-import { waller } from '../../src/match/bots';
+import { statue, waller } from '../../src/match/bots';
 import { MatchServer } from '../../src/infra/server';
 import { sandboxAvailable } from '../../src/match/sandbox';
 import { VIEW_HZ, type ViewMessage } from '@rcja/shared/view';
@@ -486,8 +486,10 @@ describe('a robot program that goes away', () => {
     const second = await join(port, 'violet', 2);
     expect(first.rejected).toBeNull();
 
+    // Nobody on the field who can score: a kick-off puts every robot back on
+    // it, so a goal inside the window would hide the stand-down being tested.
     const playing = server.play({
-      agents: agents(),
+      agents: { ...agents(), 'lime-1': statue, 'lime-2': statue } as unknown as MatchAgents,
       transports: server.agents.transports(),
       halfSeconds: 30,
       seed: 1,

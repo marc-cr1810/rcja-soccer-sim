@@ -27,10 +27,27 @@ export interface Body {
   vz: number;
   radius: number;
   mass: number;
-  /** Vertical elevation above carpet in mm (defaults to radius when resting). */
-  y?: number;
-  /** Vertical velocity in mm/s (positive upwards). */
-  vy?: number;
+}
+
+/**
+ * The ball, which unlike a robot can spin independently of how it moves.
+ *
+ * Its spin is carried as SLIP: how much faster the ball is moving over the
+ * carpet than its spin would roll it. Zero slip is a ball rolling cleanly, and
+ * that is what a ball given a velocity directly - a staged arrangement, a test,
+ * a practice drag - should be, so it is the default. Only something that
+ * strikes the ball puts slip into it: a kicker, a wall, a bumper, a roller.
+ *
+ * Spin about the vertical axis is not carried. Carpet kills it within a few
+ * centimetres and it changes nothing a referee could see.
+ */
+export interface Ball extends Body {
+  slipVx: number;
+  slipVz: number;
+  /** I / (m r^2): 0.4 for a solid sphere, 2/3 for a thin shell. */
+  inertia: number;
+  /** Coefficient of restitution against any hard surface. */
+  restitution: number;
 }
 
 /**
@@ -50,35 +67,43 @@ export interface Body {
  * hard kicks carry, gentle knocks die quickly. That is the difference between a
  * game and a series of restarts.
  *
- * At 1200 mm/s^2 a full 2400 mm/s kick still runs 2400 mm, comfortably the
- * 1930 mm goal-to-goal that 4.7.1 asks for, while that same 700 mm/s knock now
- * travels 204 mm instead of 574 mm and stays on the field.
+ * At 1200 mm/s^2 a 2400 mm/s ROLLING ball runs 2400 mm, and a 700 mm/s knock
+ * travels 204 mm instead of 574 mm and stays on the field. A kicked ball does
+ * not start out rolling, though - see BALL_SLIDE_FRICTION.
  */
 const BALL_ROLL_DECEL = 1200;
-/** Gravity in mm/s^2 for vertical ball motion (Rule 4.7 chip kicks). */
+/** Gravity in mm/s^2: the normal force behind every friction below. */
 const GRAVITY = 9810;
-/** Vertical restitution when an airborne ball lands on carpet. */
-const CARPET_BOUNCE = 0.42;
 /**
- * Robots are far more damped than the ball, and deliberately so. A robot on
- * carpet with geared motors is close to a velocity servo: it holds the speed
- * it is driven at and sheds a disturbance almost immediately. At 8 per second
- * a robot nudged to 400 mm/s travels about 50 mm before stopping, which is
- * what a bump actually looks like. Lower values make robots glide as if the
- * carpet were ice.
+ * Sliding friction between a skidding ball and the carpet.
  *
- * DRIVE in ai.ts is scaled against this so that a driven robot still reaches
- * its top speed: terminal velocity is DRIVE / ROBOT_DAMPING.
+ * A kicker strikes the ball through its middle, so it leaves with no spin at
+ * all and skids. Sliding friction then does two things at once: it slows the
+ * ball and spins it up, until the spin matches the speed and it rolls. What is
+ * conserved through the skid is v + k*w (k = I/mr^2, w the speed the spin would
+ * roll at), so a spinless ball always settles at v/(1+k): 5/7 of its launch
+ * speed for the solid golf ball, 2/3 for the IR ball. At 0.35 - felt and
+ * short-pile carpet on a hard ball run 0.3-0.4 - that takes a tenth of a second
+ * and about half a metre from a full kick. The same skid is what kills a ball
+ * that comes back off a wall still spinning the way it was going.
  */
-const ROBOT_DAMPING = 8;
+const BALL_SLIDE_FRICTION = 0.35;
+/** Below this slip (mm/s) the ball is taken to be rolling cleanly. */
+const SLIP_SPEED = 5;
+/**
+ * Friction where the ball meets a wall, a goal or a robot's bumper.
+ *
+ * Painted MDF and hard plastic against a golf ball or the IR ball's shell,
+ * both around 0.3. An estimate, not a measurement. It is what makes a graze
+ * lose some of its sideways speed, and it takes most of the spin off a ball
+ * rolling into a wall, so the ball comes back rather than stopping dead.
+ */
+export const BALL_CONTACT_FRICTION = 0.3;
 
-/** Coefficient of restitution against the walls and between bodies. */
+/** Coefficient of restitution for robots against the walls. */
 const WALL_BOUNCE = 0.45;
-/** Ball loses more energy on wall bounces than robots do — carpet and wall panels absorb more. */
-export const BALL_BOUNCE = 0.35;
+/** Robot against robot. */
 const BODY_BOUNCE = 0.35;
-/** Ball off a robot bumper: more elastic than robot-robot (0.35) but not fully elastic. */
-export const BALL_ROBOT_BOUNCE = 0.6;
 
 /** Below this speed (mm/s) the ball is treated as stationary. */
 const REST_SPEED = 12;
@@ -108,41 +133,221 @@ export function rollingIntegrate(b: Body, dt: number, decel: number): void {
   }
 }
 
-export function integrate(b: Body, dt: number, ratePerSecond: number): void {
-  b.x += b.vx * dt;
-  b.z += b.vz * dt;
-  const decay = Math.exp(-ratePerSecond * dt);
-  b.vx *= decay;
-  b.vz *= decay;
-  if (Math.hypot(b.vx, b.vz) < REST_SPEED) {
-    b.vx = 0;
-    b.vz = 0;
+/**
+ * One tick of the ball on the carpet: skidding if it slips, rolling if not.
+ *
+ * While it skids, sliding friction closes the slip at a(1 + 1/k), taking
+ * k/(1+k) of the closure off the ball's speed and giving the rest to its spin.
+ * The last step of a skid lands exactly on rolling rather than overshooting
+ * into slip the other way.
+ */
+export function stepBall(ball: Ball, dt: number, frictionMultiplier = 1): void {
+  const slip = Math.hypot(ball.slipVx, ball.slipVz);
+  if (slip <= SLIP_SPEED) {
+    ball.slipVx = 0;
+    ball.slipVz = 0;
+    rollingIntegrate(ball, dt, BALL_ROLL_DECEL * frictionMultiplier);
+    return;
+  }
+  ball.x += ball.vx * dt;
+  ball.z += ball.vz * dt;
+  const k = ball.inertia;
+  const closing = Math.min(slip, BALL_SLIDE_FRICTION * GRAVITY * (1 + 1 / k) * dt);
+  const speedLoss = (closing * k) / (1 + k);
+  ball.vx -= (ball.slipVx / slip) * speedLoss;
+  ball.vz -= (ball.slipVz / slip) * speedLoss;
+  const keep = (slip - closing) / slip;
+  ball.slipVx *= keep;
+  ball.slipVz *= keep;
+}
+
+/** Stop the ball dead: no speed and no spin. */
+export function stopBall(ball: Ball): void {
+  ball.vx = 0;
+  ball.vz = 0;
+  ball.slipVx = 0;
+  ball.slipVz = 0;
+}
+
+/**
+ * The ball strikes a surface: a wall, a goal, a post, a bumper or a plunger.
+ *
+ * `nx, nz` is the contact normal, pointing out of the surface into the ball.
+ * `surfaceVx, surfaceVz` is how fast the surface's contact point is moving -
+ * zero for a wall, the robot's point velocity for a bumper. `otherInvMass` is
+ * 1/mass of what is struck, zero for anything bolted to the field. Returns the
+ * impulse given to the ball (g mm/s), so the caller can give the other body the
+ * equal and opposite one, or null if they were already parting.
+ *
+ * Three things happen, all through the one normal impulse:
+ *
+ * - The normal part of the relative velocity is reversed and scaled by the
+ *   ball's restitution, shared between the two bodies by their masses.
+ * - Friction opposes the sideways slip at the contact, by at most mu times the
+ *   normal impulse. A ball that stops slipping there has spun up about the
+ *   vertical axis, which is why its effective inverse mass is (1/m)(1 + 1/k).
+ * - The contact is on the ball's equator, so a ball rolling into a surface is
+ *   also slipping DOWNWARDS against it, and friction takes spin off it. The
+ *   two frictions share the one mu budget as a vector, as Coulomb friction
+ *   does. Spin about the axis along the normal slips nowhere and is untouched.
+ */
+export function ballContact(
+  ball: Ball,
+  nx: number,
+  nz: number,
+  surfaceVx = 0,
+  surfaceVz = 0,
+  otherInvMass = 0,
+  restitution = ball.restitution,
+  mu = BALL_CONTACT_FRICTION,
+): { jx: number; jz: number } | null {
+  const ux = ball.vx - surfaceVx;
+  const uz = ball.vz - surfaceVz;
+  const un = ux * nx + uz * nz;
+  if (un >= 0) return null;
+
+  const invBall = 1 / ball.mass;
+  const k = ball.inertia;
+  const jn = (-(1 + restitution) * un) / (invBall + otherInvMass);
+
+  // Sideways slip at the contact, and the impulse that would stop it.
+  const tx = ux - un * nx;
+  const tz = uz - un * nz;
+  const ut = Math.hypot(tx, tz);
+  const stickSide = ut / (invBall * (1 + 1 / k) + otherInvMass);
+
+  // Spin along the normal, as the speed it would roll at: the rolling speed is
+  // the velocity less the slip. The impulse that would stop the equator
+  // slipping vertically changes only the spin.
+  const spinN = (ball.vx - ball.slipVx) * nx + (ball.vz - ball.slipVz) * nz;
+  const stickSpin = Math.abs(spinN) * ball.mass * k;
+
+  const want = Math.hypot(stickSide, stickSpin);
+  const scale = want > mu * jn ? (mu * jn) / want : 1;
+  const jSide = stickSide * scale;
+  const jSpin = stickSpin * scale;
+
+  const jx = jn * nx - (ut > 1e-9 ? (tx / ut) * jSide : 0);
+  const jz = jn * nz - (ut > 1e-9 ? (tz / ut) * jSide : 0);
+
+  // A change of velocity with no change of spin is all slip; a change of spin
+  // with no change of velocity is slip the other way.
+  ball.vx += jx * invBall;
+  ball.vz += jz * invBall;
+  ball.slipVx += jx * invBall;
+  ball.slipVz += jz * invBall;
+  const spinCut = (Math.sign(spinN) * jSpin * invBall) / k;
+  ball.slipVx += spinCut * nx;
+  ball.slipVz += spinCut * nz;
+  return { jx, jz };
+}
+
+/** A robot as the ball meets it: a body that may be turning. */
+export type Striker = Body & { omega?: number; id?: string };
+
+/** How fast the point of a robot at (px, pz) is moving over the carpet. */
+function pointVelocity(robot: Striker, px: number, pz: number): [number, number] {
+  const w = robot.omega ?? 0;
+  return [robot.vx - w * (pz - robot.z), robot.vz + w * (px - robot.x)];
+}
+
+/**
+ * The ball and a robot touching: pushed apart by their masses, then one
+ * contact impulse, with the robot taking the reaction.
+ *
+ * The robot's point velocity is used, not its centre's, so a spinning robot
+ * flicks the ball away sideways. Its yaw is left alone: the ball is 2-6% of
+ * the robot's mass and its reaction on the robot's turning is negligible.
+ */
+export function collideBallRobot(robot: Striker, ball: Ball, recess = 0): boolean {
+  const dx = ball.x - robot.x;
+  const dz = ball.z - robot.z;
+  const minDist = robot.radius + ball.radius - recess;
+  if (Math.abs(dx) >= minDist || Math.abs(dz) >= minDist) return false;
+  const distSq = dx * dx + dz * dz;
+  if (distSq >= minDist * minDist || distSq === 0) return false;
+  const dist = Math.sqrt(distSq);
+  const nx = dx / dist;
+  const nz = dz / dist;
+  const overlap = minDist - dist;
+
+  const invR = 1 / robot.mass;
+  const invB = 1 / ball.mass;
+  const invSum = invR + invB;
+  robot.x -= nx * overlap * (invR / invSum);
+  robot.z -= nz * overlap * (invR / invSum);
+  ball.x += nx * overlap * (invB / invSum);
+  ball.z += nz * overlap * (invB / invSum);
+
+  const [sx, sz] = pointVelocity(robot, robot.x + nx * (robot.radius - recess), robot.z + nz * (robot.radius - recess));
+  const j = ballContact(ball, nx, nz, sx, sz, invR);
+  if (j) {
+    robot.vx -= j.jx * invR;
+    robot.vz -= j.jz * invR;
+  }
+  return true;
+}
+
+/**
+ * Rule 4.7: a solenoid kicker strikes the ball.
+ *
+ * Modelled as what it is, a plunger of known mass hitting the ball. The
+ * plunger's speed is on top of the robot's own motion at the front, so a robot
+ * kicking on the run kicks harder, and one sliding sideways kicks at an angle,
+ * and the robot takes the recoil.
+ *
+ * Each league's robots carry a kicker built for that league's ball. One kicker
+ * for both was tried first: sized so the 140 g IR ball passes rule 4.7.1, it
+ * sent the 46 g golf ball away at 4900 mm/s, across the whole field in under
+ * half a second, and it looked absurd. Nobody builds an Open kicker that way.
+ * So the plunger's speed is sized per ball (`plungerSpeed`), and the masses
+ * decide everything after the strike.
+ */
+export const PLUNGER_MASS = 100;
+/** Steel plunger face on a ball: a hard, short, lossy strike. */
+export const PLUNGER_RESTITUTION = 0.5;
+/**
+ * How far a kick from a standing robot carries, mm.
+ *
+ * The carry the kick always had. Rule 4.7.1 asks for goal to goal, 1930 mm
+ * between the goal lines, so this passes it with the same margin as before.
+ */
+export const KICK_CARRY = 2400;
+
+/**
+ * The speed a ball has to leave the plunger at to carry `KICK_CARRY`.
+ *
+ * It skids from v0 to v0/(1+k) at the sliding deceleration, then rolls to a
+ * stop at the rolling one: distance = v0^2 times the constant below. About
+ * 2900 mm/s for the golf ball and 3000 for the IR ball, whose heavier share
+ * of spin costs it more in the skid.
+ */
+export function kickSpeed(ball: Pick<Ball, 'inertia'>): number {
+  const settle = 1 / (1 + ball.inertia) ** 2;
+  const perSpeedSquared = (1 - settle) / (2 * BALL_SLIDE_FRICTION * GRAVITY) + settle / (2 * BALL_ROLL_DECEL);
+  return Math.sqrt(KICK_CARRY / perSpeedSquared);
+}
+
+/** The plunger speed that sends this ball away at `kickSpeed` from a standing robot. */
+export function plungerSpeed(ball: Pick<Ball, 'inertia' | 'mass'>): number {
+  return (kickSpeed(ball) * (PLUNGER_MASS + ball.mass)) / (PLUNGER_MASS * (1 + PLUNGER_RESTITUTION));
+}
+
+export function kickBall(ball: Ball, robot: Striker & { heading: number }): void {
+  const hx = Math.cos(robot.heading);
+  const hz = Math.sin(robot.heading);
+  const [px, pz] = pointVelocity(robot, robot.x + hx * robot.radius, robot.z + hz * robot.radius);
+  const plunger = plungerSpeed(ball);
+  // A plunger face is flat and the strike short: no friction worth modelling.
+  const j = ballContact(ball, hx, hz, px + hx * plunger, pz + hz * plunger, 1 / PLUNGER_MASS, PLUNGER_RESTITUTION, 0);
+  if (j) {
+    robot.vx -= j.jx / robot.mass;
+    robot.vz -= j.jz / robot.mass;
   }
 }
 
-export function stepBall(ball: Body, dt: number, frictionMultiplier = 1): void {
-  rollingIntegrate(ball, dt, BALL_ROLL_DECEL * frictionMultiplier);
-  if (ball.y !== undefined || ball.vy !== undefined) {
-    const restY = ball.radius;
-    ball.y = ball.y ?? restY;
-    ball.vy = ball.vy ?? 0;
-    if (ball.y > restY || ball.vy !== 0) {
-      ball.y += ball.vy * dt;
-      ball.vy -= GRAVITY * dt;
-      if (ball.y <= restY) {
-        ball.y = restY;
-        if (Math.abs(ball.vy) < 220) {
-          ball.vy = 0;
-        } else {
-          ball.vy = -ball.vy * CARPET_BOUNCE;
-        }
-      }
-    }
-  }
-}
-
-export function stepRobot(robot: Body, dt: number): void {
-  integrate(robot, dt, ROBOT_DAMPING);
+function isBall(b: Body): b is Ball {
+  return (b as Ball).slipVx !== undefined;
 }
 
 /**
@@ -201,6 +406,10 @@ function pushOutOfGoalBlock(b: Body, sign: -1 | 1, bounce = WALL_BOUNCE): WallHi
   b.x += dx * (b.radius - dist);
   b.z += dz * (b.radius - dist);
 
+  if (isBall(b)) {
+    ballContact(b, dx, dz);
+    return Math.abs(dx) >= Math.abs(dz) ? 'end' : 'goal-side';
+  }
   // Restitution along the contact normal only, so the tangential component
   // survives and a graze stays a graze.
   const normal = b.vx * dx + b.vz * dz;
@@ -211,17 +420,26 @@ function pushOutOfGoalBlock(b: Body, sign: -1 | 1, bounce = WALL_BOUNCE): WallHi
   return Math.abs(dx) >= Math.abs(dz) ? 'end' : 'goal-side';
 }
 
+/**
+ * Keep a body inside the field and out of the goal block.
+ *
+ * `bounce` is for robots. The ball brings its own restitution and meets every
+ * wall through `ballContact`, with friction and spin.
+ */
 export function collideWithPerimeter(b: Body, allowGoalEntry: boolean, bounce = WALL_BOUNCE): WallHit | null {
   let hit: WallHit | null = null;
+  // Set a velocity component the way a robot has always bounced, or strike a
+  // ball against the wall whose normal is (nx, nz).
+  const wall = (nx: number, nz: number, robot: () => void) => (isBall(b) ? ballContact(b, nx, nz) : robot());
 
   // Sidelines run the full length and have no openings.
   if (b.z - b.radius < -WALL_Z) {
     b.z = -WALL_Z + b.radius;
-    b.vz = Math.abs(b.vz) * bounce;
+    wall(0, 1, () => (b.vz = Math.abs(b.vz) * bounce));
     hit = 'side';
   } else if (b.z + b.radius > WALL_Z) {
     b.z = WALL_Z - b.radius;
-    b.vz = -Math.abs(b.vz) * bounce;
+    wall(0, -1, () => (b.vz = -Math.abs(b.vz) * bounce));
     hit = 'side';
   }
 
@@ -229,11 +447,11 @@ export function collideWithPerimeter(b: Body, allowGoalEntry: boolean, bounce = 
   // inside a goal: the goal back stops well short of them.
   if (b.x - b.radius < -WALL_X) {
     b.x = -WALL_X + b.radius;
-    b.vx = Math.abs(b.vx) * bounce;
+    wall(1, 0, () => (b.vx = Math.abs(b.vx) * bounce));
     hit = 'end';
   } else if (b.x + b.radius > WALL_X) {
     b.x = WALL_X - b.radius;
-    b.vx = -Math.abs(b.vx) * bounce;
+    wall(-1, 0, () => (b.vx = -Math.abs(b.vx) * bounce));
     hit = 'end';
   }
 
@@ -256,13 +474,13 @@ export function collideWithPerimeter(b: Body, allowGoalEntry: boolean, bounce = 
     const beyondBack = sign > 0 ? b.x + b.radius > back : b.x - b.radius < back;
     if (beyondBack) {
       b.x = back - sign * b.radius;
-      b.vx = -sign * Math.abs(b.vx) * bounce;
+      wall(-sign, 0, () => (b.vx = -sign * Math.abs(b.vx) * bounce));
       hit = 'goal-back';
     }
     if (Math.abs(b.z) + b.radius > HALF_GOAL_WIDTH) {
       const zSign = Math.sign(b.z) || 1;
       b.z = zSign * (HALF_GOAL_WIDTH - b.radius);
-      b.vz = -zSign * Math.abs(b.vz) * bounce;
+      wall(0, -zSign, () => (b.vz = -zSign * Math.abs(b.vz) * bounce));
       if (!hit) hit = 'goal-side';
     }
   }
@@ -281,16 +499,19 @@ export interface SweptHit {
 /**
  * Continuous collision detection for fast-moving balls to prevent tunneling.
  * Resolves against goal posts, perimeter walls, goal boundaries, and robots.
+ *
+ * A robot struck is a body with a mass and a velocity, not a wall: a keeper
+ * stepping into a shot sends it back harder than one standing still, and the
+ * shot knocks the keeper back by what the masses say.
  */
 export function sweptBallCollision(
-  ball: Body,
+  ball: Ball,
   x0: number,
   z0: number,
   x1: number,
   z1: number,
-  robots: readonly (Body & { id?: string })[] = [],
+  robots: readonly Striker[] = [],
   allowGoalEntry = false,
-  bounce = BALL_BOUNCE,
 ): SweptHit | null {
   const dx = x1 - x0;
   const dz = z1 - z0;
@@ -298,14 +519,14 @@ export function sweptBallCollision(
   if (distSq < 1e-9) return null;
 
   let earliestT = 1.0;
-  const result: { hit: SweptHit | null } = { hit: null };
+  const result: { hit: SweptHit | null; robot?: Striker } = { hit: null };
 
   const checkCircle = (
     cx: number,
     cz: number,
     radius: number,
     hitType: WallHit | 'robot',
-    robotId?: string,
+    robot?: Striker,
   ) => {
     const vx = x0 - cx;
     const vz = z0 - cz;
@@ -325,7 +546,8 @@ export function sweptBallCollision(
       const hitZ = z0 + t * dz;
       const nx = (hitX - cx) / rEff;
       const nz = (hitZ - cz) / rEff;
-      result.hit = { t, nx, nz, hit: hitType, robotId };
+      result.hit = { t, nx, nz, hit: hitType, robotId: robot?.id };
+      result.robot = robot;
     }
   };
 
@@ -404,18 +626,27 @@ export function sweptBallCollision(
   // 3. Robots
   for (let i = 0; i < robots.length; i++) {
     const r = robots[i]!;
-    checkCircle(r.x, r.z, r.radius, 'robot', r.id);
+    checkCircle(r.x, r.z, r.radius, 'robot', r);
   }
 
   const bestHit = result.hit;
   if (bestHit) {
     ball.x = x0 + bestHit.t * dx + bestHit.nx * 0.05;
     ball.z = z0 + bestHit.t * dz + bestHit.nz * 0.05;
-    const normal = ball.vx * bestHit.nx + ball.vz * bestHit.nz;
-    if (normal < 0) {
-      const r = bestHit.hit === 'robot' ? BALL_ROBOT_BOUNCE : bounce;
-      ball.vx -= (1 + r) * normal * bestHit.nx;
-      ball.vz -= (1 + r) * normal * bestHit.nz;
+    const robot = bestHit.hit === 'robot' ? result.robot : undefined;
+    if (robot) {
+      const [sx, sz] = pointVelocity(
+        robot,
+        ball.x - bestHit.nx * ball.radius,
+        ball.z - bestHit.nz * ball.radius,
+      );
+      const j = ballContact(ball, bestHit.nx, bestHit.nz, sx, sz, 1 / robot.mass);
+      if (j) {
+        robot.vx -= j.jx / robot.mass;
+        robot.vz -= j.jz / robot.mass;
+      }
+    } else {
+      ballContact(ball, bestHit.nx, bestHit.nz);
     }
     return bestHit;
   }
@@ -425,12 +656,6 @@ export function sweptBallCollision(
 
 /** Resolve overlap between two circular bodies, conserving momentum. */
 export function collideBodies(a: Body, b: Body, minDistDelta = 0, restitution = BODY_BOUNCE): boolean {
-  // If one body is an airborne ball elevated above bumper height (85 mm),
-  // it flies clear over the other body without horizontal impact.
-  if ((a.y !== undefined && a.y > 85) || (b.y !== undefined && b.y > 85)) {
-    return false;
-  }
-
   const dx = b.x - a.x;
   const dz = b.z - a.z;
   const minDist = a.radius + b.radius - minDistDelta;
@@ -476,10 +701,6 @@ export function collideBodies(a: Body, b: Body, minDistDelta = 0, restitution = 
  * many times would instead make collisions springy.
  */
 export function separateBodies(a: Body, b: Body, minDistDelta = 0): boolean {
-  if ((a.y !== undefined && a.y > 85) || (b.y !== undefined && b.y > 85)) {
-    return false;
-  }
-
   const dx = b.x - a.x;
   const dz = b.z - a.z;
   const minDist = a.radius + b.radius - minDistDelta;
